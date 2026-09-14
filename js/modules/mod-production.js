@@ -25,6 +25,26 @@ function productionOrderCanDelete(po) {
   return !!po && po.status === 'lsx_cho_san_xuat' && !po.approvedAt && !productionOrderStarted(po);
 }
 
+
+function productionOrderMaterialRequest(po) {
+  return (DB.productionMaterialRequests || []).find((r) => r.id === po?.materialRequestId || r.productionOrderId === po?.id) || null;
+}
+
+function productionOrderMaterialState(po) {
+  const bom = (Q.product(po?.productId)?.bom || []);
+  if (!bom.length && !(po?.materialPlan || []).length) return { code:'NOT_REQUIRED', label:'Không yêu cầu NVL', tone:'slate' };
+  const req = productionOrderMaterialRequest(po);
+  if (!req) return { code:'MISSING', label:'Chưa lập yêu cầu NVL', tone:'orange' };
+  if (req.status === 'ISSUED' || po?.materialIssuedAt) return { code:'ISSUED', label:'Đã cấp NVL', tone:'green', req };
+  if (req.status === 'APPROVED') return { code:'APPROVED', label:'Kho đã duyệt, chờ xuất', tone:'blue', req };
+  return { code:'WAITING', label:'Chờ Kho duyệt', tone:'orange', req };
+}
+
+function productionOrderFinishedReceipt(po) {
+  if (po?.finishedReceiptId) return (DB.goodsReceipts || []).find((r) => r.id === po.finishedReceiptId) || null;
+  return (DB.goodsReceipts || []).find((r) => (r.items || []).some((i) => i.productionOrderId === po?.id) || r.productionOrderId === po?.id) || null;
+}
+
 function openProductionOrderEditForm(id) {
   const po = Q.po(id); if (!po) return;
   const started = productionOrderStarted(po);
@@ -37,8 +57,8 @@ function openProductionOrderEditForm(id) {
     body: `<div class="form-grid cols-2">
       <div class="field"><label>Thành phẩm *</label><select class="inp" id="poEditProduct" ${started?'disabled':''}>${productOptions}</select></div>
       <div class="field"><label>Số lượng *</label><input class="inp right num" id="poEditQty" type="number" min="0.01" step="0.01" value="${Number(po.qty||0)}" ${started?'disabled':''}></div>
-      <div class="field"><label>Ngày bắt đầu</label><input class="inp" id="poEditStart" type="date" value="${esc(po.startDate||DB.today)}"></div>
-      <div class="field"><label>Deadline</label><input class="inp" id="poEditDeadline" type="date" value="${esc(po.deadline||DB.today)}"></div>
+      <div class="field"><label>Ngày bắt đầu</label><input class="inp" id="poEditStart" type="date" min="${currentDateYMD()}" value="${esc((po.startDate&&po.startDate>=currentDateYMD())?po.startDate:currentDateYMD())}"></div>
+      <div class="field"><label>Deadline</label><input class="inp" id="poEditDeadline" type="date" min="${currentDateYMD()}" value="${esc((po.deadline&&po.deadline>=currentDateYMD())?po.deadline:currentDateYMD())}"></div>
       <div class="field" style="grid-column:1/-1"><label>Người phụ trách</label><select class="inp" id="poEditManager">${managers}</select></div>
       <div class="field" style="grid-column:1/-1"><label>Ghi chú</label><textarea class="inp" id="poEditNote" rows="3">${esc(po.note||'')}</textarea></div>
     </div>`,
@@ -87,6 +107,7 @@ Views.production = function () {
       <td class="right">${rowActions([
         { act:'open-po', data:`data-id="${p.id}"`, icon:'fa-eye', title:'Xem chi tiết' },
         ...(materialRequest ? [{act:'pf-mr-view',data:`data-id="${materialRequest.id}"`,icon:'fa-boxes-packing',title:'Xem yêu cầu NVL'}] : (hasBom ? [{act:'po-material-request',data:`data-id="${p.id}"`,icon:'fa-boxes-packing',title:'Lập yêu cầu NVL theo BOM'}] : [])),
+        ...(p.status==='lsx_hoan_thanh' && !productionOrderFinishedReceipt(p) && Number(p.qcPass||p.qty||0)>0 ? [{act:'po-fg-receipt',data:`data-id="${p.id}"`,icon:'fa-box-open',title:'Nhập kho thành phẩm'}] : []),
         { act:'po-edit', data:`data-id="${p.id}"`, icon:'fa-pen', title:'Sửa lệnh sản xuất' },
         ...(!p.approvedAt && p.status==='lsx_cho_san_xuat' ? [{ act:'po-approve', data:`data-id="${p.id}"`, icon:'fa-check', title:'Duyệt lệnh sản xuất' }] : []),
         ...(productionOrderCanDelete(p) ? [{ act:'po-delete', data:`data-id="${p.id}"`, icon:'fa-trash', title:'Xóa lệnh sản xuất' }] : []),
@@ -143,7 +164,9 @@ Views['production-detail'] = function (params) {
   const lacking = check.filter((m) => !m.ok);
   const d = daysTo(p.deadline);
   const order = Q.order(p.orderId);
-  const materialRequest = (DB.productionMaterialRequests||[]).find(r => r.id===p.materialRequestId || r.productionOrderId===p.id);
+  const materialRequest = productionOrderMaterialRequest(p);
+  const materialState = productionOrderMaterialState(p);
+  const finishedReceipt = productionOrderFinishedReceipt(p);
   const productBom = (Q.product(p.productId)?.bom || []);
   const doneQty = p.stages.reduce((s, st) => s + st.qtyDone, 0);
   const totalHours = p.stages.reduce((s, st) => s + st.hours, 0);
@@ -156,6 +179,8 @@ Views['production-detail'] = function (params) {
     ${!p.approvedAt && p.status==='lsx_cho_san_xuat' ? `<button class="btn" data-act="po-approve" data-id="${p.id}"><i class="fa-solid fa-check"></i>Duyệt</button>` : ''}
     ${productionOrderCanDelete(p) ? `<button class="btn" data-act="po-delete" data-id="${p.id}"><i class="fa-solid fa-trash"></i>Xóa</button>` : ''}
     ${materialRequest ? `<button class="btn" data-act="pf-mr-view" data-id="${esc(materialRequest.id)}"><i class="fa-solid fa-boxes-packing"></i>Xem yêu cầu NVL</button>` : (productBom.length ? `<button class="btn" data-act="po-material-request" data-id="${esc(p.id)}"><i class="fa-solid fa-boxes-packing"></i>Lập yêu cầu NVL</button>` : '')}
+    ${p.status === 'lsx_hoan_thanh' && !finishedReceipt && Number(p.qcPass||p.qty||0)>0 ? `<button class="btn btn-success" data-act="po-fg-receipt" data-id="${p.id}"><i class="fa-solid fa-box-open"></i>Nhập kho thành phẩm</button>` : ''}
+    ${finishedReceipt ? `<button class="btn" data-act="inv-receipt-view" data-id="${esc(finishedReceipt.id)}"><i class="fa-solid fa-warehouse"></i>${esc(finishedReceipt.id)}</button>` : ''}
     ${p.status !== 'lsx_hoan_thanh' ? `<button class="btn btn-primary" data-act="po-advance" data-id="${p.id}"><i class="fa-solid fa-forward"></i>Cập nhật công đoạn</button>` : ''}
   `)}
 
@@ -175,6 +200,10 @@ Views['production-detail'] = function (params) {
           ${infoItem('Ngày bắt đầu', fmtDate(p.startDate))}
           ${infoItem('Deadline', `${fmtDate(p.deadline)} ${p.status !== 'lsx_hoan_thanh' ? (d < 0 ? `<span style="color:var(--red);font-weight:700">(trễ ${-d} ngày)</span>` : `<span style="color:${d <= 3 ? 'var(--orange)' : 'var(--text-3)'}">(còn ${d} ngày)</span>`) : ''}`)}
           ${infoItem('Người phụ trách', esc(Q.employeeName(p.managerId)))}
+          ${infoItem('Phê duyệt', p.approvedAt ? `<span class="badge green">Đã duyệt</span><div class="cell-sub">${esc(p.approvedByName||p.approvedBy||'')}</div>` : '<span class="badge orange">Chưa duyệt</span>')}
+          ${infoItem('Cấp nguyên liệu', `<span class="badge ${materialState.tone}">${esc(materialState.label)}</span>${materialState.req ? `<div class="cell-sub"><span class="code">${esc(materialState.req.id)}</span></div>` : ''}`)}
+          ${infoItem('Nguồn lệnh', p.planId ? `Kế hoạch <span class="code">${esc(p.planId)}</span>` : p.orderId ? `Đơn bán <span class="code">${esc(p.orderId)}</span>` : 'Tạo thủ công')}
+          ${infoItem('Nhập kho TP', finishedReceipt ? `<span class="badge green">Đã nhập</span><div class="cell-sub"><span class="code">${esc(finishedReceipt.id)}</span></div>` : (p.status==='lsx_hoan_thanh' ? '<span class="badge orange">Chờ nhập kho</span>' : '<span class="badge slate">Chưa đến bước</span>'))}
           ${infoItem('Tổng giờ máy', fmtDec(totalHours) + ' giờ')}
         </div>
       </div>
@@ -305,14 +334,43 @@ Views['production-detail'] = function (params) {
         }).join('')}
       </div>
     </div>
-    ${order ? `<div class="card-foot" style="display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end">
-      <button class="btn btn-sm" data-act="open-order" data-id="${order.id}"><i class="fa-solid fa-cart-flatbed"></i>Xem đơn hàng ${order.id}</button>
-      ${p.status === 'lsx_dang_qc' ? `<button class="btn btn-sm btn-success" data-act="po-qc" data-id="${p.id}"><i class="fa-solid fa-clipboard-check"></i>Nghiệm thu QC</button>` : ''}
+    ${(order || p.status === 'lsx_dang_qc') ? `<div class="card-foot" style="display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end">
+      ${order ? `<button class="btn btn-sm" data-act="open-order" data-id="${order.id}"><i class="fa-solid fa-cart-flatbed"></i>Xem đơn hàng ${order.id}</button>` : ''}
+      ${p.status === 'lsx_dang_qc' ? `<button class="btn btn-sm btn-success" data-act="po-qc" data-id="${p.id}"><i class="fa-solid fa-clipboard-check"></i>Ghi nhận kết quả QC</button>` : ''}
     </div>` : ''}
   </div>`;
 };
 
 /* ------------------------------------------ MODAL GHI NHẬN SẢN LƯỢNG */
+function openProductionReceiptModal(poId) {
+  const po = Q.po(poId); if (!po) return;
+  const existing = productionOrderFinishedReceipt(po);
+  if (existing) { Toast.info('Đã nhập kho thành phẩm', existing.id); return; }
+  if (po.status !== 'lsx_hoan_thanh') { Toast.warn('Lệnh chưa hoàn thành', 'Chỉ lệnh sản xuất đã hoàn thành mới được nhập kho thành phẩm.'); return; }
+  const qty = Number(po.qcPass || po.qty || 0);
+  if (!(qty > 0)) { Toast.warn('Không có sản lượng đạt', 'Không có thành phẩm đạt QC để nhập kho.'); return; }
+  const warehouses = (DB.warehouses || []).filter(w => w.type === 'FINISHED_GOODS' && w.status !== 'inactive');
+  if (!warehouses.length) { Toast.err('Chưa có Kho thành phẩm', 'Hãy khai báo ít nhất một kho FINISHED_GOODS trước khi nhập kho.'); return; }
+  const defaultWh = warehouses[0];
+  const locations = (DB.warehouseLocations || []).filter(l => warehouses.some(w => w.id === l.warehouseId) && l.status !== 'inactive');
+  const today = currentDateYMD();
+  Modal.open({
+    title: `Nhập kho thành phẩm · ${po.id}`,
+    sub: `${po.productName} · Sản lượng đạt QC ${fmtN(qty)} ${po.unit}`,
+    size: 'md',
+    body: `<div class="form-grid cols-2">
+      <div class="field"><label>Kho thành phẩm *</label><select class="inp" id="poFgWarehouse">${warehouses.map(w=>`<option value="${esc(w.id)}" ${w.id===defaultWh.id?'selected':''}>${esc(w.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Kệ / vị trí *</label><select class="inp" id="poFgLocation"><option value="">-- Chọn vị trí --</option>${locations.map(l=>`<option value="${esc(l.id)}">${esc(Q.warehouseName(l.warehouseId))} · ${esc(l.code||l.name||l.id)}</option>`).join('')}</select></div>
+      <div class="field"><label>Số lượng nhập *</label><input class="inp right num" id="poFgQty" type="number" min="0.0001" max="${qty}" step="0.0001" value="${qty}"></div>
+      <div class="field"><label>Mã lô thành phẩm *</label><input class="inp" id="poFgLot" value="LOT-${esc(po.id)}"></div>
+      <div class="field"><label>Ngày sản xuất</label><input class="inp" id="poFgMfg" type="date" min="${today}" value="${today}"></div>
+      <div class="field"><label>Hạn sử dụng</label><input class="inp" id="poFgExp" type="date" min="${today}" value="${addDays(today,7)}"></div>
+      <div class="field" style="grid-column:1/-1"><label>Ghi chú</label><textarea class="inp" id="poFgNote" rows="2">Nhập kho thành phẩm từ ${esc(po.id)}</textarea></div>
+    </div>`,
+    foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="po-fg-receipt-save" data-id="${esc(po.id)}"><i class="fa-solid fa-box-open"></i>Xác nhận nhập kho</button>`
+  });
+}
+
 function openStageModal(poId, index) {
   const p = Q.po(poId);
   const s = p.stages[index];

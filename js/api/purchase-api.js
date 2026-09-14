@@ -23,6 +23,7 @@ const PurchaseAPI = (() => {
   const localVersion = new Map();
   const lastRefresh = new Map();
   const REFRESH_TTL = 2 * 60 * 1000;
+  let booted = false;
 
   function versionOf(key) { return Number(localVersion.get(key) || 0); }
   function markLocalChange(keys) {
@@ -148,6 +149,8 @@ const PurchaseAPI = (() => {
   }
 
   async function bootstrap() {
+    if (booted) return true;
+    booted = true;
     const cached = readCache();
 
     // [PERFORMANCE] Bootstrap chỉ nạp cache/data.js. Không tự đọc toàn bộ 8 bảng
