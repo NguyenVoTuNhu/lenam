@@ -19,6 +19,7 @@ const ProductionAPI = (() => {
     productionOrders: 'PRODUCTION_ORDERS',
     productionPlans: 'PRODUCTION_PLANS',
     productionMaterialRequests: 'PRODUCTION_MATERIAL_REQUESTS',
+    productionFinalInspections: 'PRODUCTION_FINAL_INSPECTIONS',
   });
   const CACHE_KEY = 'lenam:production-cache:v2';
   const LEGACY_CACHE_KEY = 'lenam:production-cache:v1';
@@ -35,6 +36,7 @@ const ProductionAPI = (() => {
   DB.productionPlans = DB.productionPlans || [];
   DB.productionMaterialRequests = DB.productionMaterialRequests || [];
   DB.productionOrders = DB.productionOrders || [];
+  DB.productionFinalInspections = DB.productionFinalInspections || [];
 
   function clone(value) {
     return JSON.parse(JSON.stringify(value));
@@ -53,6 +55,7 @@ const ProductionAPI = (() => {
         productionOrders: clone(DB.productionOrders || []),
         productionPlans: clone(DB.productionPlans || []),
         productionMaterialRequests: clone(DB.productionMaterialRequests || []),
+        productionFinalInspections: clone(DB.productionFinalInspections || []),
         // Giữ trong cache local để tương thích bản cũ; server master BOM nằm ở products.
         productBoms: (DB.products || []).map(p => ({ id:p.id, bom:clone(p.bom || []) })),
         productRoutings: (DB.products || []).map(p => ({ id:p.id, routing:clone(p.routing || []) })),
@@ -68,6 +71,7 @@ const ProductionAPI = (() => {
     if (Array.isArray(state.productionOrders)) DB.productionOrders = state.productionOrders;
     if (Array.isArray(state.productionPlans)) DB.productionPlans = state.productionPlans;
     if (Array.isArray(state.productionMaterialRequests)) DB.productionMaterialRequests = state.productionMaterialRequests;
+    if (Array.isArray(state.productionFinalInspections)) DB.productionFinalInspections = state.productionFinalInspections;
     // Chỉ dùng để đọc dữ liệu v1. Các lần lưu mới không ghi BOM/routing ở đây nữa.
     if (Array.isArray(state.productBoms)) {
       state.productBoms.forEach(row => {
@@ -104,6 +108,18 @@ const ProductionAPI = (() => {
       });
     }
     return used;
+  }
+
+  function normalizeLegacySalesPlans() {
+    let changed = false;
+    (DB.productionPlans || []).forEach(plan => {
+      if (plan?.source === 'SALES_ORDER' && plan.status === 'WAITING_SALES_APPROVAL') {
+        plan.status = 'WAITING_APPROVAL';
+        plan.approvalSource = 'WAREHOUSE';
+        changed = true;
+      }
+    });
+    return changed;
   }
 
   function rememberBaseline() {
@@ -168,6 +184,7 @@ const ProductionAPI = (() => {
     bootPromise = Promise.resolve().then(() => {
       const cached = readCache();
       if (cached) applyCache(cached);
+      normalizeLegacySalesPlans();
       rememberBaseline();
       booted = true;
       if (cached) console.info('[ProductionAPI] Đã nạp cache sản xuất; chờ refresh theo màn hình đang mở.');
@@ -209,6 +226,7 @@ const ProductionAPI = (() => {
             productionOrders: JSON.stringify(DB.productionOrders || []),
             productionPlans: JSON.stringify(DB.productionPlans || []),
             productionMaterialRequests: JSON.stringify(DB.productionMaterialRequests || []),
+            productionFinalInspections: JSON.stringify(DB.productionFinalInspections || []),
           };
           serverApplied = applyLegacy(legacy);
           if (serverApplied) {
@@ -219,6 +237,7 @@ const ProductionAPI = (() => {
         }
       }
 
+      normalizeLegacySalesPlans();
       lastRefreshAt = Date.now();
       rememberBaseline();
       writeCache();

@@ -91,7 +91,7 @@ Views.reports = function () {
 /* --------------------------------------------------- BÁO CÁO SẢN XUẤT */
 Views['rp-product'] = function () {
   const pos = DB.productionOrders;
-  const done = pos.filter((p) => p.status === 'lsx_hoan_thanh');
+  const done = pos.filter((p) => ['lsx_hoan_thanh','lsx_da_nhap_kho'].includes(p.status));
   const onTime = done.filter((p) => {
     const last = p.stages[p.stages.length - 1];
     return !last.end || last.end <= p.deadline;
@@ -135,7 +135,7 @@ Views['rp-product'] = function () {
       [{ t: 'Mã LSX', w: '148px' }, { t: 'Sản phẩm' }, { t: 'Khách hàng', cls: 'hide-sm' }, { t: 'SL kế hoạch', cls: 'right' },
        { t: 'SL đã qua CĐ', cls: 'right hide-sm' }, { t: 'Công đoạn hiện tại' }, { t: 'Tiến độ', w: '150px' }, { t: 'Trạng thái', w: '130px' }],
       [...pos].sort((a, b) => Q.progress(b) - Q.progress(a)).map((p) => `
-        <tr class="clickable" data-act="open-po" data-id="${p.id}">
+        <tr class="clickable" data-act="open-production-order" data-id="${p.id}">
           <td><span class="code">${p.id}</span></td>
           <td>${cell2(esc(p.productName), esc(p.orderId))}</td>
           <td class="hide-sm">${esc(Q.customerName(p.customerId))}</td>

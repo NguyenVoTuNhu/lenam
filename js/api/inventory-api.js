@@ -91,6 +91,7 @@ const InventoryAPI = (() => {
     return { rows: [...map.values()], duplicates };
   }
 
+
   function hasData(data) {
     return Object.keys(TABLES).some(key => Array.isArray(data?.[key]) && data[key].length > 0);
   }
@@ -481,6 +482,7 @@ const InventoryAPI = (() => {
     } else {
       console.info('[InventoryAPI] Chưa có cache; dùng dữ liệu hiện tại.');
     }
+
     return true;
   }
 
@@ -540,8 +542,7 @@ const InventoryAPI = (() => {
     }
     if (hasData(data)) {
       apply(data);
-      Object.keys(TABLES).forEach(key => lastRefresh.set(key, Date.now()));
-      writeCache(data);
+      Object.keys(TABLES).forEach(key => lastRefresh.set(key, Date.now()));      writeCache(snapshotCurrentDb());
     }
     return data;
   }

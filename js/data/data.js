@@ -445,12 +445,10 @@ const WAREHOUSE_CONFIG = {
 const SUBCONTRACTING_CONFIG = {
   subcontractingTabs: [
     { id: 'subcontracting', label: 'Tổng quan', tab: 'dashboard' },
-    { id: 'subcontracting', label: 'Đơn gia công', tab: 'orders' },
-    { id: 'subcontracting', label: 'Xuất nguyên liệu', tab: 'issue' },
-    { id: 'subcontracting', label: 'Theo dõi tiến độ', tab: 'progress' },
-    { id: 'subcontracting', label: 'Nhận hàng & chất lượng', tab: 'receive' },
-    { id: 'subcontracting', label: 'Công nợ', tab: 'debt' },
+    { id: 'subcontracting', label: 'Kế hoạch gia công', tab: 'orders' },
+    { id: 'subcontracting', label: 'Đối chiếu công nợ', tab: 'debt' },
     { id: 'subcontracting', label: 'Đối tác gia công', tab: 'partners' }
+    // Tạm ẩn: Báo cáo gia công. Nhận hàng hoàn thành nằm trong chi tiết kế hoạch.
   ]
 };
 
@@ -524,12 +522,15 @@ const STATUS = {
   dh_dang_san_xuat:{ label: 'Đang sản xuất', tone: 'blue'   },
   dh_hoan_thanh:   { label: 'Hoàn thành',    tone: 'green'  },
   dh_da_giao:      { label: 'Đã giao',       tone: 'teal'   },
+  dh_hoan_tat:      { label: 'Hoàn thành',     tone: 'green'  },
   dh_da_huy:       { label: 'Đã hủy',        tone: 'red'    },
   // Lệnh sản xuất
+  lsx_cho_duyet:   { label: 'Chờ duyệt',     tone: 'orange' },
   lsx_cho_san_xuat:{ label: 'Chờ sản xuất',  tone: 'slate'  },
   lsx_dang_san_xuat:{label: 'Đang sản xuất', tone: 'blue'   },
   lsx_dang_qc:     { label: 'Đang QC',       tone: 'orange' },
   lsx_hoan_thanh:  { label: 'Hoàn thành',    tone: 'green'  },
+  lsx_da_nhap_kho: { label: 'Đã nhập kho',   tone: 'teal'   },
   lsx_tam_dung:    { label: 'Tạm dừng',      tone: 'red'    },
   // Vật tư
   vt_du_ton:       { label: 'Đủ tồn',        tone: 'green'  },
@@ -696,25 +697,25 @@ const PRODUCTS = [
  * -------------------------------------------------------------------------*/
 const MATERIAL_ROWS = [
   ['VT-001','Đậu nành nguyên hạt (nhập khẩu Mỹ)', 'Nguyên liệu chính','Kg', 2500, 800,'Kho Khô - Kệ A1',  22000,'NCC-01'],
-  ['VT-002','Thạch cao thực phẩm (CaSO4)',         'Chất đông tụ',     'Kg',  180, 50, 'Kho Khô - Kệ B1',  85000,'NCC-02'],
-  ['VT-003','Muối Nigari (MgCl2 tinh khiết)',      'Chất đông tụ',     'Kg',   95, 30, 'Kho Khô - Kệ B2', 180000,'NCC-02'],
-  ['VT-004','Dầu đậu nành tinh luyện',             'Dầu chiên',        'Lít', 320, 100,'Kho Khô - Kệ A2',  38000,'NCC-03'],
-  ['VT-005','Đường cát trắng (đường kính)',         'Phụ gia',          'Kg',  450, 100,'Kho Khô - Kệ A3',  22000,'NCC-04'],
-  ['VT-006','Gừng tươi',                           'Phụ gia',          'Kg',   28,  15,'Kho Mát - Kệ C1',  35000,'NCC-04'],
-  ['VT-007','Muối ăn tinh (muối i-ốt)',             'Phụ gia',          'Kg',  120, 30, 'Kho Khô - Kệ A4',   8000,'NCC-04'],
+  ['VT-002','Thạch cao thực phẩm (CaSO4)',         'Chất đông tụ',     'Kg',  500, 50, 'Kho Khô - Kệ B1',  85000,'NCC-02'],
+  ['VT-003','Muối Nigari (MgCl2 tinh khiết)',      'Chất đông tụ',     'Kg',  500, 30, 'Kho Khô - Kệ B2', 180000,'NCC-02'],
+  ['VT-004','Dầu đậu nành tinh luyện',             'Dầu chiên',        'Lít', 500, 100,'Kho Khô - Kệ A2',  38000,'NCC-03'],
+  ['VT-005','Đường cát trắng (đường kính)',         'Phụ gia',          'Kg',  500, 100,'Kho Khô - Kệ A3',  22000,'NCC-04'],
+  ['VT-006','Gừng tươi',                           'Phụ gia',          'Kg',  500,  15,'Kho Mát - Kệ C1',  35000,'NCC-04'],
+  ['VT-007','Muối ăn tinh (muối i-ốt)',             'Phụ gia',          'Kg',  500, 30, 'Kho Khô - Kệ A4',   8000,'NCC-04'],
   ['VT-008','Hộp nhựa PP 400g có nắp',             'Bao bì',           'Cái',18000,5000,'Kho Phụ - Kệ D1',  1800,'NCC-05'],
   ['VT-009','Túi PE thực phẩm 200g',               'Bao bì',           'Túi',24000,6000,'Kho Phụ - Kệ D2',   500,'NCC-05'],
   ['VT-010','Ly nhựa dùng 1 lần 250ml + nắp',      'Bao bì',           'Bộ', 12000,3000,'Kho Phụ - Kệ D3',  1200,'NCC-05'],
   ['VT-011','Chai PET 500ml + nắp vặn',             'Bao bì',           'Cái', 8500,2000,'Kho Phụ - Kệ D4',  3200,'NCC-05'],
   ['VT-012','Nhãn dán (label) đậu hủ non',          'Bao bì',           'Tờ', 25000,8000,'Kho Phụ - Kệ D5',   200,'NCC-06'],
-  ['VT-013','Màng co nhiệt (shrink film)',           'Bao bì',           'Kg',   85, 20, 'Kho Phụ - Kệ D6',  48000,'NCC-06'],
+  ['VT-013','Màng co nhiệt (shrink film)',           'Bao bì',           'Kg',  500, 20, 'Kho Phụ - Kệ D6',  48000,'NCC-06'],
   ['VT-014','Thùng carton 60×40×30cm',              'Bao bì',           'Cái', 1200, 300,'Kho Phụ - Kệ D7',  12000,'NCC-06'],
-  ['VT-015','Nước lọc tinh khiết (bồn 1000L)',      'Nước',             'Lít',  0,   0, 'Bể nước SX',          50,'NCC-07'],
-  ['VT-016','Chất tẩy rửa thực phẩm (NaOH 3%)',     'Vệ sinh CN',       'Kg',   60, 20, 'Kho Hóa chất',   145000,'NCC-08'],
-  ['VT-017','Cồn công nghiệp 70° khử trùng',        'Vệ sinh CN',       'Lít',  80, 25, 'Kho Hóa chất',    52000,'NCC-08'],
-  ['VT-018','Đá lạnh (nước đá cây)',                 'Phụ trợ',          'Kg',    0,  0, 'Phòng lạnh',       8000,'NCC-09'],
-  ['VT-019','Thịt heo xay (nhồi đậu hủ)',            'Nguyên liệu chính','Kg',  120, 40,'Kho Mát - Kệ C2',  95000,'NCC-10'],
-  ['VT-020','Hành lá tươi',                          'Phụ gia',          'Kg',   15,  5, 'Kho Mát - Kệ C3',  25000,'NCC-04'],
+  ['VT-015','Nước lọc tinh khiết (bồn 1000L)',      'Nước',             'Lít',500,   0, 'Bể nước SX',          50,'NCC-07'],
+  ['VT-016','Chất tẩy rửa thực phẩm (NaOH 3%)',     'Vệ sinh CN',       'Kg',  500, 20, 'Kho Hóa chất',   145000,'NCC-08'],
+  ['VT-017','Cồn công nghiệp 70° khử trùng',        'Vệ sinh CN',       'Lít', 500, 25, 'Kho Hóa chất',    52000,'NCC-08'],
+  ['VT-018','Đá lạnh (nước đá cây)',                 'Phụ trợ',          'Kg',  500,  0, 'Phòng lạnh',       8000,'NCC-09'],
+  ['VT-019','Thịt heo xay (nhồi đậu hủ)',            'Nguyên liệu chính','Kg',  500, 40,'Kho Mát - Kệ C2',  95000,'NCC-10'],
+  ['VT-020','Hành lá tươi',                          'Phụ gia',          'Kg',  500,  5, 'Kho Mát - Kệ C3',  25000,'NCC-04'],
 ];
 
 /* ---------------------------------------------------------------------------
@@ -738,14 +739,6 @@ const SUPPLIERS = [
  * -------------------------------------------------------------------------*/
 const DEPARTMENTS = [
   'Ban giám đốc','Kinh doanh','Sản xuất','QC/ATTP','Kho vận','Mua hàng','Kế toán','Hành chính - Nhân sự','Bảo trì - Vệ sinh',
-];
-
-/** Loại hợp đồng lao động áp dụng cho hồ sơ nhân sự */
-const EMPLOYEE_CONTRACT_TYPES = [
-  'Không xác định thời hạn',
-  'Xác định thời hạn',
-  'Thời vụ / theo công việc',
-  'Thử việc',
 ];
 
 const KEY_EMPLOYEES = [
@@ -834,20 +827,6 @@ function buildEmployees() {
       e.position.includes('Kỹ thuật viên') ? 17 : 12;
     e.salary = (base + Rand.int(0, 4)) * 1000000;
   });
-
-  // Loại hợp đồng lao động: nhân sự chủ chốt gắn bó lâu năm mặc định ký
-  // hợp đồng không xác định thời hạn; người đang thử việc luôn có loại
-  // hợp đồng "Thử việc" khớp với trạng thái làm việc; còn lại random có seed.
-  list.forEach((e) => {
-    if (e.status === 'ns_thu_viec') e.contractType = 'Thử việc';
-    else if (KEY_EMPLOYEES.some((row) => row[0] === e.id)) e.contractType = 'Không xác định thời hạn';
-    else e.contractType = Rand.pick(['Không xác định thời hạn', 'Không xác định thời hạn', 'Xác định thời hạn', 'Xác định thời hạn', 'Thời vụ / theo công việc']);
-  });
-
-  // Khóa/ngừng sử dụng: cờ độc lập với trạng thái làm việc — nhân sự đã
-  // nghỉ việc mặc định bị ngừng sử dụng, các trường hợp khác vẫn đang dùng.
-  list.forEach((e) => { e.active = e.status !== 'ns_nghi_viec'; });
-
   return list;
 }
 
@@ -1098,7 +1077,6 @@ const DB = {
   suppliers: SUPPLIERS,
   workshopNames: ['Ngâm đậu', 'Xay — Lọc', 'Nấu sữa', 'Đông tụ', 'Ép khuôn', 'Cắt — Đóng gói', 'QC — ATTP', 'Hoàn thành'],
   departments: DEPARTMENTS,
-  contractTypes: EMPLOYEE_CONTRACT_TYPES,
   roles: ROLES,
   statusMap: STATUS,
   stageNames: PO_STAGES,
@@ -1691,7 +1669,8 @@ DB.warehouseLocations = [
 
   // Kho phụ trợ
   { id: 'LOC-009', warehouseId: 'WH-005', code: 'STORE-M1', name: 'Tủ mát M1', parentLocation: '', locationType: 'SHELF', capacity: 1000, currentUsage: 350, status: 'active' },
-  { id: 'LOC-010', warehouseId: 'WH-006', code: 'DEF-D1', name: 'Kệ D1 - Chờ xử lý', parentLocation: '', locationType: 'SHELF', capacity: 1000, currentUsage: 50, status: 'active' }
+  { id: 'LOC-010', warehouseId: 'WH-006', code: 'DEF-D1', name: 'Kệ D1 - Chờ xử lý', parentLocation: '', locationType: 'SHELF', capacity: 1000, currentUsage: 50, status: 'active' },
+  { id: 'LOC-023', warehouseId: 'WH-007', code: 'RET-R1', name: 'Kệ R1 - Hàng khách trả', parentLocation: '', locationType: 'SHELF', capacity: 2000, currentUsage: 0, status: 'active' }
 ];
 
 /* ---- Danh mục Lô sản phẩm / nguyên liệu ---- */
@@ -1721,13 +1700,13 @@ DB.inventory = [
   { productId: 'VT-001', warehouseId: 'WH-001', locationId: 'LOC-001', lotId: 'LOT-VT001-002', qtyOnHand: 500, qtyReserved: 0, qtyAvailable: 500, unit: 'Kg', lastUpdated: '2026-08-14 10:00' },
   
   // Chất đông tụ
-  { productId: 'VT-002', warehouseId: 'WH-001', locationId: 'LOC-002', lotId: 'LOT-VT002-001', qtyOnHand: 180, qtyReserved: 0, qtyAvailable: 180, unit: 'Kg', lastUpdated: '2026-08-14 10:00' },
-  { productId: 'VT-003', warehouseId: 'WH-001', locationId: 'LOC-003', lotId: 'LOT-VT003-001', qtyOnHand: 95, qtyReserved: 0, qtyAvailable: 95, unit: 'Kg', lastUpdated: '2026-08-14 10:00' },
+  { productId: 'VT-002', warehouseId: 'WH-001', locationId: 'LOC-002', lotId: 'LOT-VT002-001', qtyOnHand: 500, qtyReserved: 0, qtyAvailable: 500, unit: 'Kg', lastUpdated: '2026-08-14 10:00' },
+  { productId: 'VT-003', warehouseId: 'WH-001', locationId: 'LOC-003', lotId: 'LOT-VT003-001', qtyOnHand: 500, qtyReserved: 0, qtyAvailable: 500, unit: 'Kg', lastUpdated: '2026-08-14 10:00' },
   
   // Dầu ăn
-  { productId: 'VT-004', warehouseId: 'WH-001', locationId: 'LOC-004', lotId: 'LOT-VT004-001', qtyOnHand: 320, qtyReserved: 80, qtyAvailable: 240, unit: 'Lít', lastUpdated: '2026-08-14 10:00' },
+  { productId: 'VT-004', warehouseId: 'WH-001', locationId: 'LOC-004', lotId: 'LOT-VT004-001', qtyOnHand: 500, qtyReserved: 0, qtyAvailable: 500, unit: 'Lít', lastUpdated: '2026-08-14 10:00' },
   { productId: 'VT-005', warehouseId: 'WH-008', locationId: 'LOC-013', lotId: 'LOT-VT005-001', qtyOnHand: 760, qtyReserved: 100, qtyAvailable: 660, unit: 'Kg', lastUpdated: '2026-08-28 09:10' },
-  { productId: 'VT-007', warehouseId: 'WH-008', locationId: 'LOC-014', lotId: 'LOT-VT007-001', qtyOnHand: 420, qtyReserved: 40, qtyAvailable: 380, unit: 'Kg', lastUpdated: '2026-08-28 09:15' },
+  { productId: 'VT-007', warehouseId: 'WH-008', locationId: 'LOC-014', lotId: 'LOT-VT007-001', qtyOnHand: 500, qtyReserved: 0, qtyAvailable: 500, unit: 'Kg', lastUpdated: '2026-08-28 09:15' },
   
   // Thành phẩm đậu hủ non
   { productId: 'SP-001', warehouseId: 'WH-004', locationId: 'LOC-007', lotId: 'LOT-SP001-001', qtyOnHand: 500, qtyReserved: 100, qtyAvailable: 400, unit: 'Hộp', lastUpdated: '2026-08-27 16:00' },
@@ -1741,6 +1720,18 @@ DB.inventory = [
   // Sữa đậu nành cửa hàng
   { productId: 'SP-006', warehouseId: 'WH-005', locationId: 'LOC-009', lotId: 'LOT-SP006-001', qtyOnHand: 150, qtyReserved: 0, qtyAvailable: 150, unit: 'Chai', lastUpdated: '2026-08-27 16:30' }
 ];
+
+
+/* Tồn test cố định để kiểm thử sản xuất. Đây chỉ là dữ liệu seed của source,
+ * KHÔNG có cơ chế tự bù lại sau refresh / sau khi xuất kho. */
+[
+  ['VT-006','Kg'],['VT-008','Cái'],['VT-009','Túi'],['VT-010','Bộ'],['VT-011','Cái'],['VT-012','Tờ'],
+  ['VT-013','Kg'],['VT-014','Cái'],['VT-015','Lít'],['VT-016','Kg'],['VT-017','Lít'],['VT-018','Kg'],['VT-019','Kg'],['VT-020','Kg']
+].forEach(([productId,unit],idx)=>{
+  const lotId=`LOT-SEED-${productId}`;
+  DB.inventoryLots.push({ id:lotId, lotNumber:`TEST-${productId}-500`, productId, productionOrderId:'', mfgDate:'2026-09-14', expiryDate:'2027-12-31', supplierLot:'TEST-STOCK', supplierId:(DB.materials.find(m=>m.id===productId)||{}).supplier||'', qcStatus:'PASSED', status:'active', createdAt:'2026-09-14 08:00' });
+  DB.inventory.push({ productId, warehouseId:'WH-001', locationId:'LOC-001', lotId, qtyOnHand:500, qtyReserved:0, qtyAvailable:500, unit, lastUpdated:'2026-09-14 08:00' });
+});
 
 /* Tồn mẫu phân bổ tại nhiều kho vật lý để kiểm thử chuyển kho nội bộ. */
 DB.inventory.push(
@@ -2427,11 +2418,14 @@ const Q = {
   materialCheck: (po) => {
     const p = Q.product(po.productId);
     if (!p) return [];
-    return p.bom.map(([mid, per]) => {
+    return p.bom.map(([mid, per, lossPct = 0]) => {
       const m = Q.material(mid);
-      const need = Math.round(per * po.qty * 100) / 100;
+      const baseNeed = Number(per || 0) * Number(po.qty || 0);
+      const loss = Math.max(0, Math.min(99.99, Number(lossPct || 0)));
+      const needRaw = loss > 0 ? baseNeed / (1 - loss / 100) : baseNeed;
+      const need = Math.round(needRaw * 100) / 100;
       return {
-        materialId: mid, name: m.name, unit: m.unit, per,
+        materialId: mid, name: m.name, unit: m.unit, per, lossPct: loss,
         need, stock: m.stock,
         lack: Math.max(0, Math.round((need - m.stock) * 100) / 100),
         ok: m.stock >= need,
@@ -2479,7 +2473,7 @@ const Q = {
 
   /** Lệnh sản xuất trễ hoặc sắp trễ deadline */
   lateProduction: () => DB.productionOrders.filter((p) => {
-    if (p.status === 'lsx_hoan_thanh') return false;
+    if (['lsx_hoan_thanh','lsx_da_nhap_kho'].includes(p.status)) return false;
     const diff = (new Date(p.deadline) - new Date(TODAY)) / 86400000;
     return diff <= 5;
   }),
