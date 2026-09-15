@@ -740,6 +740,14 @@ const DEPARTMENTS = [
   'Ban giám đốc','Kinh doanh','Sản xuất','QC/ATTP','Kho vận','Mua hàng','Kế toán','Hành chính - Nhân sự','Bảo trì - Vệ sinh',
 ];
 
+/** Loại hợp đồng lao động áp dụng cho hồ sơ nhân sự */
+const EMPLOYEE_CONTRACT_TYPES = [
+  'Không xác định thời hạn',
+  'Xác định thời hạn',
+  'Thời vụ / theo công việc',
+  'Thử việc',
+];
+
 const KEY_EMPLOYEES = [
   ['NV-001','Hà Minh Tú','Ban giám đốc','Giám đốc điều hành','0909 000 001','2016-01-04','ns_dang_lam','Nữ'],
   ['NV-002','Nguyễn Đức Anh','Kinh doanh','Trưởng phòng Kinh doanh','0909 000 002','2017-03-15','ns_dang_lam','Nam'],
@@ -826,6 +834,20 @@ function buildEmployees() {
       e.position.includes('Kỹ thuật viên') ? 17 : 12;
     e.salary = (base + Rand.int(0, 4)) * 1000000;
   });
+
+  // Loại hợp đồng lao động: nhân sự chủ chốt gắn bó lâu năm mặc định ký
+  // hợp đồng không xác định thời hạn; người đang thử việc luôn có loại
+  // hợp đồng "Thử việc" khớp với trạng thái làm việc; còn lại random có seed.
+  list.forEach((e) => {
+    if (e.status === 'ns_thu_viec') e.contractType = 'Thử việc';
+    else if (KEY_EMPLOYEES.some((row) => row[0] === e.id)) e.contractType = 'Không xác định thời hạn';
+    else e.contractType = Rand.pick(['Không xác định thời hạn', 'Không xác định thời hạn', 'Xác định thời hạn', 'Xác định thời hạn', 'Thời vụ / theo công việc']);
+  });
+
+  // Khóa/ngừng sử dụng: cờ độc lập với trạng thái làm việc — nhân sự đã
+  // nghỉ việc mặc định bị ngừng sử dụng, các trường hợp khác vẫn đang dùng.
+  list.forEach((e) => { e.active = e.status !== 'ns_nghi_viec'; });
+
   return list;
 }
 
@@ -1076,6 +1098,7 @@ const DB = {
   suppliers: SUPPLIERS,
   workshopNames: ['Ngâm đậu', 'Xay — Lọc', 'Nấu sữa', 'Đông tụ', 'Ép khuôn', 'Cắt — Đóng gói', 'QC — ATTP', 'Hoàn thành'],
   departments: DEPARTMENTS,
+  contractTypes: EMPLOYEE_CONTRACT_TYPES,
   roles: ROLES,
   statusMap: STATUS,
   stageNames: PO_STAGES,

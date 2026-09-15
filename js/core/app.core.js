@@ -38,6 +38,9 @@ function enforceBusinessDateInputs(scope = document) {
   const today = currentDateYMD();
   if (!scope || !scope.querySelectorAll) return;
   scope.querySelectorAll('input[type="date"]').forEach((el) => {
+    // Một số trường lưu ngày quá khứ hợp lệ theo nghiệp vụ (vd: ngày vào làm
+    // của nhân sự cũ) — đánh dấu data-allow-past="1" để không bị ép về hôm nay.
+    if (el.dataset.allowPast === '1') return;
     el.min = today;
     const isFilter = !!el.dataset.f;
     if (!isFilter && (!el.value || el.value < today)) el.value = today;
@@ -172,7 +175,8 @@ const Auth = {
       'crm-order-approve':'SALES_APPROVE','crm-order-reject':'SALES_APPROVE',
       'crm-order-issue':'INVENTORY_OPERATE','crm-order-issue-confirm':'INVENTORY_OPERATE','inv-sales-issue-confirm':'INVENTORY_OPERATE',
       'order-status-save':'SALES_ORDER_OPERATE',
-      'new-user':'ADMIN_USER_MANAGE','user-toggle':'ADMIN_USER_MANAGE','user-role':'ADMIN_USER_MANAGE','user-role-save':'ADMIN_USER_MANAGE'
+      'new-user':'ADMIN_USER_MANAGE','user-toggle':'ADMIN_USER_MANAGE','user-role':'ADMIN_USER_MANAGE','user-role-save':'ADMIN_USER_MANAGE',
+      'new-employee':'HR_OPERATE','employee-edit':'HR_OPERATE','employee-save':'HR_OPERATE','employee-toggle-active':'HR_OPERATE','employee-import':'HR_OPERATE'
     };
     return map[action] || null;
   }
@@ -619,14 +623,11 @@ const NAV = [
       icon: 'fa-users',
       children: [
         { id: 'dashboard', label: 'Tổng quan nhân sự' },
-        { id: 'profile', label: 'Hồ sơ nhân sự' },
         { id: 'attendance', label: 'Chấm công' },
         { id: 'shifts', label: 'Phân ca' },
         { id: 'kpi', label: 'KPI' },
         { id: 'evaluations', label: 'Đánh giá' },
         { id: 'payroll', label: 'Tính lương' },
-        { id: 'labour_cost', label: 'Chi phí nhân công' },
-        { id: 'reports', label: 'Báo cáo nhân sự' }
       ]
     },
     {
