@@ -51,6 +51,13 @@ const KIO_CONFIG = Object.freeze({
     crmActivities: 'lenam_crm_activities',
   }),
 
+  // LOGISTICS & FLEET — persistence thật trên KIO; localStorage chỉ là cache.
+  logisticsTables: Object.freeze({
+    vehicles: 'lenam_logistics_vehicles',
+    drivers: 'lenam_logistics_drivers',
+    deliveries: 'lenam_logistics_deliveries',
+    maintenance: 'lenam_logistics_maintenance',
+  }),
 
 
   // AUTH / PHÂN QUYỀN / AUDIT — chỉ những actor thực sự thao tác ERP mới có tài khoản.
@@ -71,6 +78,7 @@ const KIO_CONFIG = Object.freeze({
     inventoryDemoSeed: 'lenam:kio:inventory-demo-seeded:20260910-refactor1',
     crmCache: 'lenam:kio:crm-cache:v1',
     crmDemoSeed: 'lenam:kio:crm-demo-seeded:20260911-crm-tables-v1',
+    logisticsCache: 'lenam_logistics_v2',
     systemCache: 'lenam:kio:system-cache:v1',
     authSession: 'lenam:auth:session:v1',
   }),

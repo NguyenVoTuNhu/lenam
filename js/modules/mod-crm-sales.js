@@ -16,6 +16,8 @@ const SalesCRM = (() => {
     dh_cho_san_xuat:  { label: 'Chờ thành phẩm', tone: 'orange' },
     dh_dang_san_xuat: { label: 'Đang sản xuất', tone: 'blue' },
     dh_hoan_thanh:    { label: 'Sẵn sàng xuất bán', tone: 'green' },
+    dh_cho_van_chuyen:{ label: 'Chờ vận chuyển', tone: 'indigo' },
+    dh_dang_giao:     { label: 'Đang giao', tone: 'blue' },
     dh_da_giao:       { label: 'Đã giao', tone: 'teal' },
     dh_hoan_tat:       { label: 'Hoàn thành', tone: 'green' },
     dh_tu_choi:       { label: 'Từ chối', tone: 'red' },
@@ -427,6 +429,9 @@ function openOrderForm(customerId = '', opportunityId = '') {
         <div class="field"><label>Nhân viên sale</label><select class="inp" id="crmOrderOwner"><option value="${esc(DB.currentUser?.id||'NV-001')}">${esc(Q.employeeName(DB.currentUser?.id)||'Người hiện tại')}</option>${ownerOptions}</select></div>
         <div class="field"><label>Ngày đặt hàng <b>*</b></label><input class="inp" type="date" id="crmOrderDate" value="${currentDateYMD()}" min="${currentDateYMD()}"></div>
         <div class="field"><label>Ngày giao dự kiến <b>*</b></label><input class="inp" type="date" id="crmOrderDue" value="${currentDateYMD()}" min="${currentDateYMD()}"></div>
+        <div class="field" style="grid-column:1/-1"><label>Địa chỉ giao hàng <b>*</b></label><input class="inp" id="crmDeliveryAddress" placeholder="Địa chỉ nhận hàng theo đơn"></div>
+        <div class="field"><label>Người nhận</label><input class="inp" id="crmDeliveryRecipient" placeholder="Tên người nhận"></div>
+        <div class="field"><label>Số điện thoại nhận hàng</label><input class="inp" id="crmDeliveryPhone" placeholder="SĐT người nhận"></div>
       </div>
       ${opportunityId?`<input type="hidden" id="crmOrderOpportunity" value="${esc(opportunityId)}"><div class="note-box" style="margin-bottom:12px">Tạo từ cơ hội <b>${esc(opportunityId)}</b>${opp?` · ${esc(SalesCRM.customerNameForOpp(opp))}`:''}</div>`:'<input type="hidden" id="crmOrderOpportunity" value="">'}
       <div class="form-sec-title"><i class="fa-solid fa-box"></i>Thành phẩm bán</div>
@@ -440,12 +445,26 @@ function openOrderForm(customerId = '', opportunityId = '') {
       </div>`}
       <div class="grid g-2" style="margin-top:14px">
         <div class="field"><label>VAT (%)</label><input class="inp right num" type="number" id="crmOrderVat" min="0" max="20" value="10"></div>
-        <div class="field"><label>Ghi chú</label><input class="inp" id="crmOrderNote" placeholder="Điều kiện giao hàng / ghi chú cho khách"></div>
+        <div class="field"><label>Phí giao hàng khách trả</label><input class="inp right num" type="number" id="crmShippingFee" min="0" step="1000" value="0"><div class="cell-sub">Khoản này được cộng vào tổng thanh toán của đơn hàng.</div></div>
+        <div class="field"><label>Ghi chú đơn hàng</label><input class="inp" id="crmOrderNote" placeholder="Ghi chú bán hàng"></div>
+        <div class="field"><label>Ghi chú giao hàng</label><input class="inp" id="crmDeliveryNote" placeholder="Giờ nhận, cổng giao, yêu cầu liên hệ…"></div>
       </div>
       <div class="note-box"><b>Nguyên tắc kho:</b> Có thể đặt cả thành phẩm đang hết/thiếu tồn. Tạo đơn không trừ tồn. Sau khi đơn được duyệt, Kho kiểm tra tồn: phần thiếu sẽ xuất hiện tại <b>Kho → Kế hoạch sản xuất → Nhu cầu từ đơn bán</b> để lập kế hoạch sản xuất; phần đủ tồn chỉ trừ khi Kho xác nhận xuất bán.</div>
     </form>`,
     foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="crm-order-save" ${sellableProducts.length ? '' : 'disabled'}><i class="fa-solid fa-floppy-disk"></i>Lưu đơn hàng</button>`
   });
+  const fillDeliveryFromCustomer = () => {
+    const c = Q.customer(document.querySelector('#crmOrderCustomer')?.value || '');
+    const addr = document.querySelector('#crmDeliveryAddress');
+    const recipient = document.querySelector('#crmDeliveryRecipient');
+    const phone = document.querySelector('#crmDeliveryPhone');
+    if (addr && (!addr.value || addr.dataset.auto === '1')) { addr.value = c?.address || ''; addr.dataset.auto = '1'; }
+    if (recipient && (!recipient.value || recipient.dataset.auto === '1')) { recipient.value = c?.contact || c?.name || ''; recipient.dataset.auto = '1'; }
+    if (phone && (!phone.value || phone.dataset.auto === '1')) { phone.value = c?.phone || ''; phone.dataset.auto = '1'; }
+  };
+  document.querySelector('#crmOrderCustomer')?.addEventListener('change', fillDeliveryFromCustomer);
+  ['#crmDeliveryAddress','#crmDeliveryRecipient','#crmDeliveryPhone'].forEach(sel => document.querySelector(sel)?.addEventListener('input', ev => { ev.currentTarget.dataset.auto = '0'; }));
+  fillDeliveryFromCustomer();
 }
 
 function crmOrderLineHTML(options, first=false) {
@@ -480,11 +499,14 @@ function openOrderEditForm(id) {
       <div class="field"><label>Nhân viên sale</label><select class="inp" id="crmOrderOwner">${ownerOptions}</select></div>
       <div class="field"><label>Ngày đặt hàng *</label><input class="inp" type="date" id="crmOrderDate" value="${esc(o.date||currentDateYMD())}"></div>
       <div class="field"><label>Ngày giao dự kiến *</label><input class="inp" type="date" id="crmOrderDue" value="${esc(o.dueDate||currentDateYMD())}"></div>
+      <div class="field" style="grid-column:1/-1"><label>Địa chỉ giao hàng *</label><input class="inp" id="crmDeliveryAddress" value="${esc(o.deliveryAddress||Q.customer(o.customerId)?.address||'')}"></div>
+      <div class="field"><label>Người nhận</label><input class="inp" id="crmDeliveryRecipient" value="${esc(o.deliveryRecipient||Q.customer(o.customerId)?.contact||Q.customerName(o.customerId)||'')}"></div>
+      <div class="field"><label>Số điện thoại nhận hàng</label><input class="inp" id="crmDeliveryPhone" value="${esc(o.deliveryPhone||Q.customer(o.customerId)?.phone||'')}"></div>
     </div>
     <div class="form-sec-title"><i class="fa-solid fa-box"></i>Thành phẩm bán</div>
     <div id="crmOrderLines" data-options="${encodeURIComponent(productOptions)}">${rows}</div>
     <button type="button" class="btn btn-sm" data-act="crm-order-add-line"><i class="fa-solid fa-plus"></i>Thêm thành phẩm</button>
-    <div class="grid g-2" style="margin-top:14px"><div class="field"><label>VAT (%)</label><input class="inp right num" type="number" id="crmOrderVat" min="0" max="20" value="${Number(o.vatRate||0)}"></div><div class="field"><label>Ghi chú</label><input class="inp" id="crmOrderNote" value="${esc(o.note||'')}"></div></div>
+    <div class="grid g-2" style="margin-top:14px"><div class="field"><label>VAT (%)</label><input class="inp right num" type="number" id="crmOrderVat" min="0" max="20" value="${Number(o.vatRate||0)}"></div><div class="field"><label>Phí giao hàng khách trả</label><input class="inp right num" type="number" id="crmShippingFee" min="0" step="1000" value="${Number(o.shippingFee||0)}"></div><div class="field"><label>Ghi chú đơn hàng</label><input class="inp" id="crmOrderNote" value="${esc(o.note||'')}"></div><div class="field"><label>Ghi chú giao hàng</label><input class="inp" id="crmDeliveryNote" value="${esc(o.deliveryNote||'')}"></div></div>
   </form>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="crm-order-edit-save" data-id="${esc(o.id)}"><i class="fa-solid fa-floppy-disk"></i>Lưu thay đổi</button>`});
 }
 
@@ -510,6 +532,7 @@ Views['order-detail'] = function (params) {
     ${o.status==='dh_da_giao' ? `<button class="btn btn-primary" data-act="crm-order-complete-open" data-id="${o.id}"><i class="fa-solid fa-circle-check"></i>Xác nhận hoàn thành đơn hàng</button>` : ''}`)}
     <div class="grid g-auto-sm" style="margin-bottom:14px">
       ${mkpi('Giá trị đơn', fmtShort(o.total), 'fa-sack-dollar','blue')}
+      ${mkpi('Phí giao hàng', fmtShort(Number(o.shippingFee||0)), 'fa-truck','indigo')}
       ${mkpi('Số dòng hàng', (o.items||[]).length, 'fa-boxes-stacked','indigo')}
       ${mkpi('Tình trạng tồn TP', stock.enough?'Đủ':'Thiếu', stock.enough?'fa-circle-check':'fa-triangle-exclamation', stock.enough?'green':'orange')}
       ${mkpi('Xuất kho bán hàng', issued?'Đã xuất':'Chưa xuất', 'fa-arrow-up-from-bracket', issued?'green':'slate')}
@@ -522,6 +545,9 @@ Views['order-detail'] = function (params) {
       <div class="card"><div class="card-head"><div><h3>Thông tin bán hàng</h3></div></div><div class="card-body"><dl class="dl">
         <dt>Khách hàng</dt><dd>${esc(customer?.name||'—')}</dd><dt>Khu vực</dt><dd>${esc(customer?.province||'—')}</dd>
         <dt>Sale phụ trách</dt><dd>${esc(Q.employeeName(o.ownerId))}</dd><dt>Ngày đặt</dt><dd>${fmtDate(o.date)}</dd><dt>Ngày giao</dt><dd>${fmtDate(o.dueDate)}</dd>
+        <dt>Địa chỉ giao</dt><dd>${esc(o.deliveryAddress||customer?.address||'—')}</dd><dt>Người nhận</dt><dd>${esc(o.deliveryRecipient||customer?.contact||'—')} ${o.deliveryPhone?`· ${esc(o.deliveryPhone)}`:''}</dd>
+        <dt>Phí giao hàng khách trả</dt><dd><b>${fmtVND(Number(o.shippingFee||0))}</b></dd><dt>Chi phí vận chuyển thực tế</dt><dd>${o.actualTransportCost!=null?`<b>${fmtVND(Number(o.actualTransportCost||0))}</b>`:'<span class="muted">Chưa chốt chuyến</span>'}</dd>
+        <dt>Trạng thái vận chuyển</dt><dd>${esc(o.logisticsStatus||'Chưa chuyển Logistics')}</dd><dt>Đơn giao</dt><dd>${o.logisticsDeliveryId?`<span class="code">${esc(o.logisticsDeliveryId)}</span>`:'—'}</dd>
         <dt>Nguồn đơn</dt><dd>${o.opportunityId?`Cơ hội ${esc(o.opportunityId)}`:'Tạo trực tiếp'}</dd><dt>Phiếu xuất bán</dt><dd>${issues.length?issues.map(x=>`<span class="code">${esc(x.id)}</span>`).join(', '):'<span class="muted">Chưa có</span>'}</dd>
         <dt>Hoàn thành đơn</dt><dd>${o.completedAt?fmtDate(String(o.completedAt).slice(0,10)):'—'}</dd><dt>Hàng trả về</dt><dd>${(o.returnedItems||[]).length?(o.returnedItems||[]).map(x=>`${esc(Q.product(x.productId)?.name||x.productId)}: <b>${fmtN(x.qty)}</b>`).join('<br>'):'Không có'}</dd>
       </dl><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">

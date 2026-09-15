@@ -161,6 +161,17 @@ Views.production = function () {
 /* ------------------------------------------- CHI TIẾT LỆNH SẢN XUẤT */
 Views['production-detail'] = function (params) {
   const p = Q.po(params.id);
+  // [ACTIVE DATE MIGRATION] Các công đoạn đang chạy từ dữ liệu demo cũ (15/08)
+  // được chuyển sang ngày hiện tại đúng một lần. Công đoạn đã hoàn tất giữ nguyên lịch sử.
+  if (p) {
+    const today = currentDateYMD();
+    const activeStage = (p.stages || []).find(s => s.status === 'doing');
+    if (activeStage && activeStage.start && activeStage.start < today && !activeStage.actualStartedAt) {
+      activeStage.start = today;
+      activeStage.actualStartedAt = new Date().toISOString();
+      if (typeof ProductionAPI !== 'undefined') ProductionAPI.scheduleSync(250);
+    }
+  }
   if (!p) return `<div class="empty"><div class="empty-ico"><i class="fa-solid fa-file-circle-xmark"></i></div><h4>Không tìm thấy lệnh sản xuất</h4><button class="btn btn-primary btn-sm" data-act="go" data-id="production">Về danh sách</button></div>`;
 
   const prog = Q.progress(p);

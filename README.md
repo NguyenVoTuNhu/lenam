@@ -762,3 +762,45 @@ Các nội dung chính đã phản ánh:
 - Phân quyền
 - KIO persistence
 - Cache và tối ưu request
+
+
+## Cập nhật Gia công — lenam32
+
+Luồng nghiệp vụ được rút gọn và tích hợp đúng phân hệ:
+
+`Tạo đơn gia công → Duyệt → Kho/Xuất kho nguyên liệu → Giao đối tác → Theo dõi tiến độ → Nhận hàng hoàn thành → QC/QA kiểm tra → Nhập kho thành phẩm → Đối chiếu công nợ`.
+
+- **Gia công → Đơn gia công** là màn chính để tạo, xem, sửa/xóa khi Nháp và duyệt đơn.
+- Đơn **Đã duyệt** tự xuất hiện tại **Kho → Xuất kho → Kho nguyên liệu**.
+- Sau khi Kho xuất NVL, dòng yêu cầu vẫn còn để Kho **Xác nhận giao đối tác**.
+- Sau khi giao, đơn xuất hiện tại **Gia công → Theo dõi tiến độ**.
+- Khi tiến độ đạt 100%, ghi nhận hàng hoàn thành; lô hàng tự xuất hiện tại **QC/QA → Kiểm tra thành phẩm**.
+- QC xác nhận đạt/lỗi xong, hệ thống chuyển tiếp bước **Nhập kho thành phẩm**; hàng đạt vào Kho thành phẩm, hàng lỗi vào Kho Hàng lỗi.
+
+## Cập nhật Gia công / QC / Kho — lenam35
+
+Luồng Gia công được tách đúng trách nhiệm theo phân hệ:
+
+```text
+Kế hoạch gia công
+→ Duyệt
+→ Kho xuất NVL gia công
+→ Giao đối tác
+→ Theo dõi tiến độ
+→ Ghi nhận hàng hoàn thành
+→ QC/QA → Kiểm tra gia công
+→ Kho → Nhập kho → Kho thành phẩm
+→ Đối chiếu công nợ
+```
+
+- **QC / QA** có menu riêng **Kiểm tra gia công**. Hàng đối tác giao về được kiểm tra tại đây, tách biệt với **Kiểm tra thành phẩm** của sản xuất nội bộ.
+- QC chỉ xác nhận **số lượng đạt / số lượng lỗi** và ghi chú. QC không tự cộng tồn.
+- Sau khi QC hoàn tất, lô hàng được chuyển sang **Kho → Nhập kho → Kho thành phẩm** ở trạng thái **Chờ nhập kho**.
+- Kho xác nhận nhập: hàng đạt vào **Kho thành phẩm**, hàng lỗi vào **Kho Hàng lỗi**.
+- Đã bỏ menu **Kiểm tra chất lượng** và **Nhập kho hàng gia công** khỏi phân hệ Gia công để tránh trùng trách nhiệm với QC/QA và Kho.
+
+
+## Cập nhật Bảo trì thiết bị - lenam39
+- Đổi tên chỉ số kỹ thuật trên giao diện thành cách gọi dễ hiểu: **Thời gian máy chạy ổn định giữa các lần hỏng**, **Thời gian trung bình để sửa xong một sự cố**, **Tổng thời gian máy ngừng hoạt động**.
+- Cảnh báo **Sắp đến hạn bảo trì** khi lịch còn từ 0 đến 7 ngày.
+- Cảnh báo **Quá hạn bảo trì** khi ngày kế hoạch đã qua nhưng lịch chưa hoàn thành.

@@ -314,6 +314,12 @@ const Actions = {
     const dueDate=$('#crmOrderDue')?.value||'';
     const ownerId=$('#crmOrderOwner')?.value||DB.currentUser?.id||'';
     if(!customerId){Toast.err('Chưa chọn khách hàng','Vui lòng chọn khách hàng mua thành phẩm.');return;}
+    const deliveryAddress=$('#crmDeliveryAddress')?.value.trim()||'';
+    const deliveryRecipient=$('#crmDeliveryRecipient')?.value.trim()||'';
+    const deliveryPhone=$('#crmDeliveryPhone')?.value.trim()||'';
+    const deliveryNote=$('#crmDeliveryNote')?.value.trim()||'';
+    const shippingFee=Math.max(0,Number($('#crmShippingFee')?.value)||0);
+    if(!deliveryAddress){Toast.err('Thiếu địa chỉ giao hàng','Vui lòng nhập địa chỉ nhận hàng của đơn bán.');return;}
     if(!date||!dueDate){Toast.err('Thiếu ngày','Vui lòng nhập ngày đặt và ngày giao dự kiến.');return;}
     if(date<actualToday){Toast.err('Ngày đặt không hợp lệ',`Ngày đặt hàng phải từ ${fmtDate(actualToday)} trở về sau.`);return;}
     if(dueDate<date){Toast.err('Ngày giao không hợp lệ','Ngày giao dự kiến không được trước ngày đặt.');return;}
@@ -328,11 +334,11 @@ const Actions = {
     if(new Set(rows.map(x=>x.productId)).size!==rows.length){Toast.err('Thành phẩm bị trùng','Vui lòng gộp cùng thành phẩm vào một dòng.');return;}
     const items=rows.map((x,i)=>({no:i+1,productId:x.productId,name:x.p?.name||x.productId,spec:x.p?.spec||'',unit:x.p?.unit||'',qty:x.qty,price:x.price,amount:x.qty*x.price}));
     const vatRate=Number($('#crmOrderVat')?.value)||0;
-    const subtotal=items.reduce((sum,it)=>sum+it.amount,0); const vat=Math.round(subtotal*vatRate/100); const total=subtotal+vat;
+    const subtotal=items.reduce((sum,it)=>sum+it.amount,0); const vat=Math.round(subtotal*vatRate/100); const total=subtotal+vat+shippingFee;
     const id=SalesCRM.nextNumericCode('DH-2026-',DB.orders,4);
     const opportunityId=$('#crmOrderOpportunity')?.value||'';
     const nowIso=new Date().toISOString();
-    const order={id,customerId,date,dueDate,ownerId,status:'dh_cho_xu_ly',quoteId:null,opportunityId,items,subtotal,discountPct:0,discount:0,vatRate,vat,total,deliveryAddress:Q.customer(customerId)?.address||'',note:$('#crmOrderNote')?.value.trim()||'',createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:DB.currentUser?.name||DB.currentUser?.fullName||'',createdAt:nowIso};
+    const order={id,customerId,date,dueDate,ownerId,status:'dh_cho_xu_ly',quoteId:null,opportunityId,items,subtotal,discountPct:0,discount:0,vatRate,vat,shippingFee,total,deliveryAddress,deliveryRecipient,deliveryPhone,deliveryNote,note:$('#crmOrderNote')?.value.trim()||'',createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:DB.currentUser?.name||DB.currentUser?.fullName||'',createdAt:nowIso};
     DB.orders.unshift(order);
     if(opportunityId){const opp=(DB.crmOpportunities||[]).find(x=>x.id===opportunityId);if(opp){opp.customerId=opp.customerId||customerId;opp.stage='CLOSED_WON';opp.probability=100;opp.updatedAt=actualToday;opp.orderId=id;}}
     SalesCRM.saveLocal(['orders']); SEARCH_INDEX=null; Modal.close();
@@ -414,10 +420,11 @@ const Actions = {
     const issueItems=[];
     for(const plan of plans){let remain=Number(plan.item.qty||0);for(const row of plan.eligible){if(remain<=0)break;const avail=Number(row.qtyAvailable??row.qtyOnHand??0);const take=Math.min(remain,avail);if(take<=0)continue;const posted=InventoryService.apply({productId:row.productId,warehouseId,locationId:row.locationId,lotId:row.lotId,quantity:take,type:'SALES_ISSUE',refType:'SALES_ORDER',refId:issueId,note:`Xuất bán theo đơn ${o.id}`,updateMaterial:false});if(!posted.ok){Toast.err('Không thể xuất kho',posted.message);return;}issueItems.push({productId:row.productId,lotId:row.lotId,qty:take,locationId:row.locationId,unit:row.unit});remain-=take;}}
     DB.goodsIssues.unshift({id:issueId,type:'SALES_ISSUE',warehouseId,refDoc:o.id,orderId:o.id,date:DB.today,status:'COMPLETED',createdBy:DB.currentUser.id,note:$('#crmSalesIssueNote')?.value.trim()||`Xuất bán theo đơn ${o.id}`,items:issueItems});
-    o.salesIssueId=issueId; o.deliveredDate=DB.today; o.status='dh_da_giao';
-    SalesCRM.saveLocal();
+    o.salesIssueId=issueId; o.warehouseIssuedDate=DB.today; o.status='dh_cho_van_chuyen';
+    SalesCRM.saveLocal(['orders']);
     if(typeof InventoryAPI!=='undefined') InventoryAPI.scheduleCollections(['goodsIssues','inventory','inventoryTransactions'],80);
-    Modal.close(); go('order-detail',{id:o.id}); Toast.ok('Đã xuất kho bán hàng',`${issueId} · Đơn ${o.id} · Đã trừ Kho thành phẩm theo FEFO.`);
+    const lgDeliveryId = (typeof LogisticsFleet!=='undefined' && LogisticsFleet.createFromSalesOrder) ? LogisticsFleet.createFromSalesOrder(o.id, issueId) : '';
+    Modal.close(); go('order-detail',{id:o.id}); Toast.ok('Đã xuất kho bán hàng',`${issueId} · Đơn ${o.id} đã chuyển sang Logistics${lgDeliveryId?` · ${lgDeliveryId}`:''}.`);
   },
 
   'inv-sales-issue-confirm': (d) => {
@@ -438,11 +445,12 @@ const Actions = {
       if(!posted.ok){Toast.err('Không thể xuất kho',posted.message);return;}
     }
     gi.status='COMPLETED'; gi.confirmedBy=DB.currentUser?.id||''; gi.confirmedByName=DB.currentUser?.name||''; gi.confirmedAt=new Date().toISOString(); gi.date=typeof currentDateYMD==='function'?currentDateYMD():new Date().toISOString().slice(0,10);
-    o.status='dh_da_giao'; o.salesIssueId=gi.id; o.deliveredDate=gi.date; o.reservations=[];
+    o.status='dh_cho_van_chuyen'; o.salesIssueId=gi.id; o.warehouseIssuedDate=gi.date; o.reservations=[];
     SalesCRM.saveLocal(['orders']);
     if(typeof InventoryAPI!=='undefined') InventoryAPI.scheduleCollections(['goodsIssues','inventory','inventoryTransactions'],40);
-    if(typeof SystemAPI!=='undefined') SystemAPI.audit({module:'INVENTORY',entityType:'SALES_ISSUE',entityId:gi.id,action:'ISSUE',description:`${DB.currentUser?.name||'Người dùng'} xác nhận xuất kho theo đơn ${o.id}`,newData:{status:gi.status,orderId:o.id}});
-    render(); Toast.ok('Đã xác nhận xuất kho',`${gi.id} · tồn Kho thành phẩm đã được trừ.`);
+    const lgDeliveryId = (typeof LogisticsFleet!=='undefined' && LogisticsFleet.createFromSalesOrder) ? LogisticsFleet.createFromSalesOrder(o.id, gi.id) : '';
+    if(typeof SystemAPI!=='undefined') SystemAPI.audit({module:'INVENTORY',entityType:'SALES_ISSUE',entityId:gi.id,action:'ISSUE',description:`${DB.currentUser?.name||'Người dùng'} xác nhận xuất kho theo đơn ${o.id}`,newData:{status:gi.status,orderId:o.id,logisticsDeliveryId:lgDeliveryId||''}});
+    render(); Toast.ok('Đã xác nhận xuất kho',`${gi.id} · đơn ${o.id} đã chuyển sang Logistics${lgDeliveryId?` · ${lgDeliveryId}`:''}.`);
   },
 
   'crm-care-new': () => openCrmCarePicker(),
@@ -516,7 +524,13 @@ const Actions = {
     const date = $('#crmOrderDate')?.value || '';
     const dueDate = $('#crmOrderDue')?.value || '';
     const ownerId = $('#crmOrderOwner')?.value || o.ownerId || '';
+    const deliveryAddress = $('#crmDeliveryAddress')?.value.trim() || '';
+    const deliveryRecipient = $('#crmDeliveryRecipient')?.value.trim() || '';
+    const deliveryPhone = $('#crmDeliveryPhone')?.value.trim() || '';
+    const deliveryNote = $('#crmDeliveryNote')?.value.trim() || '';
+    const shippingFee = Math.max(0, Number($('#crmShippingFee')?.value) || 0);
     if (!customerId) { Toast.err('Chưa chọn khách hàng', 'Vui lòng chọn khách hàng.'); return; }
+    if (!deliveryAddress) { Toast.err('Thiếu địa chỉ giao hàng', 'Vui lòng nhập địa chỉ nhận hàng.'); return; }
     if (!date || !dueDate) { Toast.err('Thiếu ngày', 'Vui lòng nhập ngày đặt và ngày giao dự kiến.'); return; }
     if (dueDate < date) { Toast.err('Ngày giao không hợp lệ', 'Ngày giao dự kiến không được trước ngày đặt.'); return; }
     const rows = $$('#crmOrderLines .crm-order-line').map((row, index) => {
@@ -532,7 +546,7 @@ const Actions = {
     const vatRate = Number($('#crmOrderVat')?.value) || 0;
     const subtotal = items.reduce((sum, it) => sum + it.amount, 0);
     const vat = Math.round(subtotal * vatRate / 100);
-    Object.assign(o, { customerId, ownerId, date, dueDate, items, subtotal, vatRate, vat, total:subtotal+vat, note:$('#crmOrderNote')?.value.trim()||'', updatedAt:new Date().toISOString(), updatedBy:DB.currentUser?.userId||DB.currentUser?.id||'' });
+    Object.assign(o, { customerId, ownerId, date, dueDate, items, subtotal, vatRate, vat, shippingFee, total:subtotal+vat+shippingFee, deliveryAddress, deliveryRecipient, deliveryPhone, deliveryNote, note:$('#crmOrderNote')?.value.trim()||'', updatedAt:new Date().toISOString(), updatedBy:DB.currentUser?.userId||DB.currentUser?.id||'' });
     SalesCRM.saveLocal(['orders']); SEARCH_INDEX = null;
     if (typeof SystemAPI !== 'undefined') SystemAPI.audit({module:'CRM',entityType:'SALES_ORDER',entityId:o.id,action:'UPDATE',description:`${DB.currentUser?.name||'Người dùng'} cập nhật đơn hàng ${o.id}`,newData:{status:o.status,total:o.total}});
     Modal.close(); render(); Toast.ok('Đã cập nhật đơn hàng', o.id);
@@ -566,6 +580,10 @@ const Actions = {
     if (next === 'dh_da_giao' && typeof SalesCRM !== 'undefined' && !SalesCRM.hasSalesIssue(o.id)) {
       Toast.err('Chưa thể đánh dấu Đã giao', 'Đơn hàng chưa có phiếu Xuất kho bán hàng. Hãy xuất Kho thành phẩm trước.');
       return;
+    }
+    if (next === 'dh_da_giao' && typeof LogisticsFleet !== 'undefined') {
+      const trip = (LogisticsFleet.data()?.deliveries || []).find(x => x.orderId === o.id && ['DELIVERED','PARTIAL','CLOSED'].includes(x.status));
+      if (!trip) { Toast.err('Chưa thể đánh dấu Đã giao', 'Logistics chưa xác nhận giao hàng cho đơn này.'); return; }
     }
     if (next === 'dh_hoan_tat') {
       Toast.warn('Hãy xác nhận hoàn thành đúng quy trình', 'Sau khi đơn ở trạng thái Đã giao, dùng nút “Xác nhận hoàn thành đơn hàng” để khai báo hàng trả (nếu có).');
@@ -614,13 +632,17 @@ const Actions = {
     const o = Q.order(d.id); if (!o) return;
     if (o.status !== 'dh_da_giao') { Toast.warn('Chưa thể hoàn thành đơn', 'Chỉ đơn hàng ở trạng thái Đã giao mới được xác nhận hoàn thành.'); return; }
     const totalDelivered = (o.items || []).reduce((sum,it)=>sum+Number(it.qty||0),0);
-    const lines = (o.items || []).map((it, idx) => `<div class="crm-return-line return-item-card" data-product="${esc(it.productId)}">
-      <div class="return-item-main">
-        <div class="return-item-icon"><i class="fa-solid fa-box"></i></div>
-        <div class="return-item-info"><div class="return-item-name">${esc(it.name || Q.product(it.productId)?.name || it.productId)}</div><div class="return-item-code">${esc(it.productId)} · Đã giao <b>${fmtN(it.qty)} ${esc(it.unit||'')}</b></div></div>
-      </div>
-      <div class="return-item-qty"><label>Số lượng khách trả</label><div class="return-qty-wrap"><input class="inp right num" name="returnQty" type="number" min="0" max="${Number(it.qty||0)}" step="0.01" value="0"><span>${esc(it.unit||'')}</span></div><small>Tối đa ${fmtN(it.qty)} ${esc(it.unit||'')}</small></div>
-    </div>`).join('');
+    const lines = (o.items || []).map((it) => {
+      const alreadyReturned = (o.returnedItems || []).filter(r => r.productId === it.productId).reduce((sum,r)=>sum+Number(r.qty||0),0);
+      const maxAdditional = Math.max(0, Number(it.qty||0) - alreadyReturned);
+      return `<div class="crm-return-line return-item-card" data-product="${esc(it.productId)}">
+        <div class="return-item-main">
+          <div class="return-item-icon"><i class="fa-solid fa-box"></i></div>
+          <div class="return-item-info"><div class="return-item-name">${esc(it.name || Q.product(it.productId)?.name || it.productId)}</div><div class="return-item-code">${esc(it.productId)} · Đã giao <b>${fmtN(it.qty)} ${esc(it.unit||'')}</b>${alreadyReturned>0?` · Logistics đã ghi nhận trả <b>${fmtN(alreadyReturned)} ${esc(it.unit||'')}</b>`:''}</div></div>
+        </div>
+        <div class="return-item-qty"><label>Trả bổ sung khi hoàn tất</label><div class="return-qty-wrap"><input class="inp right num" name="returnQty" type="number" min="0" max="${maxAdditional}" step="0.01" value="0" ${maxAdditional<=0?'disabled':''}><span>${esc(it.unit||'')}</span></div><small>Còn có thể ghi nhận ${fmtN(maxAdditional)} ${esc(it.unit||'')}</small></div>
+      </div>`;
+    }).join('');
     Modal.open({
       title:'Xác nhận hoàn thành đơn hàng', sub:`${esc(o.id)} · ${esc(Q.customerName(o.customerId))}`, size:'lg',
       body:`<div class="order-complete-summary">
@@ -644,7 +666,8 @@ const Actions = {
       const pid = row.dataset.product || '';
       const it = (o.items || []).find(x => x.productId === pid);
       const qty = Math.max(0, Number(row.querySelector('[name="returnQty"]')?.value || 0));
-      if (qty > Number(it?.qty || 0) + 0.0001) invalidReturn = `Số lượng trả của ${it?.name || pid} vượt số lượng đã giao.`;
+      const existingQty=(o.returnedItems||[]).filter(x=>x.productId===pid).reduce((sum,x)=>sum+Number(x.qty||0),0);
+      if (qty + existingQty > Number(it?.qty || 0) + 0.0001) invalidReturn = `Tổng số lượng trả của ${it?.name || pid} vượt số lượng đã giao.`;
       if (qty > 0) returns.push({ productId:pid, name:it?.name || Q.product(pid)?.name || pid, unit:it?.unit || Q.product(pid)?.unit || '', qty });
     });
     if (invalidReturn) { Toast.err('Số lượng hàng trả không hợp lệ', invalidReturn); return; }
@@ -692,7 +715,8 @@ const Actions = {
       });
       DB.goodsReceipts.unshift({ id:receiptId, type:'SALES_RETURN_RECEIPT', salesOrderId:o.id, refDoc:o.id, date:currentDateYMD(), receivedBy:DB.currentUser?.id||'', warehouse:returnWh.name, warehouseId:returnWh.id, locationId:returnLoc.id, location:returnLoc.name, status:'RECEIVED', note:$('#crmOrderCompleteNote')?.value.trim()||`Hàng khách trả từ ${o.id}`, items:receiptItems });
     }
-    o.status = 'dh_hoan_tat'; o.completedAt = new Date().toISOString(); o.completedBy = DB.currentUser?.id || ''; o.returnedItems = returns; o.returnReceiptId = receiptId; o.completionNote = $('#crmOrderCompleteNote')?.value.trim() || '';
+    const returnMap=new Map(); [...(o.returnedItems||[]),...returns].forEach(r=>{const cur=returnMap.get(r.productId)||{productId:r.productId,name:r.name||r.productId,unit:r.unit||'',qty:0};cur.qty=Math.round((Number(cur.qty||0)+Number(r.qty||0))*1000)/1000;returnMap.set(r.productId,cur);});
+    o.status = 'dh_hoan_tat'; o.completedAt = new Date().toISOString(); o.completedBy = DB.currentUser?.id || ''; o.returnedItems = [...returnMap.values()]; if(receiptId){o.returnReceiptId = receiptId;o.returnReceiptIds=[...new Set([...(o.returnReceiptIds||[]),receiptId])];} o.completionNote = $('#crmOrderCompleteNote')?.value.trim() || '';
     SalesCRM?.saveLocal?.(['orders']); InventoryAPI?.scheduleCollections?.(['goodsReceipts','inventoryLots','inventory','inventoryTransactions'],80);
     logActivity('hoàn thành đơn hàng', o.id, returns.length ? `Có ${fmtN(returns.reduce((s,x)=>s+x.qty,0))} hàng trả` : 'Không có hàng trả', 'fa-circle-check', 'green');
     Modal.close(); render(); Toast.ok('Đã hoàn thành đơn hàng', returns.length ? `${o.id} · hàng trả đã nhập Kho Hàng trả về${receiptId?` · ${receiptId}`:''}` : `${o.id} · không có hàng trả`);
@@ -759,12 +783,14 @@ const Actions = {
     const productId = $('#manualPoProduct')?.value || '';
     const product = Q.product(productId);
     const qty = Number($('#manualPoQty')?.value || 0);
-    const startDate = $('#manualPoStart')?.value || DB.today;
+    const today = currentDateYMD();
+    const startDate = $('#manualPoStart')?.value || today;
     const deadline = $('#manualPoDeadline')?.value || addDays(startDate, 7);
     const note = $('#manualPoNote')?.value.trim() || '';
     if (!product) { Toast.err('Chưa chọn thành phẩm', 'Vui lòng chọn thành phẩm cần sản xuất.'); return; }
     if (!(qty > 0)) { Toast.err('Số lượng không hợp lệ', 'Số lượng sản xuất phải lớn hơn 0.'); return; }
-    if (deadline < startDate) { Toast.err('Deadline không hợp lệ', 'Deadline phải bằng hoặc sau ngày bắt đầu.'); return; }
+    if (startDate < today) { Toast.err('Ngày bắt đầu không hợp lệ', 'Ngày bắt đầu phải từ ngày hiện tại trở đi.'); return; }
+    if (deadline < today || deadline < startDate) { Toast.err('Deadline không hợp lệ', 'Deadline phải từ ngày hiện tại và bằng hoặc sau ngày bắt đầu.'); return; }
 
     const po = {
       id: nextCode('LSX-2026-', DB.productionOrders),
@@ -919,7 +945,8 @@ const Actions = {
     }
 
     s.status = 'doing';
-    s.start = DB.today;
+    s.start = currentDateYMD();
+    s.actualStartedAt = new Date().toISOString();
     p.status = /QC/i.test(String(s.name||'')) ? 'lsx_dang_qc' : 'lsx_dang_san_xuat';
     syncOrderStatus(p.orderId);
     if (typeof ProductionAPI !== 'undefined') ProductionAPI.scheduleSync(180);
@@ -942,11 +969,12 @@ const Actions = {
 
     if (qty >= s.qtyPlan) {
       s.status = 'done';
-      s.end = DB.today;
+      s.end = currentDateYMD();
       const next = p.stages[i + 1];
       if (next) {
         next.status = 'doing';
-        next.start = DB.today;
+        next.start = currentDateYMD();
+        next.actualStartedAt = new Date().toISOString();
         if (/QC/i.test(String(next.name||''))) {
           p.status = 'lsx_dang_qc';
           ensureFinishedQcPending(p, qty);
@@ -1698,29 +1726,34 @@ const Actions = {
   },
   'enterprise-action': (d) => { if (d.key === 'suppliers') openSupplierForm(); else Toast.info('Chức năng đang chờ dữ liệu nhập', `Màn ${d.key} đã sẵn sàng để kết nối form nghiệp vụ và API triển khai.`); },
   'subcontracting-new': () => openSubcontractingForm(),
-  'subcontracting-save': () => {
-    const plannedQty = Number($('#subQty').value) || 0;
-    if (!$('#subPartner').value.trim() || plannedQty <= 0) { Toast.err('Dữ liệu kế hoạch chưa hợp lệ', 'Vui lòng nhập đối tác và số lượng lớn hơn 0.'); return; }
-    const id = nextCode('GC-2026-', DB.subcontractingOrders);
-    DB.subcontractingOrders.unshift({ id, partner: $('#subPartner').value.trim(), productId: $('#subProduct').value, plannedQty, issuedQty: 0, receivedQty: 0, goodQty: 0, defectQty: 0, issueDate: $('#subIssueDate').value || DB.today, dueDate: $('#subDueDate').value || addDays(DB.today, 10), status: 'DRAFT', unitCost: Number($('#subCost').value) || 0, paid: 0 });
-    Modal.close(); go('subcontracting'); Toast.ok('Đã tạo kế hoạch gia công', `${id} · Đang chờ xuất nguyên liệu.`);
-  },
-  'subcontracting-issue': (d) => {
-    const order = DB.subcontractingOrders.find((item) => item.id === d.id);
-    if (!order) return;
-    const product = Q.product(order.productId);
-    const bom = (product?.bom || []).map(([materialId, per]) => ({ materialId, quantity: per * order.plannedQty, stock: DB.materials.find((material) => material.id === materialId)?.stock || 0 }));
-    const shortage = bom.find((item) => item.stock < item.quantity);
-    if (shortage) { Toast.err('Không đủ nguyên liệu gia công', `${shortage.materialId}: cần ${fmtDec(shortage.quantity, 2)}, tồn ${fmtDec(shortage.stock, 2)}.`); return; }
-    for (const item of bom) {
-      const stock = DB.inventory.find((row) => row.productId === item.materialId && row.warehouseId === 'WH-001' && row.qtyAvailable >= item.quantity);
-      if (!stock) { Toast.err('Không tìm thấy lô nguyên liệu', `${item.materialId} chưa có tồn theo lô tại kho nguyên liệu.`); return; }
-      const posted = InventoryService.apply({ productId: item.materialId, warehouseId: stock.warehouseId, locationId: stock.locationId, lotId: stock.lotId, quantity: item.quantity, type: 'ISSUE', refType: 'SUBCONTRACTING', refId: order.id, note: `Giao nguyên liệu cho đơn gia công ${order.id}` });
-      if (!posted.ok) { Toast.err('Không thể xuất nguyên liệu', posted.message); return; }
-    }
-    order.issuedQty = order.plannedQty; order.status = 'IN_PROGRESS';
-    Modal.close(); render(); Toast.ok('Đã giao nguyên liệu gia công', `${order.id} · Đã ghi nhận vào ledger kho.`);
-  },
+  'subcontracting-open': (d) => openSubcontractingDetail(d.id),
+  'subcontracting-edit': (d) => openSubcontractingForm(d.id),
+  'subcontracting-save': (d) => subcontractingSaveOrder(d.id || ''),
+  'subcontracting-delete': (d) => subcontractingDeleteOrder(d.id),
+  'subcontracting-approve': (d) => subcontractingApproveOrder(d.id),
+  'subcontracting-issue': (d) => openSubcontractingIssueModal(d.id),
+  'subcontracting-issue-confirm': (d) => subcontractingIssueMaterials(d.id),
+  'subcontracting-handover': (d) => openSubcontractingHandoverModal(d.id),
+  'subcontracting-handover-confirm': (d) => subcontractingHandoverConfirm(d.id),
+  'subcontracting-progress-update': (d) => openSubcontractingProgressModal(d.id),
+  'subcontracting-progress-save': (d) => subcontractingSaveProgress(d.id),
+  'subcontracting-receive': (d) => openSubcontractingReceiveModal(d.id),
+  'subcontracting-receive-confirm': (d) => subcontractingReceiveGoods(d.id),
+  'subcontracting-qc': (d) => openSubcontractingQcModal(d.id, d.receipt || ''),
+  'subcontracting-qc-confirm': (d) => subcontractingQcConfirm(d.id, d.receipt || ''),
+  'subcontracting-go-qc': () => go('quality', { tab:'subcontracting_qc' }),
+  'subcontracting-go-warehouse': () => { go('warehouse', { tab:'receipts' }); setTimeout(() => { const f = F('inv-receipts', { receiptTab:'finished' }); f.receiptTab='finished'; render(); }, 0); },
+  'subcontracting-warehouse': (d) => openSubcontractingWarehouseModal(d.id, d.receipt || ''),
+  'subcontracting-warehouse-confirm': (d) => subcontractingWarehouseConfirm(d.id, d.receipt || ''),
+  'subcontracting-reconcile': (d) => openSubcontractingReconcileModal(d.id),
+  'subcontracting-reconcile-confirm': (d) => subcontractingReconcileConfirm(d.id),
+  'subcontracting-pay': (d) => openSubcontractingPaymentModal(d.id),
+  'subcontracting-pay-save': (d) => subcontractingSavePayment(d.id),
+  'subcontracting-partner-new': () => openSubcontractingPartnerForm(),
+  'subcontracting-partner-edit': (d) => openSubcontractingPartnerForm(d.id),
+  'subcontracting-partner-save': (d) => subcontractingSavePartner(d.id || ''),
+  'subcontracting-partner-detail': (d) => openSubcontractingPartnerDetail(d.id || d.partner),
+  'subcontracting-partner-delete': (d) => subcontractingDeletePartner(d.id),
   'restaurant-pos-open': () => openRestaurantPos('POS'),
   'restaurant-tablet-open': () => openRestaurantPos('TABLET'),
   'restaurant-qr-open': () => openRestaurantPos('QR'),
@@ -3865,7 +3898,7 @@ Actions['pf-mr-issue'] = (d) => {
 
 Actions['pf-plan-release'] = (d) => {
   const plan=(DB.productionPlans||[]).find(x=>x.id===d.id);if(!plan||plan.status!=='MATERIAL_ISSUED')return;
-  const created=[];(plan.items||[]).forEach(it=>{const product=Q.product(it.productId); if(!product)return; const po={id:nextCode('LSX-2026-',DB.productionOrders),orderId:plan.source==='SALES_ORDER'?(plan.sourceOrderId||''):'',customerId:plan.source==='SALES_ORDER'?(plan.customerId||Q.order(plan.sourceOrderId)?.customerId||''):'',productId:product.id,productName:product.name,spec:product.spec||'',qty:Number(it.qty||0),unit:product.unit||'',startDate:currentDateYMD(),deadline:plan.dueDate||addDays(currentDateYMD(),7),managerId:DB.currentUser?.empId||'NV-018',status:'lsx_cho_duyet',stages:buildStages(Number(it.qty||0),0,0,currentDateYMD()),routingOverride:(it.preparedOperations||[]).map(o=>[o.operationId,Number(o.hoursPer||0),o.note||'']),materialPlan:(it.preparedMaterials||[]).map(m=>({materialId:m.materialId,qty:Number(m.qty||0)})),qcPass:0,qcFail:0,planId:plan.id,materialRequestId:plan.materialRequestId||'',note:`Tạo từ kế hoạch ${plan.id}`};DB.productionOrders.unshift(po);created.push(po);});
+  const created=[];(plan.items||[]).forEach(it=>{const product=Q.product(it.productId); if(!product)return; const po={id:nextCode('LSX-2026-',DB.productionOrders),orderId:plan.source==='SALES_ORDER'?(plan.sourceOrderId||''):'',customerId:plan.source==='SALES_ORDER'?(plan.customerId||Q.order(plan.sourceOrderId)?.customerId||''):'',productId:product.id,productName:product.name,spec:product.spec||'',qty:Number(it.qty||0),unit:product.unit||'',startDate:currentDateYMD(),deadline:(plan.dueDate&&plan.dueDate>=currentDateYMD()?plan.dueDate:addDays(currentDateYMD(),7)),managerId:DB.currentUser?.empId||'NV-018',status:'lsx_cho_duyet',stages:buildStages(Number(it.qty||0),0,0,currentDateYMD()),routingOverride:(it.preparedOperations||[]).map(o=>[o.operationId,Number(o.hoursPer||0),o.note||'']),materialPlan:(it.preparedMaterials||[]).map(m=>({materialId:m.materialId,qty:Number(m.qty||0)})),qcPass:0,qcFail:0,planId:plan.id,materialRequestId:plan.materialRequestId||'',note:`Tạo từ kế hoạch ${plan.id}`};DB.productionOrders.unshift(po);created.push(po);});
   if(!created.length){Toast.err('Không tạo được LSX','Không tìm thấy thành phẩm trong kế hoạch.');return;} plan.status='RELEASED';plan.productionOrderIds=created.map(x=>x.id);if(plan.source==='SALES_ORDER'&&plan.sourceOrderId){const so=Q.order(plan.sourceOrderId);if(so){so.status='dh_dang_san_xuat';if(typeof SalesCRM!=='undefined')SalesCRM.saveLocal(['orders']);}}ProductionAPI?.scheduleSync(80);render();Toast.ok('Đã tạo lệnh sản xuất',created.map(x=>x.id).join(', '));
 };
 
@@ -4513,6 +4546,9 @@ function scheduleRouteDataRefresh(module = State.module, tab = State.tab) {
 }
 
 async function boot() {
+  // [REAL DATE] Từ bản này, mọi chứng từ/nghiệp vụ mới dùng ngày thực tế của máy.
+  // Dữ liệu lịch sử giữ nguyên ngày đã lưu; chỉ DB.today runtime được cập nhật.
+  DB.today = currentDateYMD();
   // Khôi phục theme đã chọn (nếu trình duyệt cho phép lưu)
   let saved = 'light';
   try { saved = localStorage.getItem('vyko-theme') || 'light'; } catch (e) { /* bỏ qua */ }
@@ -4636,4 +4672,53 @@ if (
 
 // F(key, defaults) được định nghĩa duy nhất trong core/app.core.js.
 // Không khai báo lại ở app.js để tránh mất default filter/date của các view.
+
+// UI33: chuyển subtab ngang Kế hoạch sản xuất / Kế hoạch gia công trong Kho.
+Actions['warehouse-plan-tab'] = (d) => {
+  F('warehouse-production-plan').planTab = d.tab === 'subcontracting' ? 'subcontracting' : 'production';
+  render();
+};
+
+Actions['warehouse-open-subcontract-issue'] = (d) => {
+  const f = F('inv-issues');
+  f.issueTab = 'raw';
+  f.kind = 'subcontract_request';
+  f.type = 'SUBCONTRACT_ISSUE';
+  f.q = d.id || '';
+  State.page['inv-issues'] = 1;
+  go('warehouse', { tab:'issues' });
+};
+
+
+
+/* UI37 — Maintenance action bindings */
+Object.assign(Actions, {
+  'maintenance-catalog-new': () => openMaintenanceCatalogForm(),
+  'maintenance-catalog-open': (d) => openMaintenanceCatalogDetail(d.id),
+  'maintenance-catalog-edit': (d) => openMaintenanceCatalogForm(d.id),
+  'maintenance-catalog-save': (d) => maintenanceSaveCatalog(d.id || ''),
+  'maintenance-catalog-delete': (d) => maintenanceDeleteCatalog(d.id),
+  'maintenance-equipment-new': () => openMaintenanceEquipmentForm(),
+  'maintenance-equipment-open': (d) => openMaintenanceEquipmentDetail(d.id),
+  'maintenance-equipment-edit': (d) => openMaintenanceEquipmentForm(d.id),
+  'maintenance-equipment-save': (d) => maintenanceSaveEquipment(d.id || ''),
+  'maintenance-equipment-delete': (d) => maintenanceDeleteEquipment(d.id),
+  'maintenance-schedule-new': () => openMaintenanceScheduleForm(),
+  'maintenance-schedule-open': (d) => openMaintenanceScheduleDetail(d.id),
+  'maintenance-schedule-edit': (d) => openMaintenanceScheduleForm(d.id),
+  'maintenance-schedule-save': (d) => maintenanceSaveSchedule(d.id || ''),
+  'maintenance-schedule-complete': (d) => openMaintenanceScheduleComplete(d.id),
+  'maintenance-schedule-complete-save': (d) => maintenanceCompleteSchedule(d.id),
+  'maintenance-schedule-delete': (d) => maintenanceDeleteSchedule(d.id),
+  'maintenance-wo-new': () => openMaintenanceWoForm(),
+  'maintenance-wo-save': () => maintenanceSaveWo(),
+  'maintenance-wo-open': (d) => openMaintenanceWoDetail(d.id),
+  'maintenance-wo-start': (d) => maintenanceStartWo(d.id),
+  'maintenance-wo-complete': (d) => openMaintenanceWoComplete(d.id),
+  'maintenance-wo-complete-save': (d) => maintenanceCompleteWo(d.id),
+  'maintenance-log-new': () => openMaintenanceLogForm(),
+  'maintenance-log-save': () => maintenanceSaveLog(),
+  'maintenance-log-open': (d) => openMaintenanceLogDetail(d.id),
+});
+
 document.addEventListener('DOMContentLoaded', boot);

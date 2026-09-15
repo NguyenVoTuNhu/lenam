@@ -529,7 +529,7 @@ const NAV = [
         { id: 'inventory', label: 'Tồn kho' },
         { id: 'batches', label: 'Lô và hạn sử dụng' },
         { id: 'defects', label: 'Hàng lỗi & hàng trả về' },
-        { id: 'production_plan', label: 'Kế hoạch sản xuất' },
+        { id: 'production_plan', label: 'Kế hoạch sản xuất & gia công' },
         // Tạm ẩn: Cảnh báo kho, Barcode / QR Code
       ],
       count: () => (typeof Q !== 'undefined' && Q.nearExpiryLots) ? Q.nearExpiryLots().length + Q.expiredLots().length : 0,
@@ -546,8 +546,7 @@ const NAV = [
         { id: 'routing', label: 'Routing công đoạn' },
         { id: 'plan', label: 'Kế hoạch sản xuất' },
         { id: 'progress', label: 'Tiến độ sản xuất' },
-        { id: 'receipt_tp', label: 'Nhập kho thành phẩm' },
-        { id: 'wip', label: 'Theo dõi bán thành phẩm' },
+        // Tạm ẩn: Nhập kho thành phẩm, Theo dõi bán thành phẩm
       ],
       count: () => (typeof DB !== 'undefined' && DB.productionOrders) ? DB.productionOrders.filter((p) => p.status === 'lsx_dang_san_xuat').length : 0
     },
@@ -556,15 +555,11 @@ const NAV = [
       label: 'Gia công',
       icon: 'fa-screwdriver-wrench',
       children: [
-        { id: 'dashboard', label: 'Tổng quan gia công' },
-        { id: 'orders', label: 'Đơn gia công' },
+        { id: 'dashboard', label: 'Tổng quan' },
+        { id: 'orders', label: 'Kế hoạch gia công' },
+        { id: 'debt', label: 'Đối chiếu công nợ' },
         { id: 'partners', label: 'Đối tác gia công' },
-        { id: 'issue', label: 'Xuất nguyên liệu' },
-        { id: 'progress', label: 'Theo dõi tiến độ' },
-        { id: 'receive', label: 'Nhập hàng hoàn thành' },
-        { id: 'debt', label: 'Công nợ gia công' },
-        { id: 'evaluation', label: 'Đánh giá đối tác' },
-        { id: 'reports', label: 'Báo cáo gia công' }
+        // Tạm ẩn: Nhận hàng hoàn thành (đã gộp vào chi tiết kế hoạch), Báo cáo gia công
       ]
     },
     {
@@ -631,6 +626,7 @@ const NAV = [
         { id: 'iqc', label: 'Kiểm tra đầu vào' },
         { id: 'pqc', label: 'Kiểm tra bán thành phẩm' },
         { id: 'fqc', label: 'Kiểm tra thành phẩm' },
+        { id: 'subcontracting_qc', label: 'Kiểm tra gia công' },
         { id: 'coa', label: 'Hồ sơ kiểm nghiệm' },
         { id: 'capa', label: 'CAPA' },
         { id: 'recall', label: 'Thu hồi sản phẩm' },
@@ -645,7 +641,8 @@ const NAV = [
       icon: 'fa-gears',
       children: [
         { id: 'dashboard', label: 'Tổng quan' },
-        { id: 'equipment', label: 'Danh mục máy móc' },
+        { id: 'equipment', label: 'Danh sách máy móc' },
+        { id: 'equipment_catalog', label: 'Danh mục máy móc' },
         { id: 'schedule', label: 'Lịch bảo trì' },
         { id: 'work_orders', label: 'Phiếu sửa chữa' },
         { id: 'logs', label: 'Nhật ký máy' }
@@ -669,11 +666,10 @@ const NAV = [
       children: [
         { id: 'dashboard', label: 'Tổng quan vận tải' },
         { id: 'deliveries', label: 'Đơn giao hàng' },
-        { id: 'dispatch', label: 'Điều phối' },
         { id: 'maintenance', label: 'Bảo trì xe' },
-        { id: 'fleet', label: 'Danh mục xe' },
+        { id: 'fleet', label: 'Danh sách xe' },
         { id: 'gps', label: 'GPS / Theo dõi xe' },
-        { id: 'drivers', label: 'Tài xế' },
+        { id: 'drivers', label: 'Danh sách tài xế' },
         { id: 'schedule', label: 'Lịch giao hàng' }
       ]
     },

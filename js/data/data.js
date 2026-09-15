@@ -445,12 +445,10 @@ const WAREHOUSE_CONFIG = {
 const SUBCONTRACTING_CONFIG = {
   subcontractingTabs: [
     { id: 'subcontracting', label: 'Tổng quan', tab: 'dashboard' },
-    { id: 'subcontracting', label: 'Đơn gia công', tab: 'orders' },
-    { id: 'subcontracting', label: 'Xuất nguyên liệu', tab: 'issue' },
-    { id: 'subcontracting', label: 'Theo dõi tiến độ', tab: 'progress' },
-    { id: 'subcontracting', label: 'Nhận hàng & chất lượng', tab: 'receive' },
-    { id: 'subcontracting', label: 'Công nợ', tab: 'debt' },
+    { id: 'subcontracting', label: 'Kế hoạch gia công', tab: 'orders' },
+    { id: 'subcontracting', label: 'Đối chiếu công nợ', tab: 'debt' },
     { id: 'subcontracting', label: 'Đối tác gia công', tab: 'partners' }
+    // Tạm ẩn: Báo cáo gia công. Nhận hàng hoàn thành nằm trong chi tiết kế hoạch.
   ]
 };
 
