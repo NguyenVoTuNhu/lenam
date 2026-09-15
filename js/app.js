@@ -715,6 +715,7 @@ const Actions = {
     const managerId = $('#poEditManager')?.value || po.managerId;
     if (!product) { Toast.err('Thành phẩm không hợp lệ', 'Vui lòng chọn thành phẩm.'); return; }
     if (!(qty > 0)) { Toast.err('Số lượng không hợp lệ', 'Số lượng sản xuất phải lớn hơn 0.'); return; }
+    if (startDate < currentDateYMD() || deadline < currentDateYMD()) { Toast.err('Ngày không hợp lệ', 'Ngày bắt đầu và deadline không được ở quá khứ.'); return; }
     if (deadline < startDate) { Toast.err('Deadline không hợp lệ', 'Deadline phải bằng hoặc sau ngày bắt đầu.'); return; }
     if (!started && qty !== Number(po.qty||0)) (po.stages || []).forEach(st => { st.qtyPlan = qty; });
     Object.assign(po, { productId:product.id, productName:product.name, spec:product.spec||'', unit:product.unit||'', qty, startDate, deadline, managerId, note:$('#poEditNote')?.value.trim()||'', updatedAt:new Date().toISOString(), updatedBy:DB.currentUser?.userId||DB.currentUser?.id||'' });
@@ -756,31 +757,35 @@ const Actions = {
   },
   'stage-start': (d) => {
     const p = Q.po(d.id);
+    if (!p) return;
     const i = Number(d.i);
     const s = p.stages[i];
-    // Bắt đầu bất kỳ công đoạn nào đồng nghĩa lệnh đã được chấp thuận thực hiện.
-    // Ghi metadata duyệt để đảm bảo từ đây không thể xóa lệnh sản xuất.
+    if (!s) return;
+
+    // Lệnh phải được duyệt trước khi xưởng bắt đầu thực hiện.
     if (!p.approvedAt) {
-      p.approvedAt = new Date().toISOString();
-      p.approvedBy = DB.currentUser?.userId || DB.currentUser?.id || '';
-      p.approvedByName = DB.currentUser?.name || DB.currentUser?.fullName || '';
+      Toast.warn('Lệnh sản xuất chưa được duyệt', `Hãy duyệt ${p.id} trước khi bắt đầu công đoạn.`);
+      return;
     }
 
-    // Công đoạn đầu tiên => xuất vật tư theo định mức BOM
+    // Công đoạn đầu tiên chỉ được bắt đầu sau khi Kho đã cấp NVL theo phiếu yêu cầu.
+    // Không tự trừ tồn tại đây để tránh xuất kho hai lần và bảo đảm lịch sử kho luôn có chứng từ.
     if (i === 0) {
-      const res = issueMaterials(p);
-      if (!res.ok) {
-        confirmBox({
-          title: 'Không đủ vật tư để bắt đầu sản xuất',
-          okText: 'Tạo yêu cầu mua hàng', icon: 'fa-triangle-exclamation',
-          message: `Lệnh <b>${p.id}</b> cần bổ sung ${res.lacking.length} vật tư:<br/><br/>
-            ${res.lacking.map((m) => `• <b>${esc(m.name)}</b>: cần ${fmtDec(m.need, 2)} ${esc(m.unit)}, tồn ${fmtDec(m.stock, 2)} — <span style="color:var(--red)">thiếu ${fmtDec(m.lack, 2)} ${esc(m.unit)}</span>`).join('<br/>')}
-            <br/><br/>Tạo yêu cầu mua hàng gửi phòng Mua hàng ngay bây giờ?`,
-          onOk: () => Actions['po-create-pr']({ id: p.id }),
-        });
-        return;
+      const product = Q.product(p.productId);
+      const requiresMaterials = !!((p.materialPlan || []).length || (product?.bom || []).length);
+      if (requiresMaterials) {
+        const req = (DB.productionMaterialRequests || []).find(r => r.id === p.materialRequestId || r.productionOrderId === p.id);
+        if (!req) {
+          Toast.warn('Chưa có phiếu yêu cầu NVL', `Lệnh ${p.id} phải lập phiếu yêu cầu NVL theo BOM trước khi sản xuất.`);
+          Actions['po-material-request']({ id: p.id });
+          return;
+        }
+        if (req.status !== 'ISSUED' && !p.materialIssuedAt) {
+          const msg = req.status === 'APPROVED' ? 'Kho đã duyệt nhưng chưa xuất nguyên liệu.' : 'Phiếu đang chờ Kho duyệt/xuất nguyên liệu.';
+          Toast.warn('Nguyên liệu chưa được cấp', `${req.id} · ${msg}`);
+          return;
+        }
       }
-      Toast.info('Đã xuất vật tư cho sản xuất', `${res.count} loại vật tư được xuất kho theo định mức của ${p.id}`);
     }
 
     s.status = 'doing';
@@ -815,8 +820,9 @@ const Actions = {
         p.status = next.name === 'QC' ? 'lsx_dang_qc' : 'lsx_dang_san_xuat';
       } else {
         p.status = 'lsx_hoan_thanh';
-        p.qcPass = p.qty;
-        pushNotification({ level: 'success', icon: 'fa-circle-check', title: `Lệnh sản xuất ${p.id} đã hoàn thành`, desc: `${p.productName} — ${fmtN(p.qty)} ${p.unit} đạt QC`, go: { module: 'production', id: p.id } });
+        p.completedAt = new Date().toISOString();
+        if (!Number.isFinite(Number(p.qcPass)) || Number(p.qcPass) <= 0) p.qcPass = qty;
+        pushNotification({ level: 'success', icon: 'fa-circle-check', title: `Lệnh sản xuất ${p.id} đã hoàn thành`, desc: `${p.productName} — ${fmtN(p.qcPass || qty)} ${p.unit} đạt QC, chờ nhập kho thành phẩm`, go: { module: 'production', id: p.id } });
       }
     } else {
       s.status = 'doing';
@@ -830,25 +836,72 @@ const Actions = {
       `${p.id} · tiến độ tổng ${Q.progress(p)}%`);
   },
   'po-qc': (d) => {
-    const p = Q.po(d.id);
+    const p = Q.po(d.id); if (!p) return;
     const qcIndex = p.stages.findIndex((s) => s.name === 'QC');
-    confirmBox({
-      title: 'Nghiệm thu QC',
-      tone: 'primary', icon: 'fa-clipboard-check', okText: 'Xác nhận đạt QC',
-      message: `Xác nhận toàn bộ <b>${fmtN(p.qty)} ${esc(p.unit)}</b> của lệnh <b>${p.id}</b> đã đạt kiểm tra chất lượng?<br/><br/>Sau bước này lệnh sẽ chuyển sang công đoạn Hoàn thành và nhập kho thành phẩm.`,
-      onOk: () => {
-        const s = p.stages[qcIndex];
-        s.qtyDone = s.qtyPlan; s.status = 'done'; s.end = DB.today;
-        p.qcPass = p.qty;
-        const next = p.stages[qcIndex + 1];
-        if (next) { next.status = 'doing'; next.start = DB.today; p.status = 'lsx_dang_san_xuat'; }
-        syncOrderStatus(p.orderId);
-        if (typeof ProductionAPI !== 'undefined') ProductionAPI.scheduleSync(180);
-        logActivity('nghiệm thu QC', p.id, `${fmtN(p.qty)} ${p.unit} đạt — tỷ lệ lỗi 0%`, 'fa-clipboard-check', 'green');
-        render();
-        Toast.ok('Đã nghiệm thu QC', `${p.id} · ${fmtN(p.qty)} ${p.unit} đạt chất lượng`);
-      },
+    if (qcIndex < 0) { Toast.warn('Không có công đoạn QC', 'Lệnh này chưa có công đoạn QC trong quy trình.'); return; }
+    const qc = p.stages[qcIndex];
+    const total = Number(qc.qtyPlan || p.qty || 0);
+    Modal.open({
+      title: `Ghi nhận QC · ${p.id}`,
+      sub: `${p.productName} · Số lượng cần kiểm ${fmtN(total)} ${p.unit}`,
+      size: 'md',
+      body: `<div class="form-grid cols-2">
+        <div class="field"><label>Số lượng đạt *</label><input class="inp right num" id="poQcPass" type="number" min="0" max="${total}" step="0.01" value="${Math.max(0, total-Number(p.qcFail||0))}"></div>
+        <div class="field"><label>Số lượng không đạt *</label><input class="inp right num" id="poQcFail" type="number" min="0" max="${total}" step="0.01" value="${Number(p.qcFail||0)}"></div>
+        <div class="field" style="grid-column:1/-1"><label>Ghi chú QC</label><textarea class="inp" id="poQcNote" rows="3" placeholder="Kết quả kiểm tra, nguyên nhân lỗi nếu có…">${esc(p.qcNote||'')}</textarea></div>
+      </div>
+      <div class="note-box"><b>Quy tắc:</b> Số lượng đạt + không đạt phải bằng ${fmtN(total)} ${esc(p.unit)}. Chỉ số lượng đạt được chuyển sang công đoạn Hoàn thành và nhập kho thành phẩm.</div>`,
+      foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="po-qc-save" data-id="${esc(p.id)}"><i class="fa-solid fa-clipboard-check"></i>Xác nhận kết quả QC</button>`
     });
+  },
+  'po-qc-save': (d) => {
+    const p = Q.po(d.id); if (!p) return;
+    const qcIndex = p.stages.findIndex((s) => s.name === 'QC');
+    const qc = p.stages[qcIndex]; if (!qc) return;
+    const total = Number(qc.qtyPlan || p.qty || 0);
+    const pass = Math.max(0, Number($('#poQcPass')?.value || 0));
+    const fail = Math.max(0, Number($('#poQcFail')?.value || 0));
+    if (Math.abs((pass + fail) - total) > 0.0001) { Toast.err('Số lượng QC chưa hợp lệ', `Đạt + không đạt phải bằng ${fmtN(total)} ${p.unit}.`); return; }
+    qc.qtyDone = total; qc.status = 'done'; qc.end = currentDateYMD(); qc.note = $('#poQcNote')?.value.trim() || '';
+    p.qcPass = pass; p.qcFail = fail; p.qcNote = qc.note; p.qcAt = new Date().toISOString(); p.qcBy = DB.currentUser?.id || '';
+    const next = p.stages[qcIndex + 1];
+    if (next) { next.qtyPlan = pass; next.qtyDone = Math.min(Number(next.qtyDone||0), pass); next.status = pass > 0 ? 'doing' : 'done'; next.start = currentDateYMD(); if (!pass) next.end=currentDateYMD(); }
+    if (pass > 0 && next) p.status = 'lsx_dang_san_xuat';
+    else { p.status = 'lsx_hoan_thanh'; p.completedAt = new Date().toISOString(); }
+    syncOrderStatus(p.orderId);
+    if (typeof ProductionAPI !== 'undefined') ProductionAPI.scheduleSync(120);
+    logActivity('ghi nhận QC', p.id, `Đạt ${fmtN(pass)} · lỗi ${fmtN(fail)} ${p.unit}`, 'fa-clipboard-check', fail ? 'orange' : 'green');
+    Modal.close(); render(); Toast.ok('Đã ghi nhận kết quả QC', `${p.id} · đạt ${fmtN(pass)}, không đạt ${fmtN(fail)} ${p.unit}`);
+  },
+  'po-fg-receipt': (d) => openProductionReceiptModal(d.id),
+  'po-fg-receipt-save': (d) => {
+    const p = Q.po(d.id); if (!p) return;
+    if (p.status !== 'lsx_hoan_thanh') { Toast.warn('Lệnh chưa hoàn thành', 'Không thể nhập kho trước khi hoàn tất sản xuất.'); return; }
+    if (p.finishedReceiptId) { Toast.warn('Đã nhập kho', p.finishedReceiptId); return; }
+    const warehouseId = $('#poFgWarehouse')?.value || '';
+    const locationId = $('#poFgLocation')?.value || '';
+    const warehouse = Q.warehouse(warehouseId), location = Q.warehouseLocation(locationId);
+    const qty = Number($('#poFgQty')?.value || 0), maxQty = Number(p.qcPass || p.qty || 0);
+    const lotNumber = $('#poFgLot')?.value.trim() || '';
+    const mfgDate = $('#poFgMfg')?.value || currentDateYMD();
+    const expiryDate = $('#poFgExp')?.value || '';
+    const note = $('#poFgNote')?.value.trim() || `Nhập kho thành phẩm từ ${p.id}`;
+    if (!warehouse || warehouse.type !== 'FINISHED_GOODS') { Toast.err('Kho không hợp lệ', 'Vui lòng chọn Kho thành phẩm.'); return; }
+    if (!location || location.warehouseId !== warehouseId) { Toast.err('Vị trí không hợp lệ', 'Vị trí phải thuộc kho thành phẩm đã chọn.'); return; }
+    if (!(qty > 0) || qty > maxQty) { Toast.err('Số lượng không hợp lệ', `Số lượng nhập phải lớn hơn 0 và không vượt ${fmtN(maxQty)} ${p.unit}.`); return; }
+    if (!lotNumber) { Toast.err('Thiếu mã lô', 'Vui lòng nhập mã lô thành phẩm.'); return; }
+    if (Q.lotByNumber(lotNumber)) { Toast.err('Trùng mã lô', `${lotNumber} đã tồn tại.`); return; }
+    if (mfgDate < currentDateYMD()) { Toast.err('Ngày không hợp lệ', 'Ngày sản xuất không được ở quá khứ.'); return; }
+    if (expiryDate && expiryDate < mfgDate) { Toast.err('Hạn sử dụng không hợp lệ', 'Hạn sử dụng phải bằng hoặc sau ngày sản xuất.'); return; }
+    const lot = { id:nextCode('LOT-',DB.inventoryLots), lotNumber, productId:p.productId, productionOrderId:p.id, mfgDate, expiryDate, supplierLot:'', supplierId:'', qcStatus:'PASSED', status:'active', createdAt:new Date().toISOString() };
+    DB.inventoryLots.unshift(lot);
+    const posted = InventoryService.apply({ productId:p.productId, warehouseId, locationId, lotId:lot.id, quantity:qty, type:'PRODUCTION_RECEIPT', refType:'PRODUCTION_ORDER', refId:p.id, note, userId:DB.currentUser.id, updateMaterial:false });
+    if (!posted.ok) { DB.inventoryLots = DB.inventoryLots.filter(x=>x.id!==lot.id); Toast.err('Không thể nhập kho', posted.message); return; }
+    const grId = nextCode('PN-2026-', DB.goodsReceipts);
+    DB.goodsReceipts.unshift({ id:grId, poId:'', prId:'', productionOrderId:p.id, date:currentDateYMD(), receivedBy:DB.currentUser.id, warehouse:Q.warehouseName(warehouseId), warehouseId, locationId, location:Q.locationName(locationId), status:'RECEIVED', inspectionStatus:'PASSED', note, items:[{ materialId:p.productId, name:p.productName, unit:p.unit, qty, lotId:lot.id, lotNumber, productionOrderId:p.id, mfgDate, expiryDate, locationId }] });
+    p.finishedReceiptId = grId; p.finishedLotId = lot.id; p.receivedQty = qty; p.receivedAt = new Date().toISOString();
+    ProductionAPI?.scheduleSync(80); InventoryAPI?.scheduleCollections?.(['goodsReceipts','inventoryLots','inventory','inventoryTransactions'],80);
+    Modal.close(); render(); Toast.ok('Đã nhập kho thành phẩm', `${grId} · ${p.productName} · ${fmtN(qty)} ${p.unit}`);
   },
   'po-create-pr': (d) => {
     const p = Q.po(d.id);
@@ -4180,6 +4233,14 @@ function routeRefreshPlan(module, tab) {
     return { api: typeof CRMAPI !== 'undefined' ? CRMAPI : null, keys: map[tab] || map.dashboard };
   }
 
+
+  if (module === 'production' || module === 'production-detail' || module === 'progress') {
+    return {
+      api: typeof ProductionAPI !== 'undefined' ? ProductionAPI : null,
+      keys: ['productionOrders', 'productionPlans', 'productionMaterialRequests'],
+    };
+  }
+
   return null;
 }
 
@@ -4290,19 +4351,33 @@ if (
     const first = Auth.firstRoute(); State.module = first.module; State.tab = first.tab; State.params = first.tab ? {tab:first.tab} : {};
   }
 
-  // [PERFORMANCE] Render giao diện ngay sau Auth. Purchase/Kho/CRM đều cache-first
-  // và tự refresh KIO ở background, nên không cần chặn lần render đầu tiên.
+  // [STATE CONSISTENCY] Hydrate tất cả cache MỘT LẦN trước render đầu tiên.
+  // Trước đây UI render từ data.js trước rồi các API mới nạp cache bất đồng bộ,
+  // khiến cùng một màn có thể nhảy 22 -> 20 -> 22 tùy thứ tự callback.
+  await Promise.allSettled([
+    typeof PurchaseAPI !== 'undefined' ? PurchaseAPI.bootstrap() : Promise.resolve(),
+    typeof InventoryAPI !== 'undefined' ? InventoryAPI.bootstrap() : Promise.resolve(),
+    (typeof SalesCRM !== 'undefined' && typeof SalesCRM.bootstrap === 'function') ? SalesCRM.bootstrap() : Promise.resolve(),
+    typeof ProductionAPI !== 'undefined' ? ProductionAPI.bootstrap() : Promise.resolve(),
+  ]);
+
+  // Route đang mở được lấy server trước render đầu tiên để tránh hiển thị số liệu
+  // cache cũ rồi đổi ngay sau F5. Chỉ refresh đúng collection của route hiện tại.
+  try {
+    const initialPlan = routeRefreshPlan(State.module, State.tab);
+    if (initialPlan?.api?.ensureFresh && initialPlan.keys?.length) {
+      await initialPlan.api.ensureFresh(initialPlan.keys, { force: true });
+    }
+  } catch (err) {
+    console.warn('[DataInit] Không đọc được server cho route đầu tiên; dùng cache hiện tại:', err);
+  }
+
   updateAuthUserUI();
   bindTopbar();
   updateBell();
   render();
 
-  if (typeof PurchaseAPI !== 'undefined') PurchaseAPI.bootstrap().catch(() => {});
-  if (typeof InventoryAPI !== 'undefined') InventoryAPI.bootstrap().catch(() => {});
-  if (typeof SalesCRM !== 'undefined' && typeof SalesCRM.bootstrap === 'function') SalesCRM.bootstrap().catch(() => {});
-  if (typeof ProductionAPI !== 'undefined') ProductionAPI.bootstrap().catch(() => {});
-
-  // Chỉ refresh dữ liệu của route đang mở, sau khi cache đã render xong.
+  // TTL sẽ ngăn request lặp ngay sau lần refresh đầu tiên.
   scheduleRouteDataRefresh(State.module, State.tab);
 
   window.addEventListener('hashchange', () => {

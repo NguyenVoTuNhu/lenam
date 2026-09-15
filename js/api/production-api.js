@@ -27,6 +27,9 @@ const ProductionAPI = (() => {
   let syncChain = Promise.resolve();
   let localVersion = 0;
   let bootPromise = null;
+  let booted = false;
+  let lastRefreshAt = 0;
+  const REFRESH_TTL = 2 * 60 * 1000;
   const lastSerialized = new Map();
 
   DB.productionPlans = DB.productionPlans || [];
@@ -158,49 +161,78 @@ const ProductionAPI = (() => {
   }
 
   async function bootstrap() {
+    // Bootstrap chỉ hydrate cache đúng MỘT LẦN. Tuyệt đối không đọc lại cache
+    // sau khi DB đã được refresh từ server, tránh state bị "nhảy ngược".
+    if (booted) return true;
     if (bootPromise) return bootPromise;
-    bootPromise = (async () => {
+    bootPromise = Promise.resolve().then(() => {
       const cached = readCache();
       if (cached) applyCache(cached);
       rememberBaseline();
-
-      try {
-        // Một lần LIST duy nhất cho bảng settings; không gọi loadSingleton 4 lần.
-        const rows = await KioStore.listCollection(TABLE);
-        const byId = new Map((rows || []).map(row => [String(row?.id || ''), row]));
-        let serverApplied = false;
-
-        for (const [key, id] of Object.entries(IDS)) {
-          const row = byId.get(id);
-          if (row && Array.isArray(row.items)) {
-            DB[key] = row.items;
-            serverApplied = true;
-          }
-        }
-
-        // Tương thích dữ liệu cũ. Chỉ đọc, KHÔNG tự migrate/seed lúc boot.
-        if (!serverApplied) {
-          const legacy = byId.get(LEGACY_STATE_ID);
-          if (legacy) serverApplied = applyLegacy(legacy);
-        }
-
-        rememberBaseline();
-        writeCache();
-
-        if (serverApplied && typeof render === 'function' &&
-            (State?.module === 'production' || State?.module === 'production-detail' ||
-             (State?.module === 'warehouse' && State?.tab === 'issues'))) {
-          render();
-        }
-        return true;
-      } catch (err) {
-        console.warn('[ProductionAPI] Không đọc được server; tiếp tục dùng cache/data.js:', err);
-        rememberBaseline();
-        return Boolean(cached);
-      }
-    })().finally(() => { bootPromise = null; });
+      booted = true;
+      if (cached) console.info('[ProductionAPI] Đã nạp cache sản xuất; chờ refresh theo màn hình đang mở.');
+      else console.info('[ProductionAPI] Chưa có cache sản xuất; dùng dữ liệu hiện tại.');
+      return true;
+    }).finally(() => { bootPromise = null; });
     return bootPromise;
   }
 
-  return { bootstrap, scheduleSync, syncNow };
+  async function refreshFromServer({ force = false } = {}) {
+    const startedVersion = localVersion;
+    try {
+      const rows = await KioStore.listCollection(TABLE);
+      // Nếu user vừa chỉnh dữ liệu trong lúc request đang chạy thì không cho
+      // snapshot server cũ ghi đè thay đổi local chưa sync xong.
+      if (localVersion !== startedVersion) return {};
+
+      const byId = new Map((rows || []).map(row => [String(row?.id || ''), row]));
+      let serverApplied = false;
+      const changed = {};
+
+      for (const [key, id] of Object.entries(IDS)) {
+        const row = byId.get(id);
+        if (row && Array.isArray(row.items)) {
+          const incoming = row.items;
+          const before = JSON.stringify(DB[key] || []);
+          const after = JSON.stringify(incoming);
+          DB[key] = incoming;
+          if (before !== after) changed[key] = incoming;
+          serverApplied = true;
+        }
+      }
+
+      // Tương thích dữ liệu v1: chỉ đọc khi chưa có các singleton mới.
+      if (!serverApplied) {
+        const legacy = byId.get(LEGACY_STATE_ID);
+        if (legacy) {
+          const before = {
+            productionOrders: JSON.stringify(DB.productionOrders || []),
+            productionPlans: JSON.stringify(DB.productionPlans || []),
+            productionMaterialRequests: JSON.stringify(DB.productionMaterialRequests || []),
+          };
+          serverApplied = applyLegacy(legacy);
+          if (serverApplied) {
+            for (const key of Object.keys(IDS)) {
+              if (before[key] !== JSON.stringify(DB[key] || [])) changed[key] = DB[key];
+            }
+          }
+        }
+      }
+
+      lastRefreshAt = Date.now();
+      rememberBaseline();
+      writeCache();
+      return changed;
+    } catch (err) {
+      console.warn('[ProductionAPI] Không refresh được server; giữ state hiện tại:', err);
+      return {};
+    }
+  }
+
+  async function ensureFresh(_keys = null, { force = false } = {}) {
+    if (!force && (Date.now() - lastRefreshAt) < REFRESH_TTL) return {};
+    return refreshFromServer({ force });
+  }
+
+  return { bootstrap, refreshFromServer, ensureFresh, scheduleSync, syncNow };
 })();

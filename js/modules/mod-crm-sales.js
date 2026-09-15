@@ -230,7 +230,10 @@ const SalesCRM = (() => {
     }
   }
 
+  let __salesCrmBooted = false;
   async function bootstrap() {
+    if (__salesCrmBooted) return true;
+    __salesCrmBooted = true;
     const hadLocal = restoreLocal();
     if (typeof CRMAPI === 'undefined') return hadLocal;
     const ok = await CRMAPI.bootstrap();

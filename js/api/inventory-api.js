@@ -28,6 +28,7 @@ const InventoryAPI = (() => {
   const localVersion = new Map();
   const lastRefresh = new Map();
   const REFRESH_TTL = 2 * 60 * 1000;
+  let booted = false;
 
   function versionOf(key) { return Number(localVersion.get(key) || 0); }
   function markLocalChange(keys) {
@@ -467,6 +468,8 @@ const InventoryAPI = (() => {
   }
 
   async function bootstrap() {
+    if (booted) return true;
+    booted = true;
     const cached = readCache();
 
     // [PERFORMANCE] Chỉ nạp cache/data.js ở lúc boot. Không đọc toàn bộ bảng
