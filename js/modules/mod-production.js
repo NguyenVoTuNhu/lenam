@@ -22,8 +22,10 @@ function productionOrderStarted(po) {
 }
 
 function productionOrderCanDelete(po) {
-  return !!po && po.status === 'lsx_cho_san_xuat' && !po.approvedAt && !productionOrderStarted(po);
+  return !!po && ['lsx_cho_duyet','lsx_cho_san_xuat'].includes(po.status) && !po.approvedAt && !productionOrderStarted(po);
 }
+
+function productionOrderCanEdit(po) { return false; }
 
 
 function productionOrderMaterialRequest(po) {
@@ -48,15 +50,16 @@ function productionOrderFinishedReceipt(po) {
 function openProductionOrderEditForm(id) {
   const po = Q.po(id); if (!po) return;
   const started = productionOrderStarted(po);
+  const lockCore = !!po.approvedAt || started;
   const productOptions = (DB.products || []).map((x) => `<option value="${esc(x.id)}" ${x.id===po.productId?'selected':''}>${esc(x.id)} — ${esc(x.name)}</option>`).join('');
   const managers = (DB.employees || []).map((e) => `<option value="${esc(e.id)}" ${e.id===po.managerId?'selected':''}>${esc(e.id)} — ${esc(e.name)}</option>`).join('');
   Modal.open({
     title: `Cập nhật lệnh sản xuất ${po.id}`,
-    sub: started ? 'Lệnh đã bắt đầu: giữ nguyên thành phẩm và số lượng, chỉ cập nhật thông tin điều hành.' : 'Có thể cập nhật thông tin lệnh trước khi bắt đầu sản xuất.',
+    sub: lockCore ? 'Lệnh đã duyệt/bắt đầu: khóa thành phẩm và số lượng, chỉ cập nhật thông tin điều hành.' : 'Có thể cập nhật thông tin lệnh trước khi duyệt.',
     size: 'md',
     body: `<div class="form-grid cols-2">
-      <div class="field"><label>Thành phẩm *</label><select class="inp" id="poEditProduct" ${started?'disabled':''}>${productOptions}</select></div>
-      <div class="field"><label>Số lượng *</label><input class="inp right num" id="poEditQty" type="number" min="0.01" step="0.01" value="${Number(po.qty||0)}" ${started?'disabled':''}></div>
+      <div class="field"><label>Thành phẩm *</label><select class="inp" id="poEditProduct" ${lockCore?'disabled':''}>${productOptions}</select></div>
+      <div class="field"><label>Số lượng *</label><input class="inp right num" id="poEditQty" type="number" min="0.01" step="0.01" value="${Number(po.qty||0)}" ${lockCore?'disabled':''}></div>
       <div class="field"><label>Ngày bắt đầu</label><input class="inp" id="poEditStart" type="date" min="${currentDateYMD()}" value="${esc((po.startDate&&po.startDate>=currentDateYMD())?po.startDate:currentDateYMD())}"></div>
       <div class="field"><label>Deadline</label><input class="inp" id="poEditDeadline" type="date" min="${currentDateYMD()}" value="${esc((po.deadline&&po.deadline>=currentDateYMD())?po.deadline:currentDateYMD())}"></div>
       <div class="field" style="grid-column:1/-1"><label>Người phụ trách</label><select class="inp" id="poEditManager">${managers}</select></div>
@@ -83,7 +86,7 @@ Views.production = function () {
     if (q && ![p.id, p.orderId, p.productName, Q.customerName(p.customerId)].some((v) => String(v).toLowerCase().includes(q))) return false;
     return true;
   });
-  if (onlyLate) list = list.filter((p) => p.status !== 'lsx_hoan_thanh' && daysTo(p.deadline) <= 5);
+  if (onlyLate) list = list.filter((p) => !['lsx_hoan_thanh','lsx_da_nhap_kho'].includes(p.status) && daysTo(p.deadline) <= 5);
   list.sort((a, b) => b.id.localeCompare(a.id));
 
   const pg = paged(list, 'production');
@@ -95,21 +98,21 @@ Views.production = function () {
     const st = currentStage(p);
     const materialRequest=(DB.productionMaterialRequests||[]).find(r=>r.id===p.materialRequestId||r.productionOrderId===p.id);
     const hasBom=!!(Q.product(p.productId)?.bom||[]).length;
-    return `<tr class="clickable" data-act="open-po" data-id="${p.id}">
+    return `<tr class="clickable" data-act="open-production-order" data-id="${p.id}">
       <td><span class="code">${p.id}</span><div class="cell-sub">${esc(st.name)}</div></td>
       <td class="hide-sm"><span class="code" style="color:var(--text-2)">${p.orderId}</span><div class="cell-sub">${esc(Q.customerName(p.customerId))}</div></td>
       <td>${cell2(esc(p.productName), esc(p.spec))}</td>
       <td class="right num">${fmtN(p.qty)} ${esc(p.unit)}</td>
       <td class="num hide-sm">${fmtDate(p.startDate)}</td>
-      <td class="num">${cell2(fmtDate(p.deadline), p.status !== 'lsx_hoan_thanh' ? (d < 0 ? `<span style="color:var(--red)">trễ ${-d} ngày</span>` : d <= 3 ? `<span style="color:var(--orange)">còn ${d} ngày</span>` : `còn ${d} ngày`) : '')}</td>
+      <td class="num">${cell2(fmtDate(p.deadline), !['lsx_hoan_thanh','lsx_da_nhap_kho'].includes(p.status) ? (d < 0 ? `<span style="color:var(--red)">trễ ${-d} ngày</span>` : d <= 3 ? `<span style="color:var(--orange)">còn ${d} ngày</span>` : `còn ${d} ngày`) : '')}</td>
       <td style="min-width:150px">${progressBar(prog)}</td>
       <td>${badge(p.status)}</td>
       <td class="right">${rowActions([
-        { act:'open-po', data:`data-id="${p.id}"`, icon:'fa-eye', title:'Xem chi tiết' },
-        ...(materialRequest ? [{act:'pf-mr-view',data:`data-id="${materialRequest.id}"`,icon:'fa-boxes-packing',title:'Xem yêu cầu NVL'}] : (hasBom ? [{act:'po-material-request',data:`data-id="${p.id}"`,icon:'fa-boxes-packing',title:'Lập yêu cầu NVL theo BOM'}] : [])),
-        ...(p.status==='lsx_hoan_thanh' && !productionOrderFinishedReceipt(p) && Number(p.qcPass||p.qty||0)>0 ? [{act:'po-fg-receipt',data:`data-id="${p.id}"`,icon:'fa-box-open',title:'Nhập kho thành phẩm'}] : []),
-        { act:'po-edit', data:`data-id="${p.id}"`, icon:'fa-pen', title:'Sửa lệnh sản xuất' },
-        ...(!p.approvedAt && p.status==='lsx_cho_san_xuat' ? [{ act:'po-approve', data:`data-id="${p.id}"`, icon:'fa-check', title:'Duyệt lệnh sản xuất' }] : []),
+        { act:'open-production-order', data:`data-id="${p.id}"`, icon:'fa-eye', title:'Xem chi tiết' },
+        ...(!p.approvedAt && ['lsx_cho_duyet','lsx_cho_san_xuat'].includes(p.status) ? [{ act:'po-approve', data:`data-id="${p.id}"`, icon:'fa-check', title:'Duyệt lệnh sản xuất' }] : []),
+        ...(p.approvedAt && p.status==='lsx_cho_san_xuat' ? [{ act:'po-advance', data:`data-id="${p.id}"`, icon:'fa-play', title:'Bắt đầu sản xuất' }] : []),
+        ...(p.status==='lsx_dang_san_xuat' ? [{ act:'po-advance', data:`data-id="${p.id}"`, icon:'fa-gears', title:'Cập nhật công đoạn' }] : []),
+        ...(p.status==='lsx_dang_qc' ? [{ act:'po-qc', data:`data-id="${p.id}"`, icon:'fa-clipboard-check', title:'Đi đến QC thành phẩm' }] : []),
         ...(productionOrderCanDelete(p) ? [{ act:'po-delete', data:`data-id="${p.id}"`, icon:'fa-trash', title:'Xóa lệnh sản xuất' }] : []),
       ])}</td>
     </tr>`;
@@ -119,15 +122,16 @@ Views.production = function () {
   ${pageHead('Lệnh sản xuất', 'Điều hành lệnh sản xuất theo từng công đoạn của xưởng', `
     <button class="btn" data-act="export-po"><i class="fa-solid fa-file-export"></i>Export</button>
     <button class="btn" data-act="go" data-id="progress"><i class="fa-solid fa-diagram-project"></i>Bảng điều hành</button>
-    <button class="btn btn-primary" data-act="new-po"><i class="fa-solid fa-plus"></i>Tạo lệnh sản xuất</button>
   `)}
 
   <div class="grid g-auto-sm" style="margin-bottom:14px">
     ${mkpi('Tổng lệnh', DB.productionOrders.length, 'fa-industry', 'blue')}
-    ${mkpi('Chờ sản xuất', cnt('lsx_cho_san_xuat'), 'fa-hourglass-start', 'slate')}
+    ${mkpi('Chờ duyệt', cnt('lsx_cho_duyet') + DB.productionOrders.filter(p=>p.status==='lsx_cho_san_xuat'&&!p.approvedAt).length, 'fa-file-signature', 'orange')}
+    ${mkpi('Chờ sản xuất', DB.productionOrders.filter(p=>p.status==='lsx_cho_san_xuat'&&p.approvedAt).length, 'fa-hourglass-start', 'slate')}
     ${mkpi('Đang sản xuất', cnt('lsx_dang_san_xuat'), 'fa-gears', 'indigo')}
     ${mkpi('Đang QC', cnt('lsx_dang_qc'), 'fa-clipboard-check', 'orange')}
     ${mkpi('Hoàn thành', cnt('lsx_hoan_thanh'), 'fa-circle-check', 'green')}
+    ${mkpi('Đã nhập kho', cnt('lsx_da_nhap_kho'), 'fa-warehouse', 'teal')}
   </div>
 
   ${onlyLate ? `<div class="card" style="margin-bottom:14px;border-left:3px solid var(--orange)">
@@ -175,13 +179,12 @@ Views['production-detail'] = function (params) {
   ${pageHead(`Lệnh sản xuất ${p.id}`, `${esc(p.productName)} · Đơn hàng ${p.orderId} · ${esc(Q.customerName(p.customerId))}`, `
     <button class="btn" data-act="go" data-id="production"><i class="fa-solid fa-arrow-left"></i>Danh sách</button>
     <button class="btn" data-act="export-po-detail" data-id="${p.id}"><i class="fa-solid fa-print"></i>In phiếu SX</button>
-    <button class="btn" data-act="po-edit" data-id="${p.id}"><i class="fa-solid fa-pen"></i>Sửa</button>
-    ${!p.approvedAt && p.status==='lsx_cho_san_xuat' ? `<button class="btn" data-act="po-approve" data-id="${p.id}"><i class="fa-solid fa-check"></i>Duyệt</button>` : ''}
+    ${!p.approvedAt && ['lsx_cho_duyet','lsx_cho_san_xuat'].includes(p.status) ? `<button class="btn btn-primary" data-act="po-approve" data-id="${p.id}"><i class="fa-solid fa-check"></i>Duyệt lệnh</button>` : ''}
+    ${p.approvedAt && p.status==='lsx_cho_san_xuat' ? `<button class="btn btn-primary" data-act="po-advance" data-id="${p.id}"><i class="fa-solid fa-play"></i>Bắt đầu sản xuất</button>` : ''}
+    ${p.status==='lsx_dang_san_xuat' ? `<button class="btn btn-primary" data-act="po-advance" data-id="${p.id}"><i class="fa-solid fa-gears"></i>Cập nhật công đoạn</button>` : ''}
+    ${p.status==='lsx_dang_qc' ? `<button class="btn btn-primary" data-act="po-qc" data-id="${p.id}"><i class="fa-solid fa-clipboard-check"></i>Đi đến QC thành phẩm</button>` : ''}
     ${productionOrderCanDelete(p) ? `<button class="btn" data-act="po-delete" data-id="${p.id}"><i class="fa-solid fa-trash"></i>Xóa</button>` : ''}
-    ${materialRequest ? `<button class="btn" data-act="pf-mr-view" data-id="${esc(materialRequest.id)}"><i class="fa-solid fa-boxes-packing"></i>Xem yêu cầu NVL</button>` : (productBom.length ? `<button class="btn" data-act="po-material-request" data-id="${esc(p.id)}"><i class="fa-solid fa-boxes-packing"></i>Lập yêu cầu NVL</button>` : '')}
-    ${p.status === 'lsx_hoan_thanh' && !finishedReceipt && Number(p.qcPass||p.qty||0)>0 ? `<button class="btn btn-success" data-act="po-fg-receipt" data-id="${p.id}"><i class="fa-solid fa-box-open"></i>Nhập kho thành phẩm</button>` : ''}
     ${finishedReceipt ? `<button class="btn" data-act="inv-receipt-view" data-id="${esc(finishedReceipt.id)}"><i class="fa-solid fa-warehouse"></i>${esc(finishedReceipt.id)}</button>` : ''}
-    ${p.status !== 'lsx_hoan_thanh' ? `<button class="btn btn-primary" data-act="po-advance" data-id="${p.id}"><i class="fa-solid fa-forward"></i>Cập nhật công đoạn</button>` : ''}
   `)}
 
   <div class="grid g-31" style="margin-bottom:14px">
@@ -198,12 +201,12 @@ Views['production-detail'] = function (params) {
           ${infoItem('Quy cách', esc(p.spec))}
           ${infoItem('Số lượng', `${fmtN(p.qty)} ${esc(p.unit)}`)}
           ${infoItem('Ngày bắt đầu', fmtDate(p.startDate))}
-          ${infoItem('Deadline', `${fmtDate(p.deadline)} ${p.status !== 'lsx_hoan_thanh' ? (d < 0 ? `<span style="color:var(--red);font-weight:700">(trễ ${-d} ngày)</span>` : `<span style="color:${d <= 3 ? 'var(--orange)' : 'var(--text-3)'}">(còn ${d} ngày)</span>`) : ''}`)}
+          ${infoItem('Deadline', `${fmtDate(p.deadline)} ${!['lsx_hoan_thanh','lsx_da_nhap_kho'].includes(p.status) ? (d < 0 ? `<span style="color:var(--red);font-weight:700">(trễ ${-d} ngày)</span>` : `<span style="color:${d <= 3 ? 'var(--orange)' : 'var(--text-3)'}">(còn ${d} ngày)</span>`) : ''}`)}
           ${infoItem('Người phụ trách', esc(Q.employeeName(p.managerId)))}
           ${infoItem('Phê duyệt', p.approvedAt ? `<span class="badge green">Đã duyệt</span><div class="cell-sub">${esc(p.approvedByName||p.approvedBy||'')}</div>` : '<span class="badge orange">Chưa duyệt</span>')}
           ${infoItem('Cấp nguyên liệu', `<span class="badge ${materialState.tone}">${esc(materialState.label)}</span>${materialState.req ? `<div class="cell-sub"><span class="code">${esc(materialState.req.id)}</span></div>` : ''}`)}
           ${infoItem('Nguồn lệnh', p.planId ? `Kế hoạch <span class="code">${esc(p.planId)}</span>` : p.orderId ? `Đơn bán <span class="code">${esc(p.orderId)}</span>` : 'Tạo thủ công')}
-          ${infoItem('Nhập kho TP', finishedReceipt ? `<span class="badge green">Đã nhập</span><div class="cell-sub"><span class="code">${esc(finishedReceipt.id)}</span></div>` : (p.status==='lsx_hoan_thanh' ? '<span class="badge orange">Chờ nhập kho</span>' : '<span class="badge slate">Chưa đến bước</span>'))}
+          ${infoItem('Nhập kho TP', finishedReceipt ? `<span class="badge green">Đã nhập</span><div class="cell-sub"><span class="code">${esc(finishedReceipt.id)}</span></div>` : (p.status==='lsx_dang_qc' ? '<span class="badge orange">Chờ QC · chưa tính tồn</span>' : p.status==='lsx_hoan_thanh' ? '<span class="badge red">QC không đạt · không nhập tồn</span>' : '<span class="badge slate">Chưa đến bước</span>'))}
           ${infoItem('Tổng giờ máy', fmtDec(totalHours) + ' giờ')}
         </div>
       </div>
@@ -229,29 +232,17 @@ Views['production-detail'] = function (params) {
     </div>
   </div>
 
-  <!-- KIỂM TRA VẬT TƯ THEO ĐỊNH MỨC -->
-  <div class="card" style="margin-bottom:14px;${lacking.length ? 'border-left:3px solid var(--red)' : ''}">
+  <!-- NGUYÊN LIỆU ĐÃ ĐƯỢC CẤP TỪ KẾ HOẠCH SẢN XUẤT -->
+  <div class="card" style="margin-bottom:14px">
     <div class="card-head">
-      <span class="mkpi-ico t-${lacking.length ? 'red' : 'green'}"><i class="fa-solid ${lacking.length ? 'fa-triangle-exclamation' : 'fa-circle-check'}"></i></span>
-      <div><h3>Kiểm tra vật tư theo định mức (BOM)</h3>
-        <p>${lacking.length ? `Thiếu ${lacking.length} vật tư — cần tạo yêu cầu mua hàng trước khi sản xuất tiếp` : 'Vật tư đủ cho toàn bộ lệnh sản xuất'}</p></div>
-      <div class="right">
-        ${materialRequest ? `<button class="btn btn-sm" data-act="pf-mr-view" data-id="${esc(materialRequest.id)}"><i class="fa-solid fa-eye"></i>${esc(materialRequest.id)}</button>` : (productBom.length ? `<button class="btn btn-sm btn-primary" data-act="po-material-request" data-id="${esc(p.id)}"><i class="fa-solid fa-boxes-packing"></i>Lập phiếu yêu cầu NVL</button>` : '')}
-        ${lacking.length ? `<button class="btn btn-sm" data-act="po-create-pr" data-id="${p.id}"><i class="fa-solid fa-cart-plus"></i>Tạo yêu cầu mua hàng</button>` : ''}
-        <button class="btn btn-sm" data-act="go" data-id="materials"><i class="fa-solid fa-layer-group"></i>Kho vật tư</button>
-      </div>
+      <span class="mkpi-ico t-${materialState.code==='ISSUED' ? 'green' : 'orange'}"><i class="fa-solid fa-boxes-packing"></i></span>
+      <div><h3>Nguyên liệu cấp cho lệnh sản xuất</h3>
+        <p>${materialRequest ? `Theo phiếu ${esc(materialRequest.id)} của kế hoạch ${esc(p.planId||'—')} · ${esc(materialState.label)}` : 'Lệnh chưa có phiếu cấp NVL từ Kế hoạch sản xuất'}</p></div>
     </div>
-    ${tableShell(
-      [{ t: 'Mã VT', w: '92px' }, { t: 'Tên vật tư' }, { t: 'Định mức/SP', cls: 'right' }, { t: 'Nhu cầu', cls: 'right' },
-       { t: 'Tồn kho', cls: 'right' }, { t: 'Thiếu', cls: 'right' }, { t: 'Tình trạng', w: '120px' }],
-      check.map((m) => `<tr>
-        <td><span class="code">${m.materialId}</span></td>
-        <td class="strong">${esc(m.name)}</td>
-        <td class="right num muted">${fmtDec(m.per, 2)} ${esc(m.unit)}</td>
-        <td class="right num strong">${fmtDec(m.need, 2)} ${esc(m.unit)}</td>
-        <td class="right num">${fmtDec(m.stock, 2)} ${esc(m.unit)}</td>
-        <td class="right num" style="color:${m.lack ? 'var(--red)' : 'var(--text-3)'};font-weight:${m.lack ? 700 : 400}">${m.lack ? fmtDec(m.lack, 2) + ' ' + esc(m.unit) : '—'}</td>
-        <td>${m.ok ? '<span class="badge green">Đủ</span>' : '<span class="badge red">Thiếu</span>'}</td></tr>`))}
+    ${materialRequest ? tableShell(
+      [{ t:'Mã NVL', w:'100px' }, { t:'Nguyên liệu' }, { t:'Số lượng cấp', cls:'right' }, { t:'Trạng thái', w:'150px' }],
+      (materialRequest.items||[]).map(i=>`<tr><td><span class="code">${esc(i.materialId)}</span></td><td class="strong">${esc(Q.material(i.materialId)?.name||i.materialId)}</td><td class="right num">${fmtDec(i.qty,2)} ${esc(Q.material(i.materialId)?.unit||'')}</td><td><span class="badge ${materialState.code==='ISSUED'?'green':'orange'}">${esc(materialState.label)}</span></td></tr>`),
+      {emptyTitle:'Phiếu chưa có nguyên liệu'}) : `<div class="card-body"><div class="alert warning"><i class="fa-solid fa-triangle-exclamation"></i><span>LSX chuẩn phải được tạo từ Kế hoạch sản xuất sau khi Kho đã cấp NVL. Không lập yêu cầu NVL lại tại Lệnh sản xuất.</span></div></div>`}
   </div>
 
   <!-- ĐỊNH MỨC CÔNG ĐOẠN LẤY TỪ BÁO GIÁ -->
@@ -265,7 +256,7 @@ Views['production-detail'] = function (params) {
       <div class="card-head">
         <span class="mkpi-ico t-indigo"><i class="fa-solid fa-gears"></i></span>
         <div><h3>Định mức công đoạn (routing)</h3>
-          <p>${p.routingOverride?.length ? 'Theo kế hoạch sản xuất' : 'Theo BOM / định mức chuẩn'} — ${routing.length} công đoạn · ${fmtDec(totalHours, 2)} giờ/${esc(p.unit)} · ${fmtDec(totalHours * p.qty, 1)} giờ cho cả lệnh</p></div>
+          <p>${p.routingOverride?.length ? 'Theo kế hoạch sản xuất' : 'Theo BOM / định mức chuẩn'} — ${routing.length} công đoạn thực hiện theo thứ tự</p></div>
         <div class="right"><button class="btn btn-sm" data-act="go" data-id="operations"><i class="fa-solid fa-list"></i>Danh mục công đoạn</button></div>
       </div>
       ${tableShell(
@@ -326,7 +317,7 @@ Views['production-detail'] = function (params) {
             </div>
             <div class="kcol-foot">
               ${s.status === 'done' ? '<button class="btn btn-xs" disabled style="width:100%"><i class="fa-solid fa-check"></i>Đã xong</button>'
-                : s.status === 'doing' ? `<button class="btn btn-xs btn-primary" style="width:100%" data-act="stage-update" data-id="${p.id}" data-i="${i}"><i class="fa-solid fa-pen"></i>Ghi nhận sản lượng</button>`
+                : s.status === 'doing' ? (/QC/i.test(String(s.name||'')) ? `<button class="btn btn-xs btn-primary" style="width:100%" data-act="po-qc" data-id="${p.id}"><i class="fa-solid fa-clipboard-check"></i>Mở QC/QA</button>` : `<button class="btn btn-xs btn-primary" style="width:100%" data-act="stage-update" data-id="${p.id}" data-i="${i}"><i class="fa-solid fa-pen"></i>Ghi nhận sản lượng</button>`)
                 : canStart ? `<button class="btn btn-xs" style="width:100%" data-act="stage-start" data-id="${p.id}" data-i="${i}"><i class="fa-solid fa-play"></i>Bắt đầu</button>`
                 : '<button class="btn btn-xs" disabled style="width:100%">Chờ công đoạn trước</button>'}
             </div>
@@ -336,7 +327,7 @@ Views['production-detail'] = function (params) {
     </div>
     ${(order || p.status === 'lsx_dang_qc') ? `<div class="card-foot" style="display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end">
       ${order ? `<button class="btn btn-sm" data-act="open-order" data-id="${order.id}"><i class="fa-solid fa-cart-flatbed"></i>Xem đơn hàng ${order.id}</button>` : ''}
-      ${p.status === 'lsx_dang_qc' ? `<button class="btn btn-sm btn-success" data-act="po-qc" data-id="${p.id}"><i class="fa-solid fa-clipboard-check"></i>Ghi nhận kết quả QC</button>` : ''}
+      ${p.status === 'lsx_dang_qc' ? `<button class="btn btn-sm btn-success" data-act="po-qc" data-id="${p.id}"><i class="fa-solid fa-clipboard-check"></i>Mở kiểm tra thành phẩm</button>` : ''}
     </div>` : ''}
   </div>`;
 };
@@ -557,7 +548,7 @@ function openOperationModal(id) {
 /* ------------------------------------------------- TIẾN ĐỘ SẢN XUẤT */
 Views.progress = function () {
   const f = F('progress', { stage: '', status: '' });
-  const active = DB.productionOrders.filter((p) => p.status !== 'lsx_hoan_thanh');
+  const active = DB.productionOrders.filter((p) => !['lsx_hoan_thanh','lsx_da_nhap_kho'].includes(p.status));
   const late = active.filter((p) => daysTo(p.deadline) < 0);
   const soon = active.filter((p) => { const d = daysTo(p.deadline); return d >= 0 && d <= 3; });
   const avg = active.length ? Math.round(active.reduce((s, p) => s + Q.progress(p), 0) / active.length) : 0;
@@ -621,7 +612,7 @@ Views.progress = function () {
             <div class="kcol-body">
               ${col.items.length ? col.items.map((p) => {
                 const d = daysTo(p.deadline);
-                return `<div class="alert-item" style="flex-direction:column;align-items:stretch;gap:6px;padding:10px" data-act="open-po" data-id="${p.id}">
+                return `<div class="alert-item" style="flex-direction:column;align-items:stretch;gap:6px;padding:10px" data-act="open-production-order" data-id="${p.id}">
                   <div style="display:flex;align-items:center;gap:7px">
                     <span class="code" style="font-size:12px">${p.id}</span>
                     ${d < 0 ? '<span class="badge red no-dot" style="margin-left:auto;font-size:10px">Trễ</span>' : d <= 3 ? '<span class="badge orange no-dot" style="margin-left:auto;font-size:10px">Gấp</span>' : ''}
@@ -639,7 +630,7 @@ Views.progress = function () {
 };
 
 Views.progress.after = function () {
-  const active = DB.productionOrders.filter((p) => p.status !== 'lsx_hoan_thanh').slice(0, 12);
+  const active = DB.productionOrders.filter((p) => !['lsx_hoan_thanh','lsx_da_nhap_kho'].includes(p.status)).slice(0, 12);
   Charts.bar('chProgress', active.map((p) => p.id.replace('LSX-2026-', '#')), [
     // Màu theo mức độ hoàn thành: đỏ (chậm) → cam → xanh
     { label: '% hoàn thành', data: active.map((p) => Q.progress(p)),
@@ -661,7 +652,7 @@ function pfFinishedStock(productId) {
 }
 function pfPlanStatus(status) {
   const map = {
-    WAITING_APPROVAL:['Chờ duyệt','orange'], APPROVED:['Đã duyệt','green'],
+    WAITING_APPROVAL:['Chờ duyệt Kho','orange'], WAITING_SALES_APPROVAL:['Chờ duyệt yêu cầu SX','orange'], APPROVED:['Đã duyệt','green'],
     MATERIAL_REQUESTED:['Đã yêu cầu NVL','blue'], MATERIAL_ISSUED:['Đã xuất NVL','indigo'],
     RELEASED:['Đã tạo LSX','green'], CANCELLED:['Đã hủy','slate']
   };
@@ -671,8 +662,17 @@ function pfRequestStatus(status) {
   const map={WAITING_WAREHOUSE_APPROVAL:['Chờ kho duyệt','orange'],APPROVED:['Kho đã duyệt','blue'],ISSUED:['Đã xuất NVL','green'],REJECTED:['Từ chối','red']};
   const x=map[status]||[status||'—','slate']; return `<span class="badge ${x[1]}">${x[0]}</span>`;
 }
+function pfBomRequiredQty(qtyPerUnit, productionQty, lossPct=0) {
+  const base=Number(qtyPerUnit||0)*Number(productionQty||0);
+  const loss=Math.max(0,Math.min(99.99,Number(lossPct||0)));
+  return loss>0 ? base/(1-loss/100) : base;
+}
 function pfBomText(product) {
-  const rows=(product?.bom||[]).map(([mid,qty])=>{const m=Q.material(mid);return `${m?.name||mid}: ${fmtDec(Number(qty||0),3)} ${m?.unit||''}`;});
+  const rows=(product?.bom||[]).map(([mid,qty,lossPct=0])=>{
+    const m=Q.material(mid);
+    const loss=Number(lossPct||0);
+    return `${m?.name||mid}: ${fmtDec(Number(qty||0),3)} ${m?.unit||''}/1${loss>0?` · hao hụt ${fmtDec(loss,2)}%`:''}`;
+  });
   return rows.length?rows.join(' · '):'Chưa khai báo định mức';
 }
 
@@ -689,9 +689,10 @@ Views.productionBom = function () {
 function pfOpenBomModal(productId='') {
   const products=DB.products||[];
   const selected=Q.product(productId)||products[0];
-  const makeLines=(p)=>((p?.bom||[]).length?p.bom:[[DB.materials?.[0]?.id||'',1]]).map(([mid,qty])=>`<div class="pf-bom-line" style="display:grid;grid-template-columns:1fr 160px 42px;gap:8px;margin-bottom:8px">
+  const makeLines=(p)=>((p?.bom||[]).length?p.bom:[[DB.materials?.[0]?.id||'',1,0]]).map(([mid,qty,lossPct=0])=>`<div class="pf-bom-line" style="display:grid;grid-template-columns:minmax(280px,1fr) 150px 130px 42px;gap:8px;margin-bottom:8px;align-items:center">
     <select class="inp" name="material">${(DB.materials||[]).map(m=>`<option value="${esc(m.id)}" ${m.id===mid?'selected':''}>${esc(m.id)} — ${esc(m.name)} (${esc(m.unit||'')})</option>`).join('')}</select>
-    <input class="inp right num" name="qty" type="number" min="0.0001" step="0.0001" value="${Number(qty||0)}">
+    <input class="inp right num" name="qty" type="number" min="0.0001" step="0.0001" value="${Number(qty||0)}" title="Định mức cho 1 đơn vị thành phẩm">
+    <div style="display:grid;grid-template-columns:1fr 26px;align-items:center;gap:4px"><input class="inp right num" name="lossPct" type="number" min="0" max="99.99" step="0.01" value="${Number(lossPct||0)}" title="Tỷ lệ hao hụt"><span class="muted">%</span></div>
     <button class="btn btn-sm" type="button" data-act="pf-bom-remove-line"><i class="fa-solid fa-trash"></i></button></div>`).join('');
   const makeRouting=(p)=>((p?.routing||[]).length?p.routing:[[DB.operations?.[0]?.id||'',0.01]]).map(([oid,hours])=>`<div class="pf-bom-op-line" data-hours="${Number(hours||0.01)}" style="display:grid;grid-template-columns:1fr 42px;gap:8px;margin-bottom:8px">
     <select class="inp" name="operation">${(DB.operations||[]).map(o=>`<option value="${esc(o.id)}" ${o.id===oid?'selected':''}>${esc(o.id)} — ${esc(o.name)} · ${esc(o.workshop||'')}</option>`).join('')}</select>
@@ -699,22 +700,22 @@ function pfOpenBomModal(productId='') {
   Modal.open({title:'Khai báo BOM / Định mức',sub:'Khai báo nguyên liệu và công đoạn chuẩn cho 1 đơn vị thành phẩm',size:'xl',body:`
     <div class="field"><label>Thành phẩm *</label><select class="inp" id="pfBomProduct">${products.map(p=>`<option value="${esc(p.id)}" ${p.id===selected?.id?'selected':''}>${esc(p.id)} — ${esc(p.name)}</option>`).join('')}</select></div>
     <div class="grid g-2" style="align-items:start">
-      <div class="card"><div class="card-head"><div><h3>Nguyên liệu định mức</h3><p>Số lượng cho 1 ${esc(selected?.unit||'đơn vị')} thành phẩm</p></div></div><div class="card-body"><div id="pfBomLines">${makeLines(selected)}</div><button class="btn btn-sm" type="button" data-act="pf-bom-add-line"><i class="fa-solid fa-plus"></i>Thêm nguyên liệu</button></div></div>
+      <div class="card"><div class="card-head"><div><h3>Nguyên liệu định mức</h3><p>Định mức cho 1 ${esc(selected?.unit||'đơn vị')} thành phẩm. Hao hụt được dùng để tự tính lượng NVL cần cấp khi lập kế hoạch.</p></div></div><div class="card-body"><div style="display:grid;grid-template-columns:minmax(280px,1fr) 150px 130px 42px;gap:8px;margin:0 0 6px;font-size:12px;font-weight:700;color:var(--muted)"><span>Nguyên liệu</span><span class="right">Định mức / 1 ĐVT</span><span class="right">Hao hụt %</span><span></span></div><div id="pfBomLines">${makeLines(selected)}</div><button class="btn btn-sm" type="button" data-act="pf-bom-add-line"><i class="fa-solid fa-plus"></i>Thêm nguyên liệu</button><div class="alert info" style="margin-top:12px"><i class="fa-solid fa-calculator"></i><span>Khi lập kế hoạch: <b>NVL cần cấp = định mức × số lượng kế hoạch ÷ (1 − % hao hụt)</b>.</span></div></div></div>
       <div class="card"><div class="card-head"><div><h3>Công đoạn / Gia công</h3><p>Chọn các công đoạn áp dụng cho thành phẩm</p></div></div><div class="card-body"><div id="pfBomOps">${makeRouting(selected)}</div><button class="btn btn-sm" type="button" data-act="pf-bom-add-op"><i class="fa-solid fa-plus"></i>Thêm công đoạn</button></div></div>
     </div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="pf-bom-save"><i class="fa-solid fa-floppy-disk"></i>Lưu BOM / Routing</button>`});
 }
 
 Views.productionPlanFlow = function () {
-  const plans=(DB.productionPlans||[]).filter(p=>p.status!=='WAITING_APPROVAL' && p.status!=='CANCELLED');
+  const plans=(DB.productionPlans||[]).filter(p=>['APPROVED','MATERIAL_REQUESTED','MATERIAL_ISSUED','RELEASED'].includes(p.status));
   const rows=plans.map(p=>`<tr><td><span class="code">${esc(p.id)}</span></td><td>${fmtDate(p.date)}</td>
     <td>${(p.items||[]).map(i=>`${esc(Q.product(i.productId)?.name||i.productId)} <b>${fmtN(i.qty)}</b>`).join('<br>')}</td>
-    <td>${pfPlanStatus(p.status)}</td><td>${esc(Q.employeeName(p.createdBy)||p.createdBy||'—')}</td>
+    <td>${pfPlanStatus(p.status)}${p.source==='SALES_ORDER'?`<div class="cell-sub">Từ đơn bán ${esc(p.sourceOrderId||'')}</div>`:''}</td><td>${esc(Q.employeeName(p.createdBy)||p.createdBy||'—')}</td>
     <td class="right">${rowActions([
       {act:'pf-plan-view',data:`data-id="${esc(p.id)}"`,icon:'fa-eye',title:'Xem chi tiết kế hoạch'},
       ...(p.status==='APPROVED'?[{act:'pf-plan-materials',data:`data-id="${esc(p.id)}"`,icon:'fa-boxes-packing',title:'Chuẩn bị NVL / công đoạn và lập phiếu yêu cầu'}]:[]),
       ...(p.status==='MATERIAL_ISSUED'?[{act:'pf-plan-release',data:`data-id="${esc(p.id)}"`,icon:'fa-industry',title:'Tạo lệnh sản xuất'}]:[])
     ])}</td></tr>`);
-  return `${pageHead('Kế hoạch sản xuất','Kế hoạch đã được Kho phê duyệt; chọn nguyên liệu và lập phiếu yêu cầu NVL')}
+  return `${pageHead('Kế hoạch sản xuất','Kế hoạch đã được Kho duyệt; thông tin BOM, yêu cầu NVL, trạng thái cấp NVL và lệnh sản xuất được theo dõi ngay tại từng kế hoạch')}
     <div class="grid g-auto-sm" style="margin-bottom:14px">
       ${mkpi('Đã duyệt',plans.filter(p=>p.status==='APPROVED').length,'fa-circle-check','green')}
       ${mkpi('Chờ kho cấp NVL',plans.filter(p=>p.status==='MATERIAL_REQUESTED').length,'fa-boxes-packing','orange')}
@@ -737,6 +738,6 @@ Views.production = function () {
   const tab=State.tab || (State.params&&State.params.tab);
   if(tab==='bom') return Views.productionBom();
   if(tab==='plan') return Views.productionPlanFlow();
-  if(tab==='issue_nvl') return Views.productionMaterialRequests();
+  if(tab==='issue_nvl') return Views.productionPlanFlow(); // route cũ: YCNVL đã gộp vào Kế hoạch sản xuất
   return _productionViewBeforeFlow ? _productionViewBeforeFlow(State.params) : '';
 };

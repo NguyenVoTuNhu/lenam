@@ -1722,11 +1722,90 @@ function openIncomingInspectionModal(receiptId) {
   });
 }
 
+
+/* ==========================================================================\n * QC THÀNH PHẨM - nhận trực tiếp từ Lệnh sản xuất\n * Thành phẩm chỉ là tồn chờ QC (qtyPending), chưa được cộng qtyOnHand.\n * ======================================================================= */
+function finalInspectionStatusHtml(status) {
+  if (status === 'PASSED') return '<span class="badge green">Đạt</span>';
+  if (status === 'PARTIAL_FAILED') return '<span class="badge orange">Đạt một phần</span>';
+  if (status === 'FAILED') return '<span class="badge red">Không đạt</span>';
+  return '<span class="badge orange">Chờ kiểm</span>';
+}
+
+function finalInspectionView() {
+  DB.productionFinalInspections = DB.productionFinalInspections || [];
+  // Tương thích các LSX đang QC được tạo từ phiên bản trước.
+  (DB.productionOrders || []).filter(po => po.status === 'lsx_dang_qc').forEach(po => {
+    if (!(DB.productionFinalInspections || []).some(x => x.productionOrderId === po.id) && typeof ensureFinishedQcPending === 'function') {
+      ensureFinishedQcPending(po, Number(po.qty || 0));
+    }
+  });
+  const f = F('quality-fqc', { q:'', status:'' });
+  const q = String(f.q || '').toLowerCase().trim();
+  let list = (DB.productionFinalInspections || []).filter(ins => {
+    if (f.status && (ins.status || 'PENDING') !== f.status) return false;
+    if (q && ![ins.id,ins.productionOrderId,ins.productId,ins.productName,ins.lotNumber].some(v=>String(v||'').toLowerCase().includes(q))) return false;
+    return true;
+  }).sort((a,b)=>String(b.id).localeCompare(String(a.id),'vi',{numeric:true}));
+  const pg = paged(list,'quality-fqc');
+  const rows = pg.items.map(ins => {
+    const po = Q.po(ins.productionOrderId);
+    return `<tr class="clickable" data-act="fqc-open" data-id="${esc(ins.id)}">
+      <td>${cell2(`<span class="code">${esc(ins.id)}</span>`, `<span class="code">${esc(ins.productionOrderId)}</span>`)}</td>
+      <td>${cell2(esc(ins.productName || Q.product(ins.productId)?.name || ins.productId), esc(ins.productId))}</td>
+      <td class="right num">${fmtN(ins.qty)} ${esc(ins.unit||po?.unit||'')}</td>
+      <td><span class="code">${esc(ins.lotNumber||'—')}</span><div class="cell-sub">${esc(Q.warehouseName(ins.warehouseId))}</div></td>
+      <td>${finalInspectionStatusHtml(ins.status||'PENDING')}</td>
+      <td class="right num">${ins.status==='PENDING'?'—':`${fmtN(ins.passQty||0)} / ${fmtN(ins.failQty||0)}`}</td>
+      <td class="num">${ins.inspectedAt ? fmtDate(String(ins.inspectedAt).slice(0,10)) : '—'}</td>
+      <td class="right">${rowActions([{act:'fqc-open',data:`data-id="${esc(ins.id)}"`,icon:'fa-eye',title:'Xem chi tiết / kiểm tra'}])}</td>
+    </tr>`;
+  });
+  return `${pageHead('Kiểm tra thành phẩm', 'Thành phẩm hoàn tất sản xuất được đưa vào Kho thành phẩm ở trạng thái chờ QC; chỉ số lượng đạt mới được cộng tồn.', '')}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">
+      ${mkpi('Chờ kiểm',list.filter(x=>(x.status||'PENDING')==='PENDING').length,'fa-clock','orange')}
+      ${mkpi('Đạt',list.filter(x=>x.status==='PASSED').length,'fa-circle-check','green')}
+      ${mkpi('Đạt một phần',list.filter(x=>x.status==='PARTIAL_FAILED').length,'fa-circle-half-stroke','orange')}
+      ${mkpi('Không đạt',list.filter(x=>x.status==='FAILED').length,'fa-circle-xmark','red')}
+    </div>
+    <div class="card"><div class="toolbar">${searchBox('quality-fqc','Tìm FQC, LSX, thành phẩm, lô…')}${selectFilter('quality-fqc','status',[['PENDING','Chờ kiểm'],['PASSED','Đạt'],['PARTIAL_FAILED','Đạt một phần'],['FAILED','Không đạt']],'Tất cả kết quả')}${(f.q||f.status)?'<button class="btn btn-sm" data-act="clear-filter" data-key="quality-fqc"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>':''}<span class="spacer"></span><span class="chip">${fmtN(list.length)} phiếu</span></div>
+    ${tableShell([{t:'Phiếu QC / LSX'},{t:'Thành phẩm'},{t:'SL chờ kiểm',cls:'right'},{t:'Lô / Kho'},{t:'Kết quả'},{t:'Đạt / Lỗi',cls:'right'},{t:'Ngày kiểm'},{t:'',cls:'right'}],rows,{emptyTitle:'Chưa có thành phẩm chờ kiểm tra',emptyDesc:'Khi công đoạn sản xuất hoàn tất, thành phẩm sẽ tự xuất hiện tại đây.'})}${pagiHTML('quality-fqc',pg,'phiếu QC')}</div>`;
+}
+
+function openFinalInspectionModal(id) {
+  const ins = (DB.productionFinalInspections || []).find(x=>x.id===id); if (!ins) return;
+  const po = Q.po(ins.productionOrderId);
+  const row = (DB.inventory || []).find(r=>r.lotId===ins.lotId && r.productId===ins.productId);
+  const readonly = (ins.status||'PENDING') !== 'PENDING' || !Auth.hasPermission('QC_INSPECT');
+  const total = Number(ins.qty || row?.qtyPending || po?.qty || 0);
+  Modal.open({
+    title:`Kiểm tra thành phẩm · ${ins.id}`,
+    sub:`${esc(ins.productionOrderId)} · ${esc(ins.productName||po?.productName||'')} · lô ${esc(ins.lotNumber||'')}`,
+    size:'lg',
+    body:`<div class="info-grid" style="margin-bottom:14px">
+      ${infoItem('Lệnh sản xuất',`<span class="code">${esc(ins.productionOrderId)}</span>`)}
+      ${infoItem('Thành phẩm',esc(ins.productName||po?.productName||ins.productId))}
+      ${infoItem('Số lượng chờ QC',`<b>${fmtN(total)} ${esc(ins.unit||po?.unit||'')}</b>`)}
+      ${infoItem('Kho chờ QC',`${esc(Q.warehouseName(ins.warehouseId))} · ${esc(Q.locationName(ins.locationId))}`)}
+      ${infoItem('Mã lô',`<span class="code">${esc(ins.lotNumber||'—')}</span>`)}
+      ${infoItem('Trạng thái',finalInspectionStatusHtml(ins.status||'PENDING'))}
+    </div>
+    <div class="note-box" style="margin-bottom:14px"><b>Nguyên tắc tồn kho:</b> ${fmtN(total)} ${esc(ins.unit||po?.unit||'')} hiện chỉ là <b>tồn chờ QC</b>, chưa được tính vào tồn khả dụng. Khi QC xác nhận, chỉ số lượng đạt mới được cộng vào tồn kho thành phẩm.</div>
+    <div class="form-grid cols-2">
+      <div class="field"><label>Số lượng đạt *</label><input class="inp right num" id="fqcPass" type="number" min="0" max="${total}" step="0.01" value="${readonly?Number(ins.passQty||0):total}" ${readonly?'disabled':''}></div>
+      <div class="field"><label>Số lượng không đạt *</label><input class="inp right num" id="fqcFail" type="number" min="0" max="${total}" step="0.01" value="${Number(ins.failQty||0)}" ${readonly?'disabled':''}></div>
+      <div class="field" style="grid-column:1/-1"><label>Ghi chú QC</label><textarea class="inp" id="fqcNote" rows="3" ${readonly?'disabled':''}>${esc(ins.note||'')}</textarea></div>
+    </div>
+    ${readonly?`<div class="alert-item"><i class="fa-solid fa-lock"></i><div><b>Kết quả đã được xác nhận</b><div class="muted">Đạt ${fmtN(ins.passQty||0)} · không đạt ${fmtN(ins.failQty||0)} ${esc(ins.unit||'')}. Kết quả đã khóa để bảo toàn lịch sử tồn kho.</div></div></div>`:''}`,
+    foot:`<button class="btn" data-act="modal-close">Đóng</button>${readonly?'':`<button class="btn btn-primary" data-act="fqc-save" data-id="${esc(ins.id)}"><i class="fa-solid fa-clipboard-check"></i>Xác nhận QC & cập nhật tồn</button>`}`
+  });
+}
+
 /* Đăng ký Views cho các phân hệ doanh nghiệp tiêu chuẩn */
 ['accounting', 'quality', 'maintenance', 'logistics', 'rnd', 'approvals', 'bi'].forEach(key => {
   Views[key] = function (params = {}) {
     const tab = State.tab || (params && params.tab) || 'dashboard';
     if (key === 'quality' && tab === 'iqc') return incomingInspectionView();
+    if (key === 'quality' && tab === 'fqc') return finalInspectionView();
     if (!tab || tab === 'dashboard') {
       if (ENTERPRISE_MODULES[key]) return enterpriseView(key);
       if (key === 'bi' && typeof Views.reports === 'function') return Views.reports(params);

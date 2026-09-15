@@ -601,6 +601,11 @@ Views.warehouse = function () {
         ? Views['inv-lots']()
         : '';
 
+    case 'defects':
+      return Views['inv-defects']
+        ? Views['inv-defects']()
+        : '';
+
     case 'locations':
       return Views['inv-warehouses']
         ? Views['inv-warehouses']()
@@ -1579,23 +1584,106 @@ Views['inv-alerts'] = function () {
     <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tồn dưới min', low.length, 'fa-arrow-down', 'orange', 'warehouse-alert-open-low')}${mkpi('Tồn trên max', over.length, 'fa-arrow-up', 'red', 'warehouse-alert-open-inventory')}${mkpi('Lô cận hạn', near.length, 'fa-calendar-minus', 'orange', 'warehouse-dashboard-open-near-expiry')}${mkpi('Lô hết hạn', expired.length, 'fa-circle-xmark', 'red', 'warehouse-dashboard-open-expired')}${mkpi('Chậm luân chuyển', slow.length, 'fa-hourglass-half', 'slate', 'warehouse-alert-open-inventory')}</div>
     <div class="card">${tableShell([{ t: 'Loại cảnh báo' }, { t: 'Đối tượng' }, { t: 'Thông tin' }, { t: 'Khuyến nghị' }], rows, { emptyTitle: 'Không có cảnh báo' })}</div>`;
 };
+
+/* ==========================================================================
+ * KHO -> HÀNG LỖI & HÀNG TRẢ VỀ
+ * ========================================================================== */
+Views['inv-defects'] = function () {
+  const f = F('inv-defects', { subtab:'defective', q:'' });
+  const subtab = f.subtab || 'defective';
+  const q = String(f.q || '').toLowerCase().trim();
+  const defectWhIds = new Set((DB.warehouses||[]).filter(w=>w.type==='DEFECTIVE').map(w=>w.id));
+  const returnWhIds = new Set((DB.warehouses||[]).filter(w=>w.type==='RETURNED').map(w=>w.id));
+  const sourceIds = subtab === 'returned' ? returnWhIds : defectWhIds;
+  let rowsData = (DB.inventory||[]).filter(r=>sourceIds.has(r.warehouseId) && Number(r.qtyOnHand||0)>0);
+  if (q) rowsData = rowsData.filter(r=>{
+    const p=Q.product(r.productId)||Q.material(r.productId), lot=Q.lot(r.lotId), wh=(DB.warehouses||[]).find(w=>w.id===r.warehouseId);
+    return [r.productId,p?.name,lot?.lotNumber,r.sourceId,r.productionOrderId,wh?.name].some(v=>String(v||'').toLowerCase().includes(q));
+  });
+  rowsData.sort((a,b)=>String(b.lastUpdated||'').localeCompare(String(a.lastUpdated||'')));
+  const rows = rowsData.map(r=>{
+    const p=Q.product(r.productId)||Q.material(r.productId), lot=Q.lot(r.lotId), wh=(DB.warehouses||[]).find(w=>w.id===r.warehouseId), loc=(DB.warehouseLocations||[]).find(l=>l.id===r.locationId);
+    const ref = subtab==='returned' ? (r.sourceId||lot?.salesOrderId||'—') : (r.productionOrderId||r.sourceId||lot?.productionOrderId||'—');
+    const refAct = ref && ref!=='—' ? (subtab==='returned'?'open-order':'open-production-order') : '';
+    const refHtml = refAct ? `<button type="button" class="ref-link compact" data-act="${refAct}" data-id="${esc(ref)}" title="Mở ${subtab==='returned'?'đơn hàng':'lệnh sản xuất'} ${esc(ref)}"><span class="code">${esc(ref)}</span><i class="fa-solid fa-arrow-up-right-from-square"></i></button>` : '<span class="muted">—</span>';
+    const typeBadge = subtab==='returned' ? '<span class="badge orange">Hàng trả về</span>' : '<span class="badge red">Hàng lỗi</span>';
+    return `<tr class="clickable" data-act="inv-exception-detail" data-product="${esc(r.productId)}" data-lotid="${esc(r.lotId||'')}" data-warehouse="${esc(r.warehouseId)}">
+      <td>${cell2(`<span class="code">${esc(r.productId)}</span>`,esc(p?.name||r.productId))}</td>
+      <td>${typeBadge}</td><td><span class="code">${esc(lot?.lotNumber||'—')}</span></td><td>${esc(wh?.name||'—')}<div class="cell-sub">${esc(loc?.name||'')}</div></td>
+      <td class="right strong num">${fmtN(r.qtyOnHand||0)} ${esc(r.unit||p?.unit||'')}</td><td>${refHtml}</td>
+      <td>${fmtDate(String(r.lastUpdated||'').slice(0,10))}</td><td class="right">${rowActions([{act:'inv-exception-detail',data:`data-product="${esc(r.productId)}" data-lotid="${esc(r.lotId||'')}" data-warehouse="${esc(r.warehouseId)}"`,icon:'fa-eye',title:'Xem chi tiết'}])}</td>
+    </tr>`;
+  });
+  const defectQty=(DB.inventory||[]).filter(r=>defectWhIds.has(r.warehouseId)).reduce((s,r)=>s+Number(r.qtyOnHand||0),0);
+  const returnQty=(DB.inventory||[]).filter(r=>returnWhIds.has(r.warehouseId)).reduce((s,r)=>s+Number(r.qtyOnHand||0),0);
+  const activeQty = subtab==='returned' ? returnQty : defectQty;
+  const activeCount = rowsData.length;
+  return `${pageHead('Hàng lỗi & hàng trả về','Quản lý tồn cách ly theo lô, vị trí và chứng từ nguồn; không tính vào tồn thành phẩm khả dụng.')}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Hàng lỗi',fmtN(defectQty),'fa-triangle-exclamation','red')}${mkpi('Hàng trả về',fmtN(returnQty),'fa-rotate-left','orange')}${mkpi(subtab==='returned'?'Lô hàng trả':'Lô hàng lỗi',fmtN(activeCount),'fa-boxes-stacked','blue')}</div>
+    <div class="card inventory-exception-card">
+      <div class="toolbar inventory-exception-toolbar"><div class="tabs" style="margin:0"><button class="tab ${subtab==='defective'?'active':''}" data-act="inv-exception-tab" data-tab="defective"><i class="fa-solid fa-triangle-exclamation"></i> Hàng lỗi <span class="tab-count">${fmtN(defectQty)}</span></button><button class="tab ${subtab==='returned'?'active':''}" data-act="inv-exception-tab" data-tab="returned"><i class="fa-solid fa-rotate-left"></i> Hàng trả về <span class="tab-count">${fmtN(returnQty)}</span></button></div><span class="spacer"></span>${searchBox('inv-defects','Tìm mã hàng, lô, đơn hàng, LSX…')}</div>
+      <div class="inventory-exception-summary"><div><span>${subtab==='returned'?'Tồn hàng trả hiện tại':'Tồn hàng lỗi hiện tại'}</span><b>${fmtN(activeQty)}</b></div><p>${subtab==='returned'?'Hàng khách trả được lưu riêng để chờ kiểm tra/xử lý.':'Thành phẩm QC không đạt được cách ly khỏi kho thành phẩm.'} Bấm mã tham chiếu để mở chứng từ nguồn.</p></div>
+      ${tableShell([{t:'Thành phẩm'},{t:'Phân loại'},{t:'Lô'},{t:'Kho / vị trí'},{t:'Số lượng',cls:'right'},{t:subtab==='returned'?'Tham chiếu đơn bán':'Tham chiếu LSX'},{t:'Ngày ghi nhận'},{t:'',cls:'right'}],rows,{emptyTitle:subtab==='returned'?'Chưa có hàng khách trả':'Chưa có thành phẩm lỗi',emptyDesc:subtab==='returned'?'Hàng trả sẽ xuất hiện khi hoàn thành đơn bán và khai báo số lượng khách trả.':'Sản phẩm QC không đạt sẽ tự chuyển vào đây.'})}
+    </div>`;
+};
+
 /* ==========================================================================
  * KHO -> KẾ HOẠCH SẢN XUẤT / DUYỆT YÊU CẦU NVL
  * ========================================================================== */
+function pfSalesDemandGroups(){
+  const excluded=new Set(['dh_cho_xu_ly','dh_hoan_thanh','dh_da_giao','dh_tu_choi','dh_da_huy']);
+  const orders=(DB.orders||[])
+    .filter(o=>o.approvedAt&&!excluded.has(o.status))
+    .slice()
+    .sort((a,b)=>String(a.dueDate||a.date||a.id).localeCompare(String(b.dueDate||b.date||b.id)));
+  const remaining=new Map();
+  const getAvailable=(pid)=>{
+    if(!remaining.has(pid)){
+      const qty=(typeof SalesCRM!=='undefined'&&SalesCRM.finishedAvailable)?Number(SalesCRM.finishedAvailable(pid)||0):Number(pfFinishedStock(pid)||0);
+      remaining.set(pid,qty);
+    }
+    return Number(remaining.get(pid)||0);
+  };
+  const activePlans=(DB.productionPlans||[]).filter(p=>p.source==='SALES_ORDER'&&p.status!=='CANCELLED');
+  return orders.map(o=>{
+    const lines=(o.items||[]).map(it=>{
+      const need=Number(it.qty||0);
+      const avail=getAvailable(it.productId);
+      const allocated=Math.min(need,avail);
+      remaining.set(it.productId,Math.max(0,avail-allocated));
+      const shortage=Math.max(0,need-allocated);
+      const planned=activePlans.filter(p=>p.sourceOrderId===o.id).reduce((sum,p)=>sum+(p.items||[]).filter(x=>x.productId===it.productId).reduce((s,x)=>s+Number(x.qty||0),0),0);
+      return {productId:it.productId,name:it.name||Q.product(it.productId)?.name||it.productId,unit:it.unit||Q.product(it.productId)?.unit||'',need,allocated,shortage,planned,unplanned:Math.max(0,shortage-planned)};
+    });
+    return {order:o,lines,shortage:lines.reduce((s,x)=>s+x.shortage,0),planned:lines.reduce((s,x)=>s+x.planned,0),unplanned:lines.reduce((s,x)=>s+x.unplanned,0)};
+  });
+}
 Views['warehouse-production-plan'] = function () {
-  const plans=DB.productionPlans||[];
+  const plans=(DB.productionPlans||[]).filter(p=>p.status!=='CANCELLED');
   const zero=(DB.products||[]).filter(p=>pfFinishedStock(p.id)<=0);
-  const rows=plans.map(p=>`<tr><td><span class="code">${esc(p.id)}</span></td><td>${fmtDate(p.date)}</td>
+  const demands=pfSalesDemandGroups();
+  const demandRows=demands.map(g=>{
+    const o=g.order;
+    const planIds=(DB.productionPlans||[]).filter(p=>p.source==='SALES_ORDER'&&p.sourceOrderId===o.id&&p.status!=='CANCELLED').map(p=>p.id);
+    const status=g.shortage<=0?'<span class="badge green">Đủ tồn khả dụng</span>':g.unplanned>0?'<span class="badge orange">Thiếu · Chưa lập đủ KH</span>':'<span class="badge blue">Đã lập kế hoạch</span>';
+    return `<tr><td><span class="code">${esc(o.id)}</span><div class="cell-sub">${esc(Q.customerName(o.customerId)||'')}</div></td>
+      <td>${(g.lines||[]).map(x=>`${esc(x.name)}<div class="cell-sub">Đặt ${fmtN(x.need)} · khả dụng ${fmtN(x.allocated)} · thiếu ${fmtN(x.shortage)} ${esc(x.unit)}</div>`).join('<br>')}</td>
+      <td>${fmtDate(o.dueDate)}</td><td>${status}${planIds.length?`<div class="cell-sub">${planIds.map(id=>esc(id)).join(', ')}</div>`:''}</td>
+      <td class="right">${rowActions([{act:'open-order',data:`data-id="${esc(o.id)}"`,icon:'fa-eye',title:'Xem chi tiết đơn hàng'},...(g.unplanned>0?[{act:'pf-plan-from-sales-order',data:`data-id="${esc(o.id)}"`,icon:'fa-industry',title:'Lập kế hoạch sản xuất phần thiếu'}]:[])])}</td></tr>`;
+  });
+  const rows=plans.map(p=>`<tr><td><span class="code">${esc(p.id)}</span>${p.source==='SALES_ORDER'?`<div class="cell-sub">Đơn ${esc(p.sourceOrderId||'')}</div>`:''}</td><td>${fmtDate(p.date)}</td>
     <td>${(p.items||[]).map(i=>`${esc(Q.product(i.productId)?.name||i.productId)} · <b>${fmtN(i.qty)}</b>`).join('<br>')}</td>
     <td>${pfPlanStatus(p.status)}</td><td>${esc(Q.employeeName(p.createdBy)||p.createdBy||'—')}</td>
     <td class="right">${rowActions([
       {act:'pf-plan-view',data:`data-id="${esc(p.id)}"`,icon:'fa-eye',title:'Xem chi tiết kế hoạch'},
-      ...(p.status==='WAITING_APPROVAL'?[{act:'pf-plan-edit',data:`data-id="${esc(p.id)}"`,icon:'fa-pen',title:'Sửa kế hoạch'},{act:'pf-plan-approve',data:`data-id="${esc(p.id)}"`,icon:'fa-check',title:'Duyệt kế hoạch'},{act:'pf-plan-delete',data:`data-id="${esc(p.id)}"`,icon:'fa-trash',title:'Xóa kế hoạch'}]:[])
+      ...(p.status==='WAITING_APPROVAL'?[...(p.source!=='SALES_ORDER'?[{act:'pf-plan-edit',data:`data-id="${esc(p.id)}"`,icon:'fa-pen',title:'Sửa kế hoạch'}]:[]),{act:'pf-plan-approve',data:`data-id="${esc(p.id)}"`,icon:'fa-check',title:'Duyệt kế hoạch'},{act:'pf-plan-delete',data:`data-id="${esc(p.id)}"`,icon:'fa-trash',title:'Xóa kế hoạch'}]:[])
     ])}</td></tr>`);
-  return `${pageHead('Kế hoạch sản xuất từ Kho','Lập kế hoạch cho thành phẩm hết hàng; sau duyệt kế hoạch tự chuyển sang phân hệ Sản xuất',
-    '<button class="btn btn-primary" data-act="pf-plan-new"><i class="fa-solid fa-plus"></i>Lập kế hoạch sản xuất</button>')}
+  return `${pageHead('Kế hoạch sản xuất','Kho theo dõi đơn bán đã duyệt, kiểm tra tồn thành phẩm và lập kế hoạch cho phần thiếu trước khi chuyển sang Sản xuất.',
+    '<button class="btn btn-primary" data-act="pf-plan-new"><i class="fa-solid fa-plus"></i>Lập kế hoạch nội bộ</button>')}
     ${zero.length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--orange)"><div class="card-head"><span class="mkpi-ico t-orange"><i class="fa-solid fa-triangle-exclamation"></i></span><div><h3>${zero.length} thành phẩm đang hết tồn</h3><p>${zero.map(p=>esc(p.name)).join(' · ')}</p></div></div></div>`:''}
-    <div class="card">${tableShell([{t:'Kế hoạch'},{t:'Ngày lập'},{t:'Thành phẩm / SL'},{t:'Trạng thái'},{t:'Người lập'},{t:'Thao tác',cls:'right'}],rows,{emptyTitle:'Chưa có kế hoạch sản xuất'})}</div>`;
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><div><h3>Nhu cầu từ đơn bán</h3><p>Kho chỉ lập kế hoạch khi đơn đã duyệt và phần tồn khả dụng không đủ đáp ứng. Sản phẩm và số lượng thiếu được tính tự động.</p></div></div>
+      ${tableShell([{t:'Đơn hàng'},{t:'Thành phẩm / Nhu cầu'},{t:'Ngày giao'},{t:'Tình trạng'},{t:'Thao tác',cls:'right'}],demandRows,{emptyTitle:'Không có đơn bán đang chờ thành phẩm'})}</div>
+    <div class="card"><div class="card-head"><div><h3>Kế hoạch sản xuất</h3><p>Kế hoạch từ đơn bán hoặc kế hoạch nội bộ của Kho.</p></div></div>${tableShell([{t:'Kế hoạch'},{t:'Ngày lập'},{t:'Thành phẩm / SL'},{t:'Trạng thái'},{t:'Người lập'},{t:'Thao tác',cls:'right'}],rows,{emptyTitle:'Chưa có kế hoạch sản xuất'})}</div>`;
 };
 
 Views['warehouse-production-requests'] = function () {

@@ -320,21 +320,28 @@ Luồng chuẩn của LSX:
 ```text
 Tạo Lệnh sản xuất
    ↓
+Chờ duyệt
+   ↓
 Duyệt LSX
    ↓
-Lập / liên kết yêu cầu NVL theo BOM
+Chờ sản xuất
    ↓
-Kho duyệt và xuất NVL
+Kho đã cấp NVL theo phiếu yêu cầu
    ↓
 Bắt đầu sản xuất
    ↓
 Thực hiện các công đoạn
    ↓
-QC thành phẩm
+Hoàn tất công đoạn sản xuất
    ↓
-Hoàn thành LSX
+Tạo tồn ảo Thành phẩm - Chờ QC
    ↓
-Nhập kho thành phẩm
+QC / QA → Kiểm tra thành phẩm
+   ↓
+QC đạt → cộng số đạt vào tồn kho thành phẩm
+QC không đạt → không cộng tồn
+   ↓
+Đã nhập kho
 ```
 
 ### Quy tắc quan trọng
@@ -346,9 +353,11 @@ Nhập kho thành phẩm
 - Nếu thành phẩm có BOM, phiếu yêu cầu NVL sẽ tự lấy BOM × số lượng LSX.
 - Mọi LSX đều có màn xem chi tiết.
 
-### QC trong LSX
+### QC thành phẩm
 
-Có thể nhập:
+QC thành phẩm không còn ghi trực tiếp trong màn Lệnh sản xuất. Khi công đoạn sản xuất cuối trước QC hoàn tất, hệ thống tạo một lô thành phẩm có trạng thái **Chờ QC** và hiển thị trong **Kho → Tồn kho → Kho thành phẩm** dưới dạng số lượng chờ kiểm, chưa tính vào tồn khả dụng.
+
+QC/QA vào **Kiểm tra thành phẩm** để ghi nhận:
 
 ```text
 Số lượng đạt
@@ -359,10 +368,10 @@ Ghi chú QC
 Điều kiện:
 
 ```text
-Số đạt + Số không đạt = Số lượng cần QC
+Số đạt + Số không đạt = Số lượng chờ QC
 ```
 
-Chỉ số lượng đạt mới được nhập kho thành phẩm.
+Khi xác nhận QC, chỉ số lượng đạt được cộng vào `qtyOnHand/qtyAvailable` của Kho thành phẩm. Số không đạt được lưu lịch sử QC nhưng không cộng tồn. Hệ thống đồng thời tạo phiếu nhập thành phẩm và giao dịch kho để truy vết theo LSX/lô.
 
 ---
 
@@ -423,7 +432,8 @@ Các luồng QC hiện có:
 - Kiểm tra lô nhập
 - Đạt → cộng tồn
 - Không đạt → trả nhà cung cấp
-- QC thành phẩm trong Lệnh sản xuất
+- QC thành phẩm tại màn QC / QA → Kiểm tra thành phẩm
+- Thành phẩm chờ QC hiển thị ảo trong Kho thành phẩm và chưa tính vào tồn
 - Lịch sử QC được liên kết với lô/chứng từ tương ứng
 
 Người kiểm tra QC mặc định lấy theo người dùng đang đăng nhập.

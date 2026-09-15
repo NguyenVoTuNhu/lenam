@@ -38,9 +38,6 @@ function enforceBusinessDateInputs(scope = document) {
   const today = currentDateYMD();
   if (!scope || !scope.querySelectorAll) return;
   scope.querySelectorAll('input[type="date"]').forEach((el) => {
-    // Một số trường lưu ngày quá khứ hợp lệ theo nghiệp vụ (vd: ngày vào làm
-    // của nhân sự cũ) — đánh dấu data-allow-past="1" để không bị ép về hôm nay.
-    if (el.dataset.allowPast === '1') return;
     el.min = today;
     const isFilter = !!el.dataset.f;
     if (!isFilter && (!el.value || el.value < today)) el.value = today;
@@ -172,11 +169,10 @@ const Auth = {
       'new-po':'PRODUCTION_OPERATE','po-edit':'PRODUCTION_OPERATE','po-edit-save':'PRODUCTION_OPERATE','po-delete':'PRODUCTION_OPERATE','po-approve':'PRODUCTION_OPERATE','po-advance':'PRODUCTION_OPERATE','stage-start':'PRODUCTION_OPERATE','stage-update':'PRODUCTION_OPERATE','stage-save':'PRODUCTION_OPERATE',
       'edit-customer':'CRM_OPERATE','save-customer':'CRM_OPERATE','customer-care':'CRM_OPERATE','save-customer-care':'CRM_OPERATE','delete-customer':'CRM_DELETE_CUSTOMER',
       'new-order':'SALES_ORDER_OPERATE','new-order-for':'SALES_ORDER_OPERATE','crm-order-save':'SALES_ORDER_OPERATE','crm-order-edit':'SALES_ORDER_OPERATE','crm-order-edit-save':'SALES_ORDER_OPERATE','crm-order-delete':'SALES_ORDER_OPERATE',
-      'crm-order-approve':'SALES_APPROVE','crm-order-reject':'SALES_APPROVE',
+      'crm-order-approve':'SALES_APPROVE','crm-order-reject':'SALES_APPROVE','sales-production-request':'SALES_ORDER_OPERATE','sales-production-request-approve':'SALES_APPROVE',
       'crm-order-issue':'INVENTORY_OPERATE','crm-order-issue-confirm':'INVENTORY_OPERATE','inv-sales-issue-confirm':'INVENTORY_OPERATE',
       'order-status-save':'SALES_ORDER_OPERATE',
-      'new-user':'ADMIN_USER_MANAGE','user-toggle':'ADMIN_USER_MANAGE','user-role':'ADMIN_USER_MANAGE','user-role-save':'ADMIN_USER_MANAGE',
-      'new-employee':'HR_OPERATE','employee-edit':'HR_OPERATE','employee-save':'HR_OPERATE','employee-toggle-active':'HR_OPERATE','employee-import':'HR_OPERATE'
+      'new-user':'ADMIN_USER_MANAGE','user-toggle':'ADMIN_USER_MANAGE','user-role':'ADMIN_USER_MANAGE','user-role-save':'ADMIN_USER_MANAGE'
     };
     return map[action] || null;
   }
@@ -550,14 +546,8 @@ const NAV = [
         { id: 'routing', label: 'Routing công đoạn' },
         { id: 'plan', label: 'Kế hoạch sản xuất' },
         { id: 'progress', label: 'Tiến độ sản xuất' },
-        { id: 'issue_nvl', label: 'Yêu cầu NVL sản xuất' },
         { id: 'receipt_tp', label: 'Nhập kho thành phẩm' },
         { id: 'wip', label: 'Theo dõi bán thành phẩm' },
-        { id: 'scrap', label: 'Hao hụt' },
-        { id: 'productivity', label: 'Năng suất' },
-        { id: 'oee', label: 'Hiệu suất máy' },
-        { id: 'costing', label: 'Tính giá thành' },
-        { id: 'reports', label: 'Báo cáo sản xuất' }
       ],
       count: () => (typeof DB !== 'undefined' && DB.productionOrders) ? DB.productionOrders.filter((p) => p.status === 'lsx_dang_san_xuat').length : 0
     },
@@ -572,7 +562,6 @@ const NAV = [
         { id: 'issue', label: 'Xuất nguyên liệu' },
         { id: 'progress', label: 'Theo dõi tiến độ' },
         { id: 'receive', label: 'Nhập hàng hoàn thành' },
-        { id: 'scrap', label: 'Hao hụt' },
         { id: 'debt', label: 'Công nợ gia công' },
         { id: 'evaluation', label: 'Đánh giá đối tác' },
         { id: 'reports', label: 'Báo cáo gia công' }
@@ -623,11 +612,14 @@ const NAV = [
       icon: 'fa-users',
       children: [
         { id: 'dashboard', label: 'Tổng quan nhân sự' },
+        { id: 'profile', label: 'Hồ sơ nhân sự' },
         { id: 'attendance', label: 'Chấm công' },
         { id: 'shifts', label: 'Phân ca' },
         { id: 'kpi', label: 'KPI' },
         { id: 'evaluations', label: 'Đánh giá' },
         { id: 'payroll', label: 'Tính lương' },
+        { id: 'labour_cost', label: 'Chi phí nhân công' },
+        { id: 'reports', label: 'Báo cáo nhân sự' }
       ]
     },
     {

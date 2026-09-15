@@ -78,7 +78,7 @@ Views.orders = function () {
 /** Trạng thái 7 bước của quy trình đơn hàng */
 function orderFlow(o) {
   const pos = Q.posOfOrder(o.id);
-  const allDone = pos.length > 0 && pos.every((p) => p.status === 'lsx_hoan_thanh');
+  const allDone = pos.length > 0 && pos.every((p) => ['lsx_hoan_thanh','lsx_da_nhap_kho'].includes(p.status));
   const anyQC = pos.some((p) => p.status === 'lsx_dang_qc');
   const anyRun = pos.some((p) => p.status === 'lsx_dang_san_xuat');
   const done = {
@@ -87,7 +87,7 @@ function orderFlow(o) {
     po: pos.length > 0,
     running: anyRun || anyQC || allDone,
     qc: anyQC || allDone,
-    finish: allDone || ['dh_hoan_thanh', 'dh_da_giao'].includes(o.status),
+    finish: allDone || ['dh_hoan_thanh', 'dh_da_giao', 'dh_hoan_tat'].includes(o.status),
     deliver: o.status === 'dh_da_giao',
   };
   const steps = [
@@ -120,7 +120,6 @@ Views['order-detail'] = function (params) {
     <button class="btn" data-act="export-order-pdf" data-id="${o.id}"><i class="fa-solid fa-file-pdf"></i>Xuất PDF</button>
     ${o.status === 'dh_cho_xu_ly' && typeof Auth !== 'undefined' && Auth.hasPermission('SALES_APPROVE') ? `<button class="btn" data-act="crm-order-reject" data-id="${o.id}"><i class="fa-solid fa-xmark"></i>Từ chối</button><button class="btn btn-primary" data-act="crm-order-approve" data-id="${o.id}"><i class="fa-solid fa-check"></i>Duyệt đơn</button>` : ''}
     ${o.status === 'dh_hoan_thanh' && o.pendingIssueId ? `<span class="chip"><i class="fa-solid fa-box-open"></i> ${esc(o.pendingIssueId)} · Chờ kho xác nhận xuất</span><button class="btn btn-primary" data-act="crm-order-deliver" data-id="${o.id}"><i class="fa-solid fa-truck-fast"></i>Giao hàng</button>` : ''}
-    ${!pos.length && ['dh_cho_san_xuat','dh_dang_san_xuat'].includes(o.status) ? `<button class="btn btn-primary" data-act="order-create-po" data-id="${o.id}"><i class="fa-solid fa-industry"></i>Tạo lệnh sản xuất</button>` : ''}
   `)}
 
   <div class="grid g-auto-sm" style="margin-bottom:14px">
@@ -207,13 +206,12 @@ Views['order-detail'] = function (params) {
   <!-- LỆNH SẢN XUẤT LIÊN QUAN -->
   <div class="card">
     <div class="card-head">
-      <div><h3>Lệnh sản xuất của đơn hàng</h3><p>${pos.length ? `${pos.length} lệnh đang theo dõi` : 'Chưa phát hành lệnh sản xuất'}</p></div>
-      ${!pos.length && o.status !== 'dh_da_huy' ? `<div class="right"><button class="btn btn-sm btn-primary" data-act="order-create-po" data-id="${o.id}"><i class="fa-solid fa-plus"></i>Phát hành lệnh sản xuất</button></div>` : ''}
+      <div><h3>Liên kết sản xuất của đơn hàng</h3><p>${pos.length ? `${pos.length} lệnh đang theo dõi` : 'Nếu thiếu thành phẩm, Kho sẽ lập và duyệt Kế hoạch sản xuất trước khi chuyển sang Sản xuất'}</p></div>
     </div>
     ${tableShell(
       [{ t: 'Mã LSX', w: '140px' }, { t: 'Sản phẩm' }, { t: 'Số lượng', cls: 'right' }, { t: 'Bắt đầu' }, { t: 'Deadline' },
        { t: 'Tiến độ', w: '160px' }, { t: 'Trạng thái', w: '132px' }],
-      pos.map((p) => `<tr class="clickable" data-act="open-po" data-id="${p.id}">
+      pos.map((p) => `<tr class="clickable" data-act="open-production-order" data-id="${p.id}">
         <td><span class="code">${p.id}</span></td>
         <td>${cell2(esc(p.productName), esc(p.spec))}</td>
         <td class="right num">${fmtN(p.qty)} ${esc(p.unit)}</td>
@@ -221,8 +219,7 @@ Views['order-detail'] = function (params) {
         <td class="num">${fmtDate(p.deadline)}</td>
         <td>${progressBar(Q.progress(p))}</td>
         <td>${badge(p.status)}</td></tr>`),
-      { emptyTitle: 'Chưa có lệnh sản xuất', emptyDesc: 'Phát hành lệnh sản xuất để chuyển đơn hàng này xuống xưởng.',
-        emptyAction: o.status !== 'dh_da_huy' ? `<button class="btn btn-primary btn-sm" data-act="order-create-po" data-id="${o.id}"><i class="fa-solid fa-industry"></i>Tạo lệnh sản xuất</button>` : '' })}
+      { emptyTitle: 'Chưa có lệnh sản xuất', emptyDesc: 'Thiếu thành phẩm sẽ được Kho lập Kế hoạch sản xuất → Sản xuất yêu cầu NVL → Kho cấp NVL trước khi tạo LSX.' })}
   </div>`;
 };
 
