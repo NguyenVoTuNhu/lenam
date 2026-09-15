@@ -1,0 +1,683 @@
+/* ============================================================================
+ * MODULE: KẾ TOÁN – TÀI CHÍNH (Lê Nam ERP)
+ * ----------------------------------------------------------------------------
+ * Nạp SAU app.js (xem hướng dẫn tích hợp cuối file). Ghi đè Views.accounting
+ * (trước đó chỉ là bảng demo tĩnh trong mod-enterprise.js) bằng một phân hệ
+ * đầy đủ, tính toán trực tiếp từ dữ liệu đã có — không tạo sổ kế toán song
+ * song phải nhập tay lại từ đầu.
+ *
+ * LIÊN THÔNG TỰ ĐỘNG (không cần nhập tay):
+ *  - Doanh thu & VAT đầu ra  ← DB.orders (đơn đã giao/hoàn thành)
+ *  - Giá vốn hàng bán        ← BOM + Routing sản xuất (Q.costOf) theo từng đơn
+ *  - Công nợ phải trả & VAT đầu vào ← DB.purchaseOrders
+ *  - Công nợ phải trả — thanh toán ← DB.supplierPayments (tái dùng action có sẵn)
+ *  - Tồn kho (Balance Sheet) ← DB.inventory / DB.materials
+ *  - Ngân sách vs Thực tế    ← DB.budgets + DB.purchases (PR theo bộ phận)
+ *
+ * NHẬP TAY TỐI THIỂU (không có nguồn tự động trong hệ thống):
+ *  - Thu tiền khách hàng (không có module thu ngân riêng)
+ *  - Sổ phụ ngân hàng (không kết nối API ngân hàng thật)
+ *  - Tài sản cố định & khấu hao
+ *  - Chi phí hoạt động khác (lương, điện nước, thuê mặt bằng…)
+ * ==========================================================================*/
+
+/* ---------------------------------------------------------------- 0. DATA */
+DB.customerPayments = DB.customerPayments || [];
+DB.cashTransactions = DB.cashTransactions || [];   // sổ thu-chi thủ công (không phải công nợ NCC/KH)
+DB.bankAccounts = DB.bankAccounts || [
+  { id: 'BANK-01', name: 'Vietcombank – TK thanh toán chính', bankName: 'Vietcombank', accountNumber: '0071000123456', openingBalance: 850000000 },
+  { id: 'BANK-02', name: 'ACB – TK thu hộ đại lý', bankName: 'ACB', accountNumber: '9988776655', openingBalance: 120000000 },
+];
+DB.bankTransactions = DB.bankTransactions || [];
+DB.fixedAssets = DB.fixedAssets || [
+  { id: 'TS-001', name: 'Kho lạnh 0-4°C KL-01', dept: 'Kho vận', purchaseDate: '2021-03-10', cost: 480000000, usefulYears: 10, status: 'active' },
+  { id: 'TS-002', name: 'Máy xay công nghiệp XD-200', dept: 'Sản xuất', purchaseDate: '2020-06-01', cost: 260000000, usefulYears: 8, status: 'active' },
+  { id: 'TS-003', name: 'Nồi nấu inox 2 lớp 300L (x2)', dept: 'Sản xuất', purchaseDate: '2019-11-15', cost: 180000000, usefulYears: 8, status: 'active' },
+  { id: 'TS-004', name: 'Máy ép khuôn thủy lực KH-2', dept: 'Sản xuất', purchaseDate: '2022-02-20', cost: 210000000, usefulYears: 8, status: 'active' },
+  { id: 'TS-005', name: 'Xe tải giao hàng 51C-123.45', dept: 'Kho vận', purchaseDate: '2018-05-05', cost: 620000000, usefulYears: 10, status: 'active' },
+];
+DB.accountingSettings = DB.accountingSettings || { corporateTaxRatePct: 20, opexCategories: ['Lương & BHXH', 'Điện nước', 'Thuê mặt bằng', 'Vận chuyển', 'Marketing', 'Khác'] };
+
+/* Nạp một lần dữ liệu Thu tiền khách hàng từ lịch sử hợp đồng đã có, để màn
+ * Thu-Chi và Cashflow không trống ngay từ đầu (không tạo nghiệp vụ mới). */
+if (!DB.customerPayments.length) {
+  DB.contracts.forEach((c) => {
+    if (c.paid > 0) {
+      DB.customerPayments.push({
+        id: nextCode('TT-KH-2026-', DB.customerPayments),
+        customerId: c.customerId, contractId: c.id,
+        date: c.signDate, amount: c.paid, method: 'Chuyển khoản',
+        note: `Thu theo hợp đồng ${c.id}`,
+      });
+    }
+  });
+}
+
+/* ------------------------------------------------------------ 1. TÍNH TOÁN */
+const AccFin = {
+  monthOf: (d) => String(d || '').slice(0, 7),
+  fmtMonthShort: (m) => 'Th' + Number(m.slice(5, 7)) + '/' + m.slice(2, 4),
+
+  recognizedOrders: () => DB.orders.filter((o) => ['dh_da_giao', 'dh_hoan_thanh'].includes(o.status)),
+  activePOs: () => (DB.purchaseOrders || []).filter((po) => po.status !== 'CANCELLED'),
+
+  cogsOfOrder(o) {
+    return o.items.reduce((s, it) => {
+      const c = Q.costOf(it.productId);
+      return s + (c ? c.unitCost * it.qty : 0);
+    }, 0);
+  },
+
+  monthlyMap(list, dateField, valueFn) {
+    const map = {};
+    list.forEach((x) => { const m = AccFin.monthOf(x[dateField]); map[m] = (map[m] || 0) + valueFn(x); });
+    return map;
+  },
+  revenueByMonth() { return AccFin.monthlyMap(AccFin.recognizedOrders(), 'date', (o) => o.subtotal); },
+  cogsByMonth() { return AccFin.monthlyMap(AccFin.recognizedOrders(), 'date', (o) => AccFin.cogsOfOrder(o)); },
+  vatOutputByMonth() { return AccFin.monthlyMap(AccFin.recognizedOrders(), 'date', (o) => o.vat || 0); },
+  vatInputByMonth() { return AccFin.monthlyMap(AccFin.activePOs(), 'date', (po) => po.vat || 0); },
+  purchaseValueByMonth() { return AccFin.monthlyMap(AccFin.activePOs(), 'date', (po) => po.subtotal || 0); },
+  cashInByMonth() {
+    const a = AccFin.monthlyMap(DB.customerPayments, 'date', (p) => p.amount);
+    const b = AccFin.monthlyMap(DB.cashTransactions.filter((t) => t.type === 'THU'), 'date', (t) => t.amount);
+    const out = { ...a }; Object.keys(b).forEach((m) => { out[m] = (out[m] || 0) + b[m]; }); return out;
+  },
+  cashOutByMonth() {
+    const a = AccFin.monthlyMap(DB.supplierPayments, 'date', (p) => p.amount);
+    const b = AccFin.monthlyMap(DB.cashTransactions.filter((t) => t.type === 'CHI'), 'date', (t) => t.amount);
+    const out = { ...a }; Object.keys(b).forEach((m) => { out[m] = (out[m] || 0) + b[m]; }); return out;
+  },
+  opexByMonth() { return AccFin.monthlyMap(DB.cashTransactions.filter((t) => t.type === 'CHI'), 'date', (t) => t.amount); },
+
+  last6Months() {
+    const all = new Set([...Object.keys(AccFin.revenueByMonth()), ...Object.keys(AccFin.cashOutByMonth()), AccFin.monthOf(TODAY)]);
+    return [...all].sort().slice(-6);
+  },
+  currentMonth: () => AccFin.monthOf(TODAY),
+  prevMonth() { const [y, m] = AccFin.currentMonth().split('-').map(Number); const d = new Date(y, m - 2, 1); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); },
+
+  totalAR() { return DB.customers.reduce((s, c) => s + Number(c.debt || 0), 0); },
+  totalAP() { return AccFin.activePOs().reduce((s, po) => s + Math.max(0, (po.total || 0) - (po.paid || 0)), 0); },
+
+  bankBalance(bankId) {
+    const acc = (DB.bankAccounts || []).find((b) => b.id === bankId);
+    if (!acc) return 0;
+    const moved = (DB.bankTransactions || []).filter((t) => t.bankId === bankId).reduce((s, t) => s + (t.type === 'IN' ? t.amount : -t.amount), 0);
+    return Number(acc.openingBalance || 0) + moved;
+  },
+  totalBankBalance() { return (DB.bankAccounts || []).reduce((s, b) => s + AccFin.bankBalance(b.id), 0); },
+
+  assetBookValue(a) {
+    const years = Math.max(0, (new Date(TODAY) - new Date(a.purchaseDate)) / (365 * 86400000));
+    const dep = Math.min(a.cost, (a.cost / a.usefulYears) * years);
+    return Math.max(0, Math.round(a.cost - dep));
+  },
+  assetAccumDep(a) { return Math.round(a.cost - AccFin.assetBookValue(a)); },
+  totalAssetsNet() { return (DB.fixedAssets || []).filter((a) => a.status !== 'disposed').reduce((s, a) => s + AccFin.assetBookValue(a), 0); },
+
+  inventoryBookValue() {
+    const materialsValue = Q.inventoryValue();
+    const finishedValue = DB.inventory.reduce((s, r) => {
+      const p = Q.product(r.productId);
+      if (!p) return s;
+      const c = Q.costOf(p.id);
+      return s + (c ? c.unitCost * (r.qtyOnHand || 0) : 0);
+    }, 0);
+    return materialsValue + finishedValue;
+  },
+
+  pnlOf(month) {
+    const revenue = AccFin.revenueByMonth()[month] || 0;
+    const cogs = AccFin.cogsByMonth()[month] || 0;
+    const grossProfit = revenue - cogs;
+    const opex = AccFin.opexByMonth()[month] || 0;
+    const ebt = grossProfit - opex;
+    const tax = Math.max(0, Math.round(ebt * (DB.accountingSettings.corporateTaxRatePct / 100)));
+    return { revenue, cogs, grossProfit, opex, ebt, tax, netProfit: ebt - tax };
+  },
+
+  deptActualSpend(dept) {
+    return (DB.purchases || []).filter((p) => p.dept === dept && p.status !== 'mh_tu_choi').reduce((s, p) => s + (p.total || 0), 0);
+  },
+};
+
+/* -------------------------------------------------------------- 2. GIAO DIỆN */
+const ACCOUNTING_TABS = [
+  ['fixed_assets', 'Tài sản cố định'],
+  ['tax', 'Thuế'],
+  ['budget', 'Ngân sách'],
+  ['pnl', 'P&L'],
+  ['balance_sheet', 'Balance Sheet'],
+  ['cashflow', 'Cashflow'],
+  ['general_ledger', 'Sổ nhật ký'],
+];
+
+function accTabsBar(active) {
+  return `<div class="tabs module-tabs" style="margin-bottom:16px">
+    ${ACCOUNTING_TABS.map(([id, label]) => `<button class="tab ${active === id ? 'active' : ''}" data-act="nav" data-id="accounting" data-tab="${id}">${esc(label)}</button>`).join('')}
+  </div>`;
+}
+
+function pctDelta(cur, prev) {
+  if (!prev) return '';
+  const d = ((cur - prev) / Math.abs(prev)) * 100;
+  const tone = d >= 0 ? 'green' : 'red';
+  const arrow = d >= 0 ? 'fa-arrow-up' : 'fa-arrow-down';
+  return `<span class="kpi-delta ${tone === 'green' ? 'up' : 'down'}"><i class="fa-solid ${arrow}"></i>${Math.abs(d).toFixed(1)}%</span> so với tháng trước`;
+}
+
+/* ---- 2.1 Tổng quan ---- */
+function accDashboardView() {
+  const m = AccFin.currentMonth(), pm = AccFin.prevMonth();
+  const rev = AccFin.revenueByMonth()[m] || 0, prevRev = AccFin.revenueByMonth()[pm] || 0;
+  const cogs = AccFin.cogsByMonth()[m] || 0, prevCogs = AccFin.cogsByMonth()[pm] || 0;
+  const gp = rev - cogs, prevGp = prevRev - prevCogs;
+  const ar = AccFin.totalAR(), ap = AccFin.totalAP();
+  const cash = AccFin.totalBankBalance();
+  const assetNet = AccFin.totalAssetsNet();
+  const invValue = AccFin.inventoryBookValue();
+
+  const months = AccFin.last6Months();
+  const revMap = AccFin.revenueByMonth(), cogsMap = AccFin.cogsByMonth();
+
+  return `${pageHead('Tổng quan tài chính', 'Số liệu tổng hợp tự động từ Bán hàng, Sản xuất, Kho và Mua hàng', '<button class="btn btn-sm" data-act="nav" data-id="accounting" data-tab="reports_hub"><i class="fa-solid fa-file-export"></i>Xem báo cáo</button>')}
+  ${accTabsBar('dashboard')}
+  <div class="grid g-auto" style="margin-bottom:14px">
+    ${mkpi('Doanh thu thuần tháng', fmtVND(rev), 'fa-sack-dollar', 'blue', null, pctDelta(rev, prevRev))}
+    ${mkpi('Giá vốn hàng bán', fmtVND(cogs), 'fa-cubes', 'orange', null, pctDelta(cogs, prevCogs))}
+    ${mkpi('Lợi nhuận gộp', fmtVND(gp), 'fa-chart-line', 'green', null, pctDelta(gp, prevGp))}
+    ${mkpi('Tồn quỹ ngân hàng', fmtVND(cash), 'fa-building-columns', 'indigo')}
+    ${mkpi('Công nợ phải thu', fmtVND(ar), 'fa-hand-holding-dollar', 'teal', 'nav', )}
+    ${mkpi('Công nợ phải trả', fmtVND(ap), 'fa-file-invoice-dollar', 'red')}
+    ${mkpi('Giá trị tồn kho', fmtVND(invValue), 'fa-boxes-stacked', 'slate')}
+    ${mkpi('Tài sản cố định (còn lại)', fmtVND(assetNet), 'fa-warehouse', 'blue')}
+  </div>
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-head"><div><h3>Doanh thu &amp; Giá vốn 6 tháng gần nhất</h3><p>Doanh thu ghi nhận theo đơn hàng đã giao; giá vốn tính theo định mức BOM/Routing hiện hành</p></div></div>
+    <div class="card-body"><div class="chart-box"><canvas id="accTrendChart"></canvas></div></div>
+  </div>
+  <div class="grid g-2">
+    <div class="card">
+      <div class="card-head"><h3>Thu – Chi gần đây</h3><div class="right"><button class="btn btn-sm" data-act="nav" data-id="accounting" data-tab="cashflow_inout">Xem tất cả</button></div></div>
+      ${accRecentCashRows()}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Công nợ cần chú ý</h3></div>
+      ${accTopDebtRows()}
+    </div>
+  </div>`;
+}
+accDashboardView.months = null;
+
+function accRecentCashRows() {
+  const rows = accAllCashRows().slice(0, 6);
+  return tableShell([{ t: 'Ngày' }, { t: 'Loại' }, { t: 'Diễn giải' }, { t: 'Số tiền', cls: 'right' }],
+    rows.map((r) => `<tr><td class="num">${fmtDate(r.date)}</td><td>${r.type === 'THU' ? '<span class="badge green">Thu</span>' : '<span class="badge red">Chi</span>'}</td><td>${cell2(esc(r.note), esc(r.source))}</td><td class="right num strong">${fmtVND(r.amount)}</td></tr>`),
+    { emptyTitle: 'Chưa có giao dịch' });
+}
+
+function accTopDebtRows() {
+  const arRows = DB.customers.filter((c) => c.debt > 0).sort((a, b) => b.debt - a.debt).slice(0, 4)
+    .map((c) => `<tr><td>${cell2(esc(c.name), 'Phải thu · ' + esc(c.id))}</td><td class="right num strong" style="color:var(--teal)">${fmtVND(c.debt)}</td></tr>`);
+  const apRows = AccFin.activePOs().filter((po) => (po.total - po.paid) > 0).sort((a, b) => (b.total - b.paid) - (a.total - a.paid)).slice(0, 4)
+    .map((po) => `<tr><td>${cell2(esc(Q.supplierName(po.supplierId)), 'Phải trả · ' + esc(po.id))}</td><td class="right num strong" style="color:var(--red)">${fmtVND(po.total - po.paid)}</td></tr>`);
+  return tableShell([{ t: 'Đối tượng' }, { t: '', cls: 'right' }], [...arRows, ...apRows], { emptyTitle: 'Không có công nợ đáng chú ý' });
+}
+
+/** Toàn bộ dòng thu-chi (tự động + thủ công), sắp xếp mới nhất trước */
+function accAllCashRows() {
+  const rows = [];
+  DB.customerPayments.forEach((p) => rows.push({ date: p.date, type: 'THU', amount: p.amount, note: p.note || `Thu tiền ${Q.customerName(p.customerId)}`, source: 'Tự động · Hợp đồng/Đơn hàng', ref: p.contractId || '', editable: false, id: p.id, kind: 'customerPayment' }));
+  DB.supplierPayments.forEach((p) => rows.push({ date: p.date, type: 'CHI', amount: p.amount, note: p.note || `Trả NCC ${Q.supplierName(p.supplierId)}`, source: 'Tự động · Mua hàng', ref: p.poId || '', editable: false, id: p.id, kind: 'supplierPayment' }));
+  DB.cashTransactions.forEach((t) => rows.push({ date: t.date, type: t.type, amount: t.amount, note: t.note || t.category, source: 'Thủ công · ' + (t.category || ''), ref: '', editable: true, id: t.id, kind: 'manual' }));
+  return rows.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+}
+accDashboardView.after = function () {
+  const months = AccFin.last6Months();
+  const revMap = AccFin.revenueByMonth(), cogsMap = AccFin.cogsByMonth();
+  if (typeof Charts !== 'undefined') {
+    Charts.bar('accTrendChart', months.map(AccFin.fmtMonthShort), [
+      { label: 'Doanh thu', data: months.map((m) => revMap[m] || 0), color: 'blue' },
+      { label: 'Giá vốn', data: months.map((m) => cogsMap[m] || 0), color: 'orange' },
+    ], { money: true });
+  }
+};
+
+/* ---- 2.2 Thu – Chi ---- */
+function accCashflowInOutView() {
+  const f = F('acc-cash', { type: '', from: '', to: '' });
+  let rows = accAllCashRows();
+  if (f.type) rows = rows.filter((r) => r.type === f.type);
+  if (f.from) rows = rows.filter((r) => r.date >= f.from);
+  if (f.to) rows = rows.filter((r) => r.date <= f.to);
+  const totalIn = rows.filter((r) => r.type === 'THU').reduce((s, r) => s + r.amount, 0);
+  const totalOut = rows.filter((r) => r.type === 'CHI').reduce((s, r) => s + r.amount, 0);
+  const pg = paged(rows, 'acc-cash', 15);
+
+  return `${pageHead('Thu – Chi', 'Sổ quỹ tổng hợp: tự động từ công nợ khách hàng/nhà cung cấp + ghi nhận thủ công', `
+      <button class="btn" data-act="acc-cash-add" data-type="THU"><i class="fa-solid fa-arrow-down"></i>Ghi nhận thu</button>
+      <button class="btn btn-primary" data-act="acc-cash-add" data-type="CHI"><i class="fa-solid fa-arrow-up"></i>Ghi nhận chi</button>`)}
+    ${accTabsBar('cashflow_inout')}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">
+      ${mkpi('Tổng thu (theo lọc)', fmtVND(totalIn), 'fa-arrow-down', 'green')}
+      ${mkpi('Tổng chi (theo lọc)', fmtVND(totalOut), 'fa-arrow-up', 'red')}
+      ${mkpi('Chênh lệch', fmtVND(totalIn - totalOut), 'fa-scale-balanced', totalIn >= totalOut ? 'blue' : 'orange')}
+    </div>
+    <div class="card">
+      <div class="toolbar">
+        ${selectFilter('acc-cash', 'type', [['THU', 'Thu'], ['CHI', 'Chi']], 'Tất cả loại')}
+        <input class="inp" type="date" data-f="acc-cash.from" value="${esc(f.from || '')}">
+        <input class="inp" type="date" data-f="acc-cash.to" value="${esc(f.to || '')}">
+        ${(f.type || f.from || f.to) ? '<button class="btn btn-sm" data-act="clear-filter" data-key="acc-cash"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>' : ''}
+        <span class="spacer"></span><span class="chip">${rows.length} giao dịch</span>
+      </div>
+      ${tableShell([{ t: 'Ngày' }, { t: 'Loại' }, { t: 'Diễn giải' }, { t: 'Chứng từ / Nguồn' }, { t: 'Số tiền', cls: 'right' }, { t: '', cls: 'right' }],
+        pg.items.map((r) => `<tr>
+          <td class="num">${fmtDate(r.date)}</td>
+          <td>${r.type === 'THU' ? '<span class="badge green">Thu</span>' : '<span class="badge red">Chi</span>'}</td>
+          <td>${esc(r.note)}</td>
+          <td class="muted">${esc(r.ref || r.source)}</td>
+          <td class="right num strong" style="color:${r.type === 'THU' ? 'var(--green)' : 'var(--red)'}">${r.type === 'THU' ? '+' : '−'}${fmtVND(r.amount)}</td>
+          <td class="right">${r.editable ? `<button class="btn btn-icon btn-sm" data-act="acc-cash-delete" data-id="${esc(r.id)}" title="Xóa"><i class="fa-solid fa-trash"></i></button>` : `<span class="cell-sub">Tự động</span>`}</td>
+        </tr>`), { emptyTitle: 'Chưa có giao dịch thu chi' })}
+      ${pagiHTML('acc-cash', pg, 'giao dịch')}
+    </div>`;
+}
+
+function openCashTxForm(type) {
+  Modal.open({
+    title: type === 'THU' ? 'Ghi nhận khoản thu' : 'Ghi nhận khoản chi',
+    sub: 'Dùng cho các khoản không tự sinh ra từ Bán hàng/Mua hàng, ví dụ lương, điện nước, thu khác…',
+    body: `<div class="form-grid">
+        <div class="field"><label>Ngày <span class="req">*</span></label><input class="inp" id="ctxDate" type="date" value="${currentDateYMD()}"></div>
+        <div class="field"><label>Số tiền <span class="req">*</span></label><input class="inp right num" id="ctxAmount" type="number" min="0" step="1000"></div>
+        <div class="field" style="grid-column:1/-1"><label>Khoản mục</label><select class="inp" id="ctxCategory">${DB.accountingSettings.opexCategories.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select></div>
+        <div class="field" style="grid-column:1/-1"><label>Diễn giải</label><textarea class="inp" id="ctxNote" rows="2" placeholder="Nội dung khoản thu/chi"></textarea></div>
+      </div>`,
+    foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="acc-cash-save" data-type="${type}"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`,
+  });
+}
+
+/* ---- 2.3 Ngân hàng ---- */
+function accBankingView() {
+  const accRows = (DB.bankAccounts || []).map((b) => `<tr>
+      <td>${cell2(esc(b.name), esc(b.bankName) + ' · ' + esc(b.accountNumber))}</td>
+      <td class="right num strong">${fmtVND(AccFin.bankBalance(b.id))}</td>
+      <td class="right"><button class="btn btn-sm" data-act="acc-bank-tx-add" data-id="${esc(b.id)}"><i class="fa-solid fa-plus"></i>Giao dịch</button></td>
+    </tr>`);
+  const txRows = (DB.bankTransactions || []).slice().sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 30)
+    .map((t) => `<tr><td class="num">${fmtDate(t.date)}</td><td>${esc((DB.bankAccounts.find((b) => b.id === t.bankId) || {}).name || '—')}</td><td>${esc(t.note)}</td><td class="right num strong" style="color:${t.type === 'IN' ? 'var(--green)' : 'var(--red)'}">${t.type === 'IN' ? '+' : '−'}${fmtVND(t.amount)}</td></tr>`);
+
+  return `${pageHead('Ngân hàng', 'Số dư tài khoản ghi nhận thủ công theo sao kê — hệ thống chưa kết nối trực tiếp API ngân hàng', '<button class="btn btn-primary" data-act="acc-bank-add"><i class="fa-solid fa-plus"></i>Thêm tài khoản</button>')}
+    ${accTabsBar('banking')}
+    <div class="alert-item" style="margin-bottom:14px;cursor:default"><span class="alert-ico t-orange"><i class="fa-solid fa-circle-info"></i></span><div><b class="alert-title">Chưa kết nối API ngân hàng</b><div class="alert-sub">Số dư dưới đây được cập nhật thủ công theo sao kê định kỳ. Khi có API Open Banking, phần này sẽ tự đồng bộ mà không đổi cấu trúc dữ liệu.</div></div></div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-head"><h3>Tài khoản ngân hàng</h3></div>
+      ${tableShell([{ t: 'Tài khoản' }, { t: 'Số dư hiện tại', cls: 'right' }, { t: '', cls: 'right' }], accRows, { emptyTitle: 'Chưa có tài khoản ngân hàng' })}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Sổ phụ / Giao dịch gần đây</h3></div>
+      ${tableShell([{ t: 'Ngày' }, { t: 'Tài khoản' }, { t: 'Nội dung' }, { t: 'Số tiền', cls: 'right' }], txRows, { emptyTitle: 'Chưa có giao dịch ngân hàng' })}
+    </div>`;
+}
+
+function openBankAccountForm() {
+  Modal.open({
+    title: 'Thêm tài khoản ngân hàng',
+    body: `<div class="form-grid">
+        <div class="field" style="grid-column:1/-1"><label>Tên gợi nhớ <span class="req">*</span></label><input class="inp" id="bkName" placeholder="VD: Vietcombank – TK thanh toán"></div>
+        <div class="field"><label>Ngân hàng</label><input class="inp" id="bkBankName" placeholder="Vietcombank, ACB…"></div>
+        <div class="field"><label>Số tài khoản</label><input class="inp" id="bkNumber"></div>
+        <div class="field" style="grid-column:1/-1"><label>Số dư ban đầu</label><input class="inp right num" id="bkOpening" type="number" min="0" step="1000" value="0"></div>
+      </div>`,
+    foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="acc-bank-save"><i class="fa-solid fa-floppy-disk"></i>Lưu tài khoản</button>`,
+  });
+}
+
+function openBankTxForm(bankId) {
+  const b = DB.bankAccounts.find((x) => x.id === bankId);
+  if (!b) return;
+  Modal.open({
+    title: `Ghi nhận giao dịch · ${b.name}`,
+    body: `<div class="form-grid">
+        <div class="field"><label>Loại</label><select class="inp" id="bkTxType"><option value="IN">Tiền vào</option><option value="OUT">Tiền ra</option></select></div>
+        <div class="field"><label>Ngày</label><input class="inp" id="bkTxDate" type="date" value="${currentDateYMD()}"></div>
+        <div class="field" style="grid-column:1/-1"><label>Số tiền <span class="req">*</span></label><input class="inp right num" id="bkTxAmount" type="number" min="0" step="1000"></div>
+        <div class="field" style="grid-column:1/-1"><label>Nội dung</label><input class="inp" id="bkTxNote" placeholder="Nội dung theo sao kê"></div>
+      </div>`,
+    foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="acc-bank-tx-save" data-id="${esc(bankId)}"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`,
+  });
+}
+
+/* ---- 2.4 Phải thu ---- */
+function accArView() {
+  const rows = DB.customers.filter((c) => c.debt > 0).sort((a, b) => b.debt - a.debt);
+  const total = rows.reduce((s, c) => s + c.debt, 0);
+  return `${pageHead('Công nợ phải thu', 'Tổng hợp theo hồ sơ khách hàng — cập nhật tự động khi ghi nhận thanh toán', '')}
+    ${accTabsBar('ar')}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tổng phải thu', fmtVND(total), 'fa-hand-holding-dollar', 'teal')}${mkpi('Số khách hàng còn nợ', rows.length, 'fa-users', 'blue')}</div>
+    <div class="card">${tableShell([{ t: 'Khách hàng' }, { t: 'Nhóm' }, { t: 'Công nợ', cls: 'right' }, { t: '', cls: 'right' }],
+      rows.map((c) => `<tr><td>${cell2(esc(c.name), esc(c.id) + ' · ' + esc(c.phone))}</td><td>${esc(c.group)}</td><td class="right num strong" style="color:var(--teal)">${fmtVND(c.debt)}</td><td class="right"><button class="btn btn-sm btn-primary" data-act="acc-ar-collect" data-id="${esc(c.id)}"><i class="fa-solid fa-hand-holding-dollar"></i>Ghi nhận thu</button></td></tr>`),
+      { emptyTitle: 'Không có khách hàng nào còn công nợ' })}</div>`;
+}
+
+function openArCollectForm(customerId) {
+  const c = Q.customer(customerId); if (!c) return;
+  Modal.open({
+    title: `Ghi nhận thu tiền · ${c.name}`,
+    sub: `Công nợ hiện tại: ${fmtVND(c.debt)}`,
+    body: `<div class="form-grid">
+        <div class="field"><label>Ngày thu</label><input class="inp" id="arDate" type="date" value="${currentDateYMD()}"></div>
+        <div class="field"><label>Số tiền <span class="req">*</span></label><input class="inp right num" id="arAmount" type="number" min="1" max="${c.debt}" step="1000" value="${c.debt}"></div>
+        <div class="field" style="grid-column:1/-1"><label>Hình thức</label><select class="inp" id="arMethod"><option>Chuyển khoản</option><option>Tiền mặt</option></select></div>
+        <div class="field" style="grid-column:1/-1"><label>Ghi chú</label><input class="inp" id="arNote" placeholder="VD: thu công nợ tháng 8"></div>
+      </div>`,
+    foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="acc-ar-collect-save" data-id="${esc(c.id)}"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`,
+  });
+}
+
+/* ---- 2.5 Phải trả (tái dùng modal thanh toán NCC đã có trong app.js) ---- */
+function accApView() {
+  const rows = AccFin.activePOs().filter((po) => (po.total - po.paid) > 0).sort((a, b) => (b.total - b.paid) - (a.total - a.paid));
+  const total = rows.reduce((s, po) => s + (po.total - po.paid), 0);
+  return `${pageHead('Công nợ phải trả', 'Tổng hợp theo Đơn đặt hàng mua — thanh toán ghi nhận thẳng vào công nợ nhà cung cấp', '')}
+    ${accTabsBar('ap')}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tổng phải trả', fmtVND(total), 'fa-file-invoice-dollar', 'red')}${mkpi('Số đơn còn nợ', rows.length, 'fa-file-lines', 'orange')}</div>
+    <div class="card">${tableShell([{ t: 'Đơn mua' }, { t: 'Nhà cung cấp' }, { t: 'Giá trị', cls: 'right' }, { t: 'Đã trả', cls: 'right' }, { t: 'Còn nợ', cls: 'right' }, { t: '', cls: 'right' }],
+      rows.map((po) => `<tr><td><span class="code">${esc(po.id)}</span></td><td>${esc(Q.supplierName(po.supplierId))}</td><td class="right num">${fmtVND(po.total)}</td><td class="right num">${fmtVND(po.paid)}</td><td class="right num strong" style="color:var(--red)">${fmtVND(po.total - po.paid)}</td><td class="right"><button class="btn btn-sm btn-primary" data-act="supplier-pay-modal" data-poid="${esc(po.id)}"><i class="fa-solid fa-money-bill-transfer"></i>Thanh toán</button></td></tr>`),
+      { emptyTitle: 'Không có đơn mua nào còn công nợ' })}</div>`;
+}
+
+/* ---- 2.6 Giá thành ---- */
+function accCostingView() {
+  const f = F('acc-costing', { status: 'lsx_hoan_thanh' });
+  let list = DB.productionOrders.slice();
+  if (f.status) list = list.filter((p) => p.status === f.status);
+  const rows = list.map((po) => {
+    const c = Q.costOf(po.productId);
+    if (!c) return '';
+    const material = Math.round(c.materialCost * po.qty), labor = Math.round(c.laborCost * po.qty), overhead = Math.round(c.overhead * po.qty);
+    const totalCost = material + labor + overhead;
+    const sellPrice = c.product.price * po.qty;
+    const profit = sellPrice - totalCost;
+    return `<tr>
+        <td><span class="code" data-act="open-po" data-id="${esc(po.id)}" style="cursor:pointer">${esc(po.id)}</span><div class="cell-sub">${esc(po.productName)}</div></td>
+        <td class="num">${fmtN(po.qty)} ${esc(po.unit)}</td>
+        <td class="right num">${fmtVND(material)}</td>
+        <td class="right num">${fmtVND(labor)}</td>
+        <td class="right num">${fmtVND(overhead)}</td>
+        <td class="right num strong">${fmtVND(totalCost)}</td>
+        <td class="right num">${fmtVND(sellPrice)}</td>
+        <td class="right num strong" style="color:${profit >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtVND(profit)}</td>
+      </tr>`;
+  }).join('');
+
+  return `${pageHead('Giá thành sản xuất', 'Tính tự động từ định mức BOM/Routing của từng lệnh sản xuất theo đơn giá hiện hành', '')}
+    ${accTabsBar('costing')}
+    <div class="card">
+      <div class="toolbar">${selectFilter('acc-costing', 'status', statusOptions('lsx_'), 'Tất cả trạng thái')}<span class="spacer"></span><span class="chip">${list.length} lệnh sản xuất</span></div>
+      ${tableShell([{ t: 'Lệnh SX' }, { t: 'SL' }, { t: 'CP nguyên liệu', cls: 'right' }, { t: 'CP công đoạn', cls: 'right' }, { t: 'CP quản lý PB', cls: 'right' }, { t: 'Giá thành', cls: 'right' }, { t: 'Doanh thu', cls: 'right' }, { t: 'Lợi nhuận gộp', cls: 'right' }], rows, { emptyTitle: 'Không có lệnh sản xuất phù hợp' })}
+    </div>`;
+}
+
+/* ---- 2.7 Tài sản cố định ---- */
+function accFixedAssetsView() {
+  const rows = (DB.fixedAssets || []).map((a) => `<tr>
+      <td><span class="code">${esc(a.id)}</span></td>
+      <td>${cell2(esc(a.name), esc(a.dept))}</td>
+      <td class="num">${fmtDate(a.purchaseDate)}</td>
+      <td class="right num">${fmtVND(a.cost)}</td>
+      <td class="num center">${a.usefulYears} năm</td>
+      <td class="right num">${fmtVND(AccFin.assetAccumDep(a))}</td>
+      <td class="right num strong">${fmtVND(AccFin.assetBookValue(a))}</td>
+      <td>${a.status === 'disposed' ? badge('vt_het_hang') : badge('vt_du_ton')}</td>
+      <td class="right">${rowActions([{ act: 'acc-asset-edit', data: `data-id="${a.id}"`, icon: 'fa-pen', title: 'Sửa' }, { act: 'acc-asset-delete', data: `data-id="${a.id}"`, icon: 'fa-trash', title: 'Xóa' }])}</td>
+    </tr>`);
+  const totalCost = (DB.fixedAssets || []).reduce((s, a) => s + a.cost, 0);
+  const totalNet = AccFin.totalAssetsNet();
+  return `${pageHead('Tài sản cố định', 'Khấu hao đường thẳng theo số năm sử dụng, tự tính lại theo ngày hiện tại', '<button class="btn btn-primary" data-act="acc-asset-add"><i class="fa-solid fa-plus"></i>Thêm tài sản</button>')}
+    ${accTabsBar('fixed_assets')}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Nguyên giá', fmtVND(totalCost), 'fa-warehouse', 'blue')}${mkpi('Giá trị còn lại', fmtVND(totalNet), 'fa-scale-balanced', 'green')}${mkpi('Khấu hao lũy kế', fmtVND(totalCost - totalNet), 'fa-chart-line', 'orange')}</div>
+    <div class="card">${tableShell([{ t: 'Mã' }, { t: 'Tài sản' }, { t: 'Ngày mua' }, { t: 'Nguyên giá', cls: 'right' }, { t: 'Thời gian KH', cls: 'center' }, { t: 'Khấu hao lũy kế', cls: 'right' }, { t: 'Giá trị còn lại', cls: 'right' }, { t: 'Trạng thái' }, { t: '', cls: 'right' }], rows, { emptyTitle: 'Chưa có tài sản cố định' })}</div>`;
+}
+
+function openFixedAssetForm(id = '') {
+  const a = id ? (DB.fixedAssets || []).find((x) => x.id === id) : null;
+  return Modal.open({
+    title: a ? 'Sửa tài sản cố định' : 'Thêm tài sản cố định',
+    body: `<div class="form-grid">
+        <div class="field" style="grid-column:1/-1"><label>Tên tài sản <span class="req">*</span></label><input class="inp" id="faName" value="${esc(a?.name || '')}"></div>
+        <div class="field"><label>Bộ phận sử dụng</label><select class="inp" id="faDept">${DB.departments.map((d) => `<option ${a?.dept === d ? 'selected' : ''}>${esc(d)}</option>`).join('')}</select></div>
+        <div class="field"><label>Ngày mua</label><input class="inp" id="faDate" type="date" value="${esc(a?.purchaseDate || currentDateYMD())}"></div>
+        <div class="field"><label>Nguyên giá <span class="req">*</span></label><input class="inp right num" id="faCost" type="number" min="0" step="1000" value="${a?.cost || ''}"></div>
+        <div class="field"><label>Số năm khấu hao</label><input class="inp right num" id="faYears" type="number" min="1" max="30" value="${a?.usefulYears || 8}"></div>
+      </div>`,
+    foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="acc-asset-save" data-id="${esc(id)}"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`,
+  });
+}
+
+/* ---- 2.8 Thuế ---- */
+function accTaxView() {
+  const months = AccFin.last6Months();
+  const outMap = AccFin.vatOutputByMonth(), inMap = AccFin.vatInputByMonth();
+  let totalOut = 0, totalIn = 0;
+  const rows = months.map((m) => {
+    const out = outMap[m] || 0, inp = inMap[m] || 0;
+    totalOut += out; totalIn += inp;
+    const payable = out - inp;
+    return `<tr><td>${AccFin.fmtMonthShort(m)}/${m.slice(0, 4)}</td><td class="right num">${fmtVND(out)}</td><td class="right num">${fmtVND(inp)}</td><td class="right num strong" style="color:${payable >= 0 ? 'var(--red)' : 'var(--green)'}">${payable >= 0 ? fmtVND(payable) : 'Được khấu trừ ' + fmtVND(-payable)}</td></tr>`;
+  });
+  return `${pageHead('Thuế', 'VAT đầu ra tính theo Đơn hàng bán, VAT đầu vào tính theo Đơn đặt hàng mua — không cần khai báo tay', '<button class="btn" data-act="export-report" data-key="rp-material"><i class="fa-solid fa-file-export"></i>Xuất bảng kê</button>')}
+    ${accTabsBar('tax')}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('VAT đầu ra (6 tháng)', fmtVND(totalOut), 'fa-arrow-up', 'red')}${mkpi('VAT đầu vào (6 tháng)', fmtVND(totalIn), 'fa-arrow-down', 'green')}${mkpi('Thuế TNDN ước tính tháng này', fmtVND(AccFin.pnlOf(AccFin.currentMonth()).tax), 'fa-landmark', 'indigo')}</div>
+    <div class="card">${tableShell([{ t: 'Tháng' }, { t: 'VAT đầu ra', cls: 'right' }, { t: 'VAT đầu vào', cls: 'right' }, { t: 'Phải nộp / Được khấu trừ', cls: 'right' }], rows, { emptyTitle: 'Chưa có dữ liệu' })}</div>`;
+}
+
+/* ---- 2.9 Ngân sách vs Thực tế ---- */
+function accBudgetView() {
+  const rows = (DB.budgets || []).map((b) => {
+    const actual = AccFin.deptActualSpend(b.dept);
+    const pct = b.totalBudget ? Math.round((actual / b.totalBudget) * 100) : 0;
+    return `<tr><td class="strong">${esc(b.dept)}</td><td class="right num">${fmtVND(b.totalBudget)}</td><td class="right num">${fmtVND(actual)}</td><td class="right num" style="color:${b.totalBudget - actual >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtVND(b.totalBudget - actual)}</td><td style="min-width:160px">${progressBar(pct)}</td></tr>`;
+  });
+  return `${pageHead('Ngân sách vs Thực tế', 'Thực chi lấy trực tiếp từ Đề nghị mua hàng (PR) đã duyệt/chờ duyệt theo từng bộ phận', '')}
+    ${accTabsBar('budget')}
+    <div class="card">${tableShell([{ t: 'Bộ phận' }, { t: 'Ngân sách', cls: 'right' }, { t: 'Thực chi', cls: 'right' }, { t: 'Còn lại', cls: 'right' }, { t: '% sử dụng' }], rows, { emptyTitle: 'Chưa cấu hình ngân sách' })}</div>`;
+}
+
+/* ---- 2.10 P&L ---- */
+function accPnlView() {
+  const m = AccFin.currentMonth(), pm = AccFin.prevMonth();
+  const cur = AccFin.pnlOf(m), prev = AccFin.pnlOf(pm);
+  const rows = [
+    ['Doanh thu thuần', cur.revenue, prev.revenue],
+    ['Giá vốn hàng bán', -cur.cogs, -prev.cogs],
+    ['Lợi nhuận gộp', cur.grossProfit, prev.grossProfit],
+    ['Chi phí hoạt động', -cur.opex, -prev.opex],
+    ['Lợi nhuận trước thuế (EBT)', cur.ebt, prev.ebt],
+    ['Thuế TNDN ước tính (' + DB.accountingSettings.corporateTaxRatePct + '%)', -cur.tax, -prev.tax],
+    ['Lợi nhuận sau thuế', cur.netProfit, prev.netProfit],
+  ];
+  const rowsHtml = rows.map(([label, v, pv], i) => {
+    const bold = [2, 4, 6].includes(i);
+    return `<tr style="${bold ? 'font-weight:700;background:var(--surface-2)' : ''}"><td>${esc(label)}</td><td class="right num" style="color:${v < 0 ? 'var(--red)' : 'inherit'}">${v < 0 ? '(' + fmtVND(-v) + ')' : fmtVND(v)}</td><td class="right num muted">${pv < 0 ? '(' + fmtVND(-pv) + ')' : fmtVND(pv)}</td></tr>`;
+  }).join('');
+  return `${pageHead('Báo cáo Lãi lỗ (P&L)', `Kỳ báo cáo: Tháng ${m.slice(5, 7)}/${m.slice(0, 4)} — so sánh với tháng trước`, '')}
+    ${accTabsBar('pnl')}
+    <div class="card"><div class="card-body">${tableShell([{ t: 'Chỉ tiêu' }, { t: 'Tháng này', cls: 'right' }, { t: 'Tháng trước', cls: 'right' }], rowsHtml)}</div></div>`;
+}
+
+/* ---- 2.11 Balance Sheet ---- */
+function accBalanceSheetView() {
+  const cash = AccFin.totalBankBalance();
+  const ar = AccFin.totalAR();
+  const inv = AccFin.inventoryBookValue();
+  const assets = AccFin.totalAssetsNet();
+  const totalAssets = cash + ar + inv + assets;
+  const ap = AccFin.totalAP();
+  const equity = totalAssets - ap; // cân đối kế toán: Vốn CSH = Tổng TS - Nợ phải trả
+  return `${pageHead('Bảng cân đối kế toán (Balance Sheet)', `Số liệu tại ngày ${fmtDate(TODAY)}`, '')}
+    ${accTabsBar('balance_sheet')}
+    <div class="grid g-2">
+      <div class="card">
+        <div class="card-head"><h3>TÀI SẢN</h3></div>
+        ${tableShell([{ t: '' }, { t: '', cls: 'right' }], [
+          `<tr><td>Tiền &amp; tương đương tiền (ngân hàng)</td><td class="right num">${fmtVND(cash)}</td></tr>`,
+          `<tr><td>Phải thu khách hàng</td><td class="right num">${fmtVND(ar)}</td></tr>`,
+          `<tr><td>Hàng tồn kho (NVL + thành phẩm)</td><td class="right num">${fmtVND(inv)}</td></tr>`,
+          `<tr><td>Tài sản cố định (giá trị còn lại)</td><td class="right num">${fmtVND(assets)}</td></tr>`,
+          `<tr style="font-weight:700;background:var(--surface-2)"><td>TỔNG TÀI SẢN</td><td class="right num">${fmtVND(totalAssets)}</td></tr>`,
+        ])}
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>NGUỒN VỐN</h3></div>
+        ${tableShell([{ t: '' }, { t: '', cls: 'right' }], [
+          `<tr><td>Phải trả nhà cung cấp</td><td class="right num">${fmtVND(ap)}</td></tr>`,
+          `<tr style="font-weight:700"><td>TỔNG NỢ PHẢI TRẢ</td><td class="right num">${fmtVND(ap)}</td></tr>`,
+          `<tr><td>Vốn chủ sở hữu (cân đối)</td><td class="right num">${fmtVND(equity)}</td></tr>`,
+          `<tr style="font-weight:700;background:var(--surface-2)"><td>TỔNG NGUỒN VỐN</td><td class="right num">${fmtVND(ap + equity)}</td></tr>`,
+        ])}
+      </div>
+    </div>
+    <p class="cell-sub" style="margin-top:10px">Vốn chủ sở hữu được suy ra để cân đối (Tổng tài sản − Nợ phải trả) vì hệ thống demo chưa có sổ vốn góp/lợi nhuận giữ lại riêng.</p>`;
+}
+
+/* ---- 2.12 Cashflow statement ---- */
+function accCashflowStatementView() {
+  const months = AccFin.last6Months();
+  const inMap = AccFin.cashInByMonth(), outMap = AccFin.cashOutByMonth();
+  let running = AccFin.totalBankBalance() - months.reduce((s, m) => s + (inMap[m] || 0) - (outMap[m] || 0), 0);
+  const rows = months.map((m) => {
+    const inn = inMap[m] || 0, out = outMap[m] || 0, net = inn - out;
+    running += net;
+    return `<tr><td>${AccFin.fmtMonthShort(m)}/${m.slice(0, 4)}</td><td class="right num" style="color:var(--green)">${fmtVND(inn)}</td><td class="right num" style="color:var(--red)">${fmtVND(out)}</td><td class="right num strong" style="color:${net >= 0 ? 'var(--green)' : 'var(--red)'}">${net >= 0 ? '+' : ''}${fmtVND(net)}</td><td class="right num">${fmtVND(running)}</td></tr>`;
+  });
+  return `${pageHead('Báo cáo lưu chuyển tiền tệ (Cashflow)', 'Tổng hợp dòng tiền vào/ra từ công nợ khách hàng, nhà cung cấp và sổ quỹ thủ công', '')}
+    ${accTabsBar('cashflow')}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tồn quỹ hiện tại', fmtVND(AccFin.totalBankBalance()), 'fa-building-columns', 'blue')}</div>
+    <div class="card">${tableShell([{ t: 'Tháng' }, { t: 'Thu', cls: 'right' }, { t: 'Chi', cls: 'right' }, { t: 'Dòng tiền thuần', cls: 'right' }, { t: 'Lũy kế cuối kỳ', cls: 'right' }], rows)}</div>`;
+}
+
+/* ---- 2.13 Sổ nhật ký chung (đọc) ---- */
+function accLedgerView() {
+  const rows = accAllCashRows().slice(0, 100);
+  return `${pageHead('Sổ nhật ký chung', 'Nhật ký tự động tổng hợp mọi giao dịch tiền — chỉ xem, chỉnh sửa tại từng phân hệ nguồn', '')}
+    ${accTabsBar('general_ledger')}
+    <div class="card">${tableShell([{ t: 'Ngày' }, { t: 'Loại' }, { t: 'Diễn giải' }, { t: 'Nguồn' }, { t: 'Số tiền', cls: 'right' }],
+      rows.map((r) => `<tr><td class="num">${fmtDate(r.date)}</td><td>${r.type === 'THU' ? 'Thu' : 'Chi'}</td><td>${esc(r.note)}</td><td class="muted">${esc(r.source)}</td><td class="right num strong" style="color:${r.type === 'THU' ? 'var(--green)' : 'var(--red)'}">${r.type === 'THU' ? '+' : '−'}${fmtVND(r.amount)}</td></tr>`))}</div>`;
+}
+
+/* ---- 2.14 Hub báo cáo ---- */
+function accReportsHubView() {
+  const cards = [
+    ['pnl', 'fa-chart-line', 't-blue', 'Báo cáo Lãi lỗ (P&L)', 'Doanh thu, giá vốn, chi phí và lợi nhuận theo tháng'],
+    ['balance_sheet', 'fa-scale-balanced', 't-indigo', 'Bảng cân đối kế toán', 'Tài sản, nợ phải trả và vốn chủ sở hữu tại một thời điểm'],
+    ['cashflow', 'fa-money-bill-trend-up', 't-green', 'Lưu chuyển tiền tệ', 'Dòng tiền vào/ra và tồn quỹ lũy kế theo tháng'],
+    ['budget', 'fa-bullseye', 't-orange', 'Ngân sách vs Thực tế', 'So sánh ngân sách được cấp với thực chi mua hàng'],
+    ['tax', 'fa-landmark', 't-red', 'Thuế', 'VAT đầu vào/đầu ra và ước tính thuế TNDN'],
+    ['fixed_assets', 'fa-warehouse', 't-slate', 'Tài sản cố định', 'Nguyên giá, khấu hao và giá trị còn lại'],
+  ];
+  return `${pageHead('Báo cáo tài chính', 'Chọn báo cáo quản trị đa chiều cần xem', '')}
+    ${accTabsBar('reports_hub')}
+    <div class="grid g-3">${cards.map(([tab, icon, tone, title, sub]) => `<div class="report-card" data-act="nav" data-id="accounting" data-tab="${tab}"><span class="rc-ico ${tone}"><i class="fa-solid ${icon}"></i></span><b>${esc(title)}</b><span>${esc(sub)}</span></div>`).join('')}</div>`;
+}
+
+/* --------------------------------------------------------------- 3. ROUTER */
+Views.accounting = function () {
+  const tab = State.tab || 'dashboard';
+  switch (tab) {
+    case 'dashboard': return accDashboardView();
+    case 'cashflow_inout': return accCashflowInOutView();
+    case 'banking': return accBankingView();
+    case 'ar': return accArView();
+    case 'ap': return accApView();
+    case 'costing': return accCostingView();
+    case 'fixed_assets': return accFixedAssetsView();
+    case 'tax': return accTaxView();
+    case 'budget': return accBudgetView();
+    case 'pnl': return accPnlView();
+    case 'balance_sheet': return accBalanceSheetView();
+    case 'cashflow': return accCashflowStatementView();
+    case 'general_ledger': return accLedgerView();
+    case 'reports': case 'reports_hub': return accReportsHubView();
+    default: return accDashboardView();
+  }
+};
+Views.accounting.after = function () { if ((State.tab || 'dashboard') === 'dashboard') accDashboardView.after(); };
+
+/* --------------------------------------------------------------- 4. ACTIONS
+ * Gắn thêm vào Actions toàn cục (đã được app.js khởi tạo trước khi file này
+ * chạy — xem hướng dẫn nạp script cuối file). */
+Object.assign(Actions, {
+  'acc-cash-add': (d) => openCashTxForm(d.type),
+  'acc-cash-save': (d) => {
+    const date = $('#ctxDate')?.value || currentDateYMD();
+    const amount = Number($('#ctxAmount')?.value) || 0;
+    if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
+    const category = $('#ctxCategory')?.value || '';
+    const note = $('#ctxNote')?.value.trim() || category;
+    DB.cashTransactions.unshift({ id: nextCode('SQ-2026-', DB.cashTransactions), type: d.type, date, amount, category, note, createdBy: DB.currentUser?.id || '' });
+    Modal.close(); render();
+    Toast.ok('Đã ghi nhận', `${d.type === 'THU' ? 'Thu' : 'Chi'} ${fmtVND(amount)} · ${note}`);
+  },
+  'acc-cash-delete': (d) => {
+    DB.cashTransactions = DB.cashTransactions.filter((t) => t.id !== d.id);
+    render(); Toast.ok('Đã xóa giao dịch');
+  },
+
+  'acc-bank-add': () => openBankAccountForm(),
+  'acc-bank-save': () => {
+    const name = $('#bkName')?.value.trim();
+    if (!name) { Toast.err('Thiếu tên tài khoản', 'Vui lòng nhập tên gợi nhớ cho tài khoản.'); return; }
+    DB.bankAccounts.push({ id: nextCode('BANK-', DB.bankAccounts, 2), name, bankName: $('#bkBankName')?.value.trim() || '', accountNumber: $('#bkNumber')?.value.trim() || '', openingBalance: Number($('#bkOpening')?.value) || 0 });
+    Modal.close(); render(); Toast.ok('Đã thêm tài khoản ngân hàng', name);
+  },
+  'acc-bank-tx-add': (d) => openBankTxForm(d.id),
+  'acc-bank-tx-save': (d) => {
+    const amount = Number($('#bkTxAmount')?.value) || 0;
+    if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
+    DB.bankTransactions.unshift({ id: nextCode('BTX-2026-', DB.bankTransactions), bankId: d.id, type: $('#bkTxType')?.value || 'IN', date: $('#bkTxDate')?.value || currentDateYMD(), amount, note: $('#bkTxNote')?.value.trim() || '' });
+    Modal.close(); render(); Toast.ok('Đã ghi nhận giao dịch ngân hàng');
+  },
+
+  'acc-ar-collect': (d) => openArCollectForm(d.id),
+  'acc-ar-collect-save': (d) => {
+    const c = Q.customer(d.id); if (!c) return;
+    const amount = Number($('#arAmount')?.value) || 0;
+    if (amount <= 0 || amount > c.debt) { Toast.err('Số tiền không hợp lệ', `Số tiền phải lớn hơn 0 và không vượt quá công nợ ${fmtVND(c.debt)}.`); return; }
+    c.debt = Math.round((c.debt - amount) * 100) / 100;
+    DB.customerPayments.unshift({ id: nextCode('TT-KH-2026-', DB.customerPayments), customerId: c.id, contractId: '', date: $('#arDate')?.value || currentDateYMD(), amount, method: $('#arMethod')?.value || 'Chuyển khoản', note: $('#arNote')?.value.trim() || `Thu công nợ ${c.name}` });
+    Modal.close(); render();
+    Toast.ok('Đã ghi nhận thu tiền', `${c.name} · ${fmtVND(amount)} · Còn nợ ${fmtVND(c.debt)}`);
+  },
+
+  'acc-asset-add': () => openFixedAssetForm(),
+  'acc-asset-edit': (d) => openFixedAssetForm(d.id),
+  'acc-asset-save': (d) => {
+    const name = $('#faName')?.value.trim();
+    const cost = Number($('#faCost')?.value) || 0;
+    if (!name || cost <= 0) { Toast.err('Thiếu thông tin', 'Vui lòng nhập tên tài sản và nguyên giá lớn hơn 0.'); return; }
+    const payload = { name, dept: $('#faDept')?.value || '', purchaseDate: $('#faDate')?.value || currentDateYMD(), cost, usefulYears: Number($('#faYears')?.value) || 8 };
+    if (d.id) {
+      Object.assign(DB.fixedAssets.find((a) => a.id === d.id), payload);
+    } else {
+      DB.fixedAssets.push({ id: nextCode('TS-', DB.fixedAssets), status: 'active', ...payload });
+    }
+    Modal.close(); render(); Toast.ok(d.id ? 'Đã cập nhật tài sản' : 'Đã thêm tài sản', name);
+  },
+  'acc-asset-delete': (d) => {
+    const a = DB.fixedAssets.find((x) => x.id === d.id); if (!a) return;
+    confirmBox({ title: 'Xóa tài sản cố định', icon: 'fa-trash', okText: 'Xóa', message: `Xóa tài sản <b>${esc(a.name)}</b>?`, onOk: () => { DB.fixedAssets = DB.fixedAssets.filter((x) => x.id !== d.id); render(); Toast.ok('Đã xóa tài sản', a.name); } });
+  },
+});
+
+/* ============================================================================
+ * LƯU Ý TÍCH HỢP
+ * ----------------------------------------------------------------------------
+ *    Trong index.html, thêm MỘT dòng script NGAY SAU app.js (bắt buộc sau,
+ *    vì file này dùng Actions/Views/DB/Q/AccFin đã được app.js khởi tạo):
+ *
+ *      <script src="js/app.js?v=20260914-restaurant1"></script>
+ *      <script src="js/modules/mod-accounting.js?v=1"></script>
+ * ==========================================================================*/

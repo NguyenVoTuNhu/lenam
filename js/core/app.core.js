@@ -40,7 +40,7 @@ function enforceBusinessDateInputs(scope = document) {
   scope.querySelectorAll('input[type="date"]').forEach((el) => {
     // Một số trường lưu ngày quá khứ hợp lệ theo nghiệp vụ (vd: ngày vào làm
     // của nhân sự cũ) — đánh dấu data-allow-past="1" để không bị ép về hôm nay.
-    if (el.dataset.allowPast === '1') return;
+    if (el.dataset.allowPast === '1' || el.dataset.f) return;
     el.min = today;
     const isFilter = !!el.dataset.f;
     if (!isFilter && (!el.value || el.value < today)) el.value = today;
