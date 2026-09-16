@@ -144,13 +144,10 @@ const AccFin = {
 
 /* -------------------------------------------------------------- 2. GIAO DIỆN */
 const ACCOUNTING_TABS = [
-  ['fixed_assets', 'Tài sản cố định'],
-  ['tax', 'Thuế'],
   ['budget', 'Ngân sách'],
   ['pnl', 'P&L'],
   ['balance_sheet', 'Balance Sheet'],
   ['cashflow', 'Cashflow'],
-  ['general_ledger', 'Sổ nhật ký'],
 ];
 
 function accTabsBar(active) {
@@ -165,6 +162,112 @@ function pctDelta(cur, prev) {
   const tone = d >= 0 ? 'green' : 'red';
   const arrow = d >= 0 ? 'fa-arrow-up' : 'fa-arrow-down';
   return `<span class="kpi-delta ${tone === 'green' ? 'up' : 'down'}"><i class="fa-solid ${arrow}"></i>${Math.abs(d).toFixed(1)}%</span> so với tháng trước`;
+}
+
+/* ----------------------------------------------------------------
+ * ACCOUNTING FILTER HELPERS
+ * ---------------------------------------------------------------- */
+
+function accDateInRange(date, from, to) {
+  if (!date) return false;
+  if (from && String(date) < String(from)) return false;
+  if (to && String(date) > String(to)) return false;
+  return true;
+}
+
+function accTextMatch(values, keyword) {
+  if (!keyword) return true;
+  const q = String(keyword).trim().toLowerCase();
+  if (!q) return true;
+
+  return values.some((v) =>
+    String(v ?? '').toLowerCase().includes(q)
+  );
+}
+
+/* Khoảng ngày mặc định cho báo cáo */
+function accDefaultReportFilter(key) {
+  const today = currentDateYMD ? currentDateYMD() : String(TODAY);
+
+  const d = new Date(today);
+  const y = d.getFullYear();
+  const m = d.getMonth();
+
+  if (key === 'acc-report-pnl' || key === 'acc-report-tax') {
+    return {
+      period: 'month',
+      year: y,
+      month: String(m + 1).padStart(2, '0'),
+      from: `${y}-${String(m + 1).padStart(2, '0')}-01`,
+      to: today
+    };
+  }
+
+  if (key === 'acc-report-cashflow') {
+    const from = new Date(y, m - 5, 1);
+
+    return {
+      period: 'month',
+      from: `${from.getFullYear()}-${String(from.getMonth() + 1).padStart(2, '0')}-01`,
+      to: today
+    };
+  }
+
+  if (key === 'acc-report-bs') {
+    return {
+      asOf: today
+    };
+  }
+
+  return {};
+}
+
+function accReportPeriodLabel(period, from, to) {
+  if (period === 'month') {
+    return `Theo tháng · ${fmtDate(from)} → ${fmtDate(to)}`;
+  }
+
+  if (period === 'quarter') {
+    return `Theo quý · ${fmtDate(from)} → ${fmtDate(to)}`;
+  }
+
+  if (period === 'year') {
+    return `Theo năm · ${fmtDate(from)} → ${fmtDate(to)}`;
+  }
+
+  return `${fmtDate(from)} → ${fmtDate(to)}`;
+}
+
+/* Gom dữ liệu theo tháng / quý / năm */
+function accGroupKey(date, groupBy = 'month') {
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return '';
+
+  const y = d.getFullYear();
+  const m = d.getMonth() + 1;
+
+  if (groupBy === 'year') {
+    return String(y);
+  }
+
+  if (groupBy === 'quarter') {
+    return `${y}-Q${Math.ceil(m / 3)}`;
+  }
+
+  return `${y}-${String(m).padStart(2, '0')}`;
+}
+
+function accGroupLabel(key, groupBy = 'month') {
+  if (groupBy === 'year') {
+    return `Năm ${key}`;
+  }
+
+  if (groupBy === 'quarter') {
+    return key.replace('-', ' / ');
+  }
+
+  const [y, m] = key.split('-');
+  return `Th${Number(m)}/${String(y).slice(2)}`;
 }
 
 /* ---- 2.1 Tổng quan ---- */
@@ -182,7 +285,6 @@ function accDashboardView() {
   const revMap = AccFin.revenueByMonth(), cogsMap = AccFin.cogsByMonth();
 
   return `${pageHead('Tổng quan tài chính', 'Số liệu tổng hợp tự động từ Bán hàng, Sản xuất, Kho và Mua hàng', '<button class="btn btn-sm" data-act="nav" data-id="accounting" data-tab="reports_hub"><i class="fa-solid fa-file-export"></i>Xem báo cáo</button>')}
-  ${accTabsBar('dashboard')}
   <div class="grid g-auto" style="margin-bottom:14px">
     ${mkpi('Doanh thu thuần tháng', fmtVND(rev), 'fa-sack-dollar', 'blue', null, pctDelta(rev, prevRev))}
     ${mkpi('Giá vốn hàng bán', fmtVND(cogs), 'fa-cubes', 'orange', null, pctDelta(cogs, prevCogs))}
@@ -258,7 +360,6 @@ function accCashflowInOutView() {
   return `${pageHead('Thu – Chi', 'Sổ quỹ tổng hợp: tự động từ công nợ khách hàng/nhà cung cấp + ghi nhận thủ công', `
       <button class="btn" data-act="acc-cash-add" data-type="THU"><i class="fa-solid fa-arrow-down"></i>Ghi nhận thu</button>
       <button class="btn btn-primary" data-act="acc-cash-add" data-type="CHI"><i class="fa-solid fa-arrow-up"></i>Ghi nhận chi</button>`)}
-    ${accTabsBar('cashflow_inout')}
     <div class="grid g-auto-sm" style="margin-bottom:14px">
       ${mkpi('Tổng thu (theo lọc)', fmtVND(totalIn), 'fa-arrow-down', 'green')}
       ${mkpi('Tổng chi (theo lọc)', fmtVND(totalOut), 'fa-arrow-up', 'red')}
@@ -267,8 +368,8 @@ function accCashflowInOutView() {
     <div class="card">
       <div class="toolbar">
         ${selectFilter('acc-cash', 'type', [['THU', 'Thu'], ['CHI', 'Chi']], 'Tất cả loại')}
-        <input class="inp" type="date" data-f="acc-cash.from" value="${esc(f.from || '')}">
-        <input class="inp" type="date" data-f="acc-cash.to" value="${esc(f.to || '')}">
+        <span class="muted" style="font-size:13px;white-space:nowrap">Từ ngày</span><input class="inp" type="date" data-f="acc-cash.from" value="${esc(f.from || '')}">
+        <span class="muted" style="font-size:13px;white-space:nowrap">Đến ngày</span><input class="inp" type="date" data-f="acc-cash.to" value="${esc(f.to || '')}">
         ${(f.type || f.from || f.to) ? '<button class="btn btn-sm" data-act="clear-filter" data-key="acc-cash"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>' : ''}
         <span class="spacer"></span><span class="chip">${rows.length} giao dịch</span>
       </div>
@@ -310,7 +411,6 @@ function accBankingView() {
     .map((t) => `<tr><td class="num">${fmtDate(t.date)}</td><td>${esc((DB.bankAccounts.find((b) => b.id === t.bankId) || {}).name || '—')}</td><td>${esc(t.note)}</td><td class="right num strong" style="color:${t.type === 'IN' ? 'var(--green)' : 'var(--red)'}">${t.type === 'IN' ? '+' : '−'}${fmtVND(t.amount)}</td></tr>`);
 
   return `${pageHead('Ngân hàng', 'Số dư tài khoản ghi nhận thủ công theo sao kê — hệ thống chưa kết nối trực tiếp API ngân hàng', '<button class="btn btn-primary" data-act="acc-bank-add"><i class="fa-solid fa-plus"></i>Thêm tài khoản</button>')}
-    ${accTabsBar('banking')}
     <div class="alert-item" style="margin-bottom:14px;cursor:default"><span class="alert-ico t-orange"><i class="fa-solid fa-circle-info"></i></span><div><b class="alert-title">Chưa kết nối API ngân hàng</b><div class="alert-sub">Số dư dưới đây được cập nhật thủ công theo sao kê định kỳ. Khi có API Open Banking, phần này sẽ tự đồng bộ mà không đổi cấu trúc dữ liệu.</div></div></div>
     <div class="card" style="margin-bottom:14px">
       <div class="card-head"><h3>Tài khoản ngân hàng</h3></div>
@@ -355,7 +455,6 @@ function accArView() {
   const rows = DB.customers.filter((c) => c.debt > 0).sort((a, b) => b.debt - a.debt);
   const total = rows.reduce((s, c) => s + c.debt, 0);
   return `${pageHead('Công nợ phải thu', 'Tổng hợp theo hồ sơ khách hàng — cập nhật tự động khi ghi nhận thanh toán', '')}
-    ${accTabsBar('ar')}
     <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tổng phải thu', fmtVND(total), 'fa-hand-holding-dollar', 'teal')}${mkpi('Số khách hàng còn nợ', rows.length, 'fa-users', 'blue')}</div>
     <div class="card">${tableShell([{ t: 'Khách hàng' }, { t: 'Nhóm' }, { t: 'Công nợ', cls: 'right' }, { t: '', cls: 'right' }],
       rows.map((c) => `<tr><td>${cell2(esc(c.name), esc(c.id) + ' · ' + esc(c.phone))}</td><td>${esc(c.group)}</td><td class="right num strong" style="color:var(--teal)">${fmtVND(c.debt)}</td><td class="right"><button class="btn btn-sm btn-primary" data-act="acc-ar-collect" data-id="${esc(c.id)}"><i class="fa-solid fa-hand-holding-dollar"></i>Ghi nhận thu</button></td></tr>`),
@@ -382,11 +481,36 @@ function accApView() {
   const rows = AccFin.activePOs().filter((po) => (po.total - po.paid) > 0).sort((a, b) => (b.total - b.paid) - (a.total - a.paid));
   const total = rows.reduce((s, po) => s + (po.total - po.paid), 0);
   return `${pageHead('Công nợ phải trả', 'Tổng hợp theo Đơn đặt hàng mua — thanh toán ghi nhận thẳng vào công nợ nhà cung cấp', '')}
-    ${accTabsBar('ap')}
     <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tổng phải trả', fmtVND(total), 'fa-file-invoice-dollar', 'red')}${mkpi('Số đơn còn nợ', rows.length, 'fa-file-lines', 'orange')}</div>
     <div class="card">${tableShell([{ t: 'Đơn mua' }, { t: 'Nhà cung cấp' }, { t: 'Giá trị', cls: 'right' }, { t: 'Đã trả', cls: 'right' }, { t: 'Còn nợ', cls: 'right' }, { t: '', cls: 'right' }],
-      rows.map((po) => `<tr><td><span class="code">${esc(po.id)}</span></td><td>${esc(Q.supplierName(po.supplierId))}</td><td class="right num">${fmtVND(po.total)}</td><td class="right num">${fmtVND(po.paid)}</td><td class="right num strong" style="color:var(--red)">${fmtVND(po.total - po.paid)}</td><td class="right"><button class="btn btn-sm btn-primary" data-act="supplier-pay-modal" data-poid="${esc(po.id)}"><i class="fa-solid fa-money-bill-transfer"></i>Thanh toán</button></td></tr>`),
+      rows.map((po) => `<tr><td><span class="code">${esc(po.id)}</span></td><td>${esc(Q.supplierName(po.supplierId))}</td><td class="right num">${fmtVND(po.total)}</td><td class="right num">${fmtVND(po.paid)}</td><td class="right num strong" style="color:var(--red)">${fmtVND(po.total - po.paid)}</td><td class="right"><button class="btn btn-sm btn-primary" data-act="supplier-pay-modal" data-id="${esc(po.id)}"><i class="fa-solid fa-money-bill-transfer"></i>Thanh toán</button></td></tr>`),
       { emptyTitle: 'Không có đơn mua nào còn công nợ' })}</div>`;
+}
+
+function openSupplierPayForm(poId) {
+  const po = AccFin.activePOs().find((x) => String(x.id) === String(poId));
+  if (!po) {
+    alert('Không tìm thấy đơn mua.');
+    return;
+  }
+  const remain = Math.max(0, Number(po.total || 0) - Number(po.paid || 0));
+  if (remain <= 0) {
+    alert('Đơn mua này đã được thanh toán đủ.');
+    return;
+  }
+  const supplierName = Q.supplierName(po.supplierId);
+  Modal.open({
+    title: `Thanh toán công nợ · ${supplierName}`,
+    sub: `Đơn mua: ${po.id} · Còn nợ: ${fmtVND(remain)}`,
+    body: `
+      <div class="form-grid">
+        <div class="field"><label>Ngày thanh toán</label><input class="inp" id="supplierPayDate" type="date" value="${currentDateYMD()}"></div>
+        <div class="field"><label>Số tiền<span class="req">*</span></label><input class="inp right num" id="supplierPayAmount" type="number" min="1" max="${remain}" step="1000" value="${remain}"></div>
+        <div class="field" style="grid-column:1/-1"><label>Hình thức thanh toán</label><select class="inp" id="supplierPayMethod"><option>Chuyển khoản</option><option>Tiền mặt</option></select></div>
+        <div class="field" style="grid-column:1/-1"><label>Ghi chú</label><input class="inp" id="supplierPayNote" placeholder="VD: thanh toán công nợ tháng 8"></div>
+      </div>`,
+    foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="supplier-pay-save" data-poid="${esc(po.id)}"><i class="fa-solid fa-floppy-disk"></i>Lưu thanh toán</button>`
+  });
 }
 
 /* ---- 2.6 Giá thành ---- */
@@ -414,7 +538,6 @@ function accCostingView() {
   }).join('');
 
   return `${pageHead('Giá thành sản xuất', 'Tính tự động từ định mức BOM/Routing của từng lệnh sản xuất theo đơn giá hiện hành', '')}
-    ${accTabsBar('costing')}
     <div class="card">
       <div class="toolbar">${selectFilter('acc-costing', 'status', statusOptions('lsx_'), 'Tất cả trạng thái')}<span class="spacer"></span><span class="chip">${list.length} lệnh sản xuất</span></div>
       ${tableShell([{ t: 'Lệnh SX' }, { t: 'SL' }, { t: 'CP nguyên liệu', cls: 'right' }, { t: 'CP công đoạn', cls: 'right' }, { t: 'CP quản lý PB', cls: 'right' }, { t: 'Giá thành', cls: 'right' }, { t: 'Doanh thu', cls: 'right' }, { t: 'Lợi nhuận gộp', cls: 'right' }], rows, { emptyTitle: 'Không có lệnh sản xuất phù hợp' })}
@@ -437,7 +560,6 @@ function accFixedAssetsView() {
   const totalCost = (DB.fixedAssets || []).reduce((s, a) => s + a.cost, 0);
   const totalNet = AccFin.totalAssetsNet();
   return `${pageHead('Tài sản cố định', 'Khấu hao đường thẳng theo số năm sử dụng, tự tính lại theo ngày hiện tại', '<button class="btn btn-primary" data-act="acc-asset-add"><i class="fa-solid fa-plus"></i>Thêm tài sản</button>')}
-    ${accTabsBar('fixed_assets')}
     <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Nguyên giá', fmtVND(totalCost), 'fa-warehouse', 'blue')}${mkpi('Giá trị còn lại', fmtVND(totalNet), 'fa-scale-balanced', 'green')}${mkpi('Khấu hao lũy kế', fmtVND(totalCost - totalNet), 'fa-chart-line', 'orange')}</div>
     <div class="card">${tableShell([{ t: 'Mã' }, { t: 'Tài sản' }, { t: 'Ngày mua' }, { t: 'Nguyên giá', cls: 'right' }, { t: 'Thời gian KH', cls: 'center' }, { t: 'Khấu hao lũy kế', cls: 'right' }, { t: 'Giá trị còn lại', cls: 'right' }, { t: 'Trạng thái' }, { t: '', cls: 'right' }], rows, { emptyTitle: 'Chưa có tài sản cố định' })}</div>`;
 }
@@ -469,7 +591,6 @@ function accTaxView() {
     return `<tr><td>${AccFin.fmtMonthShort(m)}/${m.slice(0, 4)}</td><td class="right num">${fmtVND(out)}</td><td class="right num">${fmtVND(inp)}</td><td class="right num strong" style="color:${payable >= 0 ? 'var(--red)' : 'var(--green)'}">${payable >= 0 ? fmtVND(payable) : 'Được khấu trừ ' + fmtVND(-payable)}</td></tr>`;
   });
   return `${pageHead('Thuế', 'VAT đầu ra tính theo Đơn hàng bán, VAT đầu vào tính theo Đơn đặt hàng mua — không cần khai báo tay', '<button class="btn" data-act="export-report" data-key="rp-material"><i class="fa-solid fa-file-export"></i>Xuất bảng kê</button>')}
-    ${accTabsBar('tax')}
     <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('VAT đầu ra (6 tháng)', fmtVND(totalOut), 'fa-arrow-up', 'red')}${mkpi('VAT đầu vào (6 tháng)', fmtVND(totalIn), 'fa-arrow-down', 'green')}${mkpi('Thuế TNDN ước tính tháng này', fmtVND(AccFin.pnlOf(AccFin.currentMonth()).tax), 'fa-landmark', 'indigo')}</div>
     <div class="card">${tableShell([{ t: 'Tháng' }, { t: 'VAT đầu ra', cls: 'right' }, { t: 'VAT đầu vào', cls: 'right' }, { t: 'Phải nộp / Được khấu trừ', cls: 'right' }], rows, { emptyTitle: 'Chưa có dữ liệu' })}</div>`;
 }
@@ -488,24 +609,239 @@ function accBudgetView() {
 
 /* ---- 2.10 P&L ---- */
 function accPnlView() {
-  const m = AccFin.currentMonth(), pm = AccFin.prevMonth();
-  const cur = AccFin.pnlOf(m), prev = AccFin.pnlOf(pm);
-  const rows = [
-    ['Doanh thu thuần', cur.revenue, prev.revenue],
-    ['Giá vốn hàng bán', -cur.cogs, -prev.cogs],
-    ['Lợi nhuận gộp', cur.grossProfit, prev.grossProfit],
-    ['Chi phí hoạt động', -cur.opex, -prev.opex],
-    ['Lợi nhuận trước thuế (EBT)', cur.ebt, prev.ebt],
-    ['Thuế TNDN ước tính (' + DB.accountingSettings.corporateTaxRatePct + '%)', -cur.tax, -prev.tax],
-    ['Lợi nhuận sau thuế', cur.netProfit, prev.netProfit],
-  ];
-  const rowsHtml = rows.map(([label, v, pv], i) => {
-    const bold = [2, 4, 6].includes(i);
-    return `<tr style="${bold ? 'font-weight:700;background:var(--surface-2)' : ''}"><td>${esc(label)}</td><td class="right num" style="color:${v < 0 ? 'var(--red)' : 'inherit'}">${v < 0 ? '(' + fmtVND(-v) + ')' : fmtVND(v)}</td><td class="right num muted">${pv < 0 ? '(' + fmtVND(-pv) + ')' : fmtVND(pv)}</td></tr>`;
-  }).join('');
-  return `${pageHead('Báo cáo Lãi lỗ (P&L)', `Kỳ báo cáo: Tháng ${m.slice(5, 7)}/${m.slice(0, 4)} — so sánh với tháng trước`, '')}
-    ${accTabsBar('pnl')}
-    <div class="card"><div class="card-body">${tableShell([{ t: 'Chỉ tiêu' }, { t: 'Tháng này', cls: 'right' }, { t: 'Tháng trước', cls: 'right' }], rowsHtml)}</div></div>`;
+  const f = F(
+    'acc-report-pnl',
+    accDefaultReportFilter('acc-report-pnl')
+  );
+
+  const today = currentDateYMD();
+  let from = f.from;
+  let to = f.to;
+
+  /* Nếu chọn tháng */
+  if (f.period === 'month' && f.year && f.month) {
+    from =
+      `${f.year}-${String(f.month).padStart(2, '0')}-01`;
+
+    const lastDay =
+      new Date(
+        Number(f.year),
+        Number(f.month),
+        0
+      ).getDate();
+
+    to =
+      `${f.year}-${String(f.month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+  }
+
+  /* Quý */
+  if (f.period === 'quarter' && f.year && f.quarter) {
+    const q = Number(f.quarter);
+    const startMonth = (q - 1) * 3 + 1;
+
+    from =
+      `${f.year}-${String(startMonth).padStart(2, '0')}-01`;
+
+    const endMonth = startMonth + 2;
+
+    const lastDay =
+      new Date(
+        Number(f.year),
+        endMonth,
+        0
+      ).getDate();
+
+    to =
+      `${f.year}-${String(endMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+  }
+
+  /* Năm */
+  if (f.period === 'year' && f.year) {
+    from = `${f.year}-01-01`;
+    to = `${f.year}-12-31`;
+  }
+
+  from = from || `${today.slice(0, 7)}-01`;
+  to = to || today;
+
+  const months = Object.keys(AccFin.revenueByMonth())
+    .filter((m) => {
+      const start = `${m}-01`;
+      return start >= from.slice(0, 7) &&
+             start <= to.slice(0, 7);
+    });
+
+  const revenueMap = AccFin.revenueByMonth();
+  const cogsMap = AccFin.cogsByMonth();
+  const opexMap = AccFin.opexByMonth();
+
+  let revenue = 0;
+  let cogs = 0;
+  let opex = 0;
+
+  months.forEach((m) => {
+    revenue += revenueMap[m] || 0;
+    cogs += cogsMap[m] || 0;
+    opex += opexMap[m] || 0;
+  });
+
+  const grossProfit = revenue - cogs;
+  const ebt = grossProfit - opex;
+
+  const taxRate =
+    Number(DB.accountingSettings.corporateTaxRatePct || 0);
+
+  const tax =
+    Math.max(
+      0,
+      Math.round(ebt * taxRate / 100)
+    );
+
+  const netProfit = ebt - tax;
+
+  return `${pageHead(
+    'Báo cáo Lãi lỗ (P&L)',
+    `Kỳ báo cáo: ${fmtDate(from)} → ${fmtDate(to)}`,
+    '<button class="btn" data-act="export-report" data-key="pnl"><i class="fa-solid fa-file-export"></i>Xuất báo cáo</button>'
+  )}
+  ${accTabsBar('pnl')}
+  <div class="card" style="margin-bottom:14px">
+    <div class="toolbar">
+      <select class="inp" data-f="acc-report-pnl.period">
+        <option value="month" ${f.period === 'month' ? 'selected' : ''}>Theo tháng</option>
+        <option value="quarter" ${f.period === 'quarter' ? 'selected' : ''}>Theo quý</option>
+        <option value="year" ${f.period === 'year' ? 'selected' : ''}>Theo năm</option>
+        <option value="custom" ${f.period === 'custom' ? 'selected' : ''}>Tùy chọn ngày</option>
+      </select>
+
+      ${
+        f.period !== 'custom'
+          ? `<input class="inp" type="number" min="2020" max="2100" data-f="acc-report-pnl.year" value="${esc(f.year || new Date().getFullYear())}" style="width:110px">`
+          : ''
+      }
+
+      ${
+        f.period === 'month'
+          ? `<select class="inp" data-f="acc-report-pnl.month">
+              ${Array.from({ length: 12 }, (_, i) => {
+                const v = String(i + 1).padStart(2, '0');
+                return `<option value="${v}" ${f.month === v ? 'selected' : ''}>Tháng ${i + 1}</option>`;
+              }).join('')}
+            </select>`
+          : ''
+      }
+
+      ${
+        f.period === 'quarter'
+          ? `<select class="inp" data-f="acc-report-pnl.quarter">
+              ${[1, 2, 3, 4].map((q) =>
+                `<option value="${q}" ${Number(f.quarter) === q ? 'selected' : ''}>Quý ${q}</option>`
+              ).join('')}
+            </select>`
+          : ''
+      }
+
+      ${
+        f.period === 'custom'
+          ? `<input class="inp" type="date" data-f="acc-report-pnl.from" value="${esc(f.from || '')}">
+            <input class="inp" type="date" data-f="acc-report-pnl.to" value="${esc(f.to || '')}">`
+          : ''
+      }
+
+      <span class="spacer"></span>
+      <span class="chip">
+        ${accReportPeriodLabel(f.period, from, to)}
+      </span>
+    </div>
+  </div>
+
+  <div class="grid g-auto-sm" style="margin-bottom:14px">
+    ${mkpi(
+      'Doanh thu thuần',
+      fmtVND(revenue),
+      'fa-sack-dollar',
+      'blue'
+    )}
+
+    ${mkpi(
+      'Giá vốn',
+      fmtVND(cogs),
+      'fa-cubes',
+      'orange'
+    )}
+
+    ${mkpi(
+      'Lợi nhuận gộp',
+      fmtVND(grossProfit),
+      'fa-chart-line',
+      'green'
+    )}
+
+    ${mkpi(
+      'Chi phí hoạt động',
+      fmtVND(opex),
+      'fa-receipt',
+      'red'
+    )}
+
+    ${mkpi(
+      'Lợi nhuận sau thuế',
+      fmtVND(netProfit),
+      'fa-money-bill-trend-up',
+      netProfit >= 0 ? 'green' : 'red'
+    )}
+
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+
+      ${tableShell(
+        [
+          { t: 'Chỉ tiêu' },
+          { t: 'Kỳ báo cáo', cls: 'right' }
+        ],
+
+        [
+          `<tr>
+            <td>Doanh thu thuần</td>
+            <td class="right num">${fmtVND(revenue)}</td>
+          </tr>`,
+
+          `<tr>
+            <td>Giá vốn hàng bán</td>
+            <td class="right num">${fmtVND(-cogs)}</td>
+          </tr>`,
+
+          `<tr style="font-weight:700;background:var(--surface-2)">
+            <td>Lợi nhuận gộp</td>
+            <td class="right num">${fmtVND(grossProfit)}</td>
+          </tr>`,
+
+          `<tr>
+            <td>Chi phí hoạt động</td>
+            <td class="right num">${fmtVND(-opex)}</td>
+          </tr>`,
+
+          `<tr style="font-weight:700">
+            <td>Lợi nhuận trước thuế</td>
+            <td class="right num">${fmtVND(ebt)}</td>
+          </tr>`,
+
+          `<tr>
+            <td>Thuế TNDN ước tính (${taxRate}%)</td>
+            <td class="right num">${fmtVND(-tax)}</td>
+          </tr>`,
+
+          `<tr style="font-weight:700;background:var(--surface-2)">
+            <td>Lợi nhuận sau thuế</td>
+            <td class="right num">${fmtVND(netProfit)}</td>
+          </tr>`
+        ]
+      )}
+
+    </div>
+  </div>`;
 }
 
 /* ---- 2.11 Balance Sheet ---- */
@@ -545,27 +881,407 @@ function accBalanceSheetView() {
 
 /* ---- 2.12 Cashflow statement ---- */
 function accCashflowStatementView() {
-  const months = AccFin.last6Months();
-  const inMap = AccFin.cashInByMonth(), outMap = AccFin.cashOutByMonth();
-  let running = AccFin.totalBankBalance() - months.reduce((s, m) => s + (inMap[m] || 0) - (outMap[m] || 0), 0);
-  const rows = months.map((m) => {
-    const inn = inMap[m] || 0, out = outMap[m] || 0, net = inn - out;
-    running += net;
-    return `<tr><td>${AccFin.fmtMonthShort(m)}/${m.slice(0, 4)}</td><td class="right num" style="color:var(--green)">${fmtVND(inn)}</td><td class="right num" style="color:var(--red)">${fmtVND(out)}</td><td class="right num strong" style="color:${net >= 0 ? 'var(--green)' : 'var(--red)'}">${net >= 0 ? '+' : ''}${fmtVND(net)}</td><td class="right num">${fmtVND(running)}</td></tr>`;
+  const f = F(
+    'acc-report-cashflow',
+    accDefaultReportFilter('acc-report-cashflow')
+  );
+
+  const from =
+    f.from ||
+    `${AccFin.currentMonth()}-01`;
+
+  const to =
+    f.to ||
+    currentDateYMD();
+
+  const groupBy =
+    f.groupBy || 'month';
+
+  let rows = accAllCashRows().filter((r) =>
+    accDateInRange(r.date, from, to)
+  );
+
+  if (f.type) {
+    rows = rows.filter((r) =>
+      r.type === f.type
+    );
+  }
+
+  const groups = {};
+
+  rows.forEach((r) => {
+    const key =
+      accGroupKey(r.date, groupBy);
+
+    if (!groups[key]) {
+      groups[key] = {
+        in: 0,
+        out: 0
+      };
+    }
+
+    if (r.type === 'THU') {
+      groups[key].in += Number(r.amount || 0);
+    } else {
+      groups[key].out += Number(r.amount || 0);
+    }
   });
-  return `${pageHead('Báo cáo lưu chuyển tiền tệ (Cashflow)', 'Tổng hợp dòng tiền vào/ra từ công nợ khách hàng, nhà cung cấp và sổ quỹ thủ công', '')}
-    ${accTabsBar('cashflow')}
-    <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tồn quỹ hiện tại', fmtVND(AccFin.totalBankBalance()), 'fa-building-columns', 'blue')}</div>
-    <div class="card">${tableShell([{ t: 'Tháng' }, { t: 'Thu', cls: 'right' }, { t: 'Chi', cls: 'right' }, { t: 'Dòng tiền thuần', cls: 'right' }, { t: 'Lũy kế cuối kỳ', cls: 'right' }], rows)}</div>`;
+
+  const keys =
+    Object.keys(groups).sort();
+
+  let running = 0;
+
+  const totalIn = rows
+    .filter((r) => r.type === 'THU')
+    .reduce((s, r) => s + Number(r.amount || 0), 0);
+
+  const totalOut = rows
+    .filter((r) => r.type === 'CHI')
+    .reduce((s, r) => s + Number(r.amount || 0), 0);
+
+  const htmlRows = keys.map((key) => {
+    const inn = groups[key].in;
+    const out = groups[key].out;
+    const net = inn - out;
+
+    running += net;
+
+    return `
+      <tr>
+
+        <td>
+          ${esc(accGroupLabel(key, groupBy))}
+        </td>
+
+        <td class="right num"
+          style="color:var(--green)">
+          ${fmtVND(inn)}
+        </td>
+
+        <td class="right num"
+          style="color:var(--red)">
+          ${fmtVND(out)}
+        </td>
+
+        <td
+          class="right num strong"
+          style="color:${net >= 0
+            ? 'var(--green)'
+            : 'var(--red)'}"
+        >
+          ${net >= 0 ? '+' : ''}
+          ${fmtVND(net)}
+        </td>
+
+        <td class="right num">
+          ${fmtVND(running)}
+        </td>
+
+      </tr>
+    `;
+  });
+
+  return `${pageHead(
+    'Báo cáo lưu chuyển tiền tệ (Cashflow)',
+    `Kỳ báo cáo: ${fmtDate(from)} → ${fmtDate(to)}`,
+    '<button class="btn" data-act="export-report" data-key="cashflow"><i class="fa-solid fa-file-export"></i>Xuất báo cáo</button>'
+  )}
+
+  ${accTabsBar('cashflow')}
+
+  <div class="card" style="margin-bottom:14px">
+
+    <div class="toolbar">
+
+      <select
+        class="inp"
+        data-f="acc-report-cashflow.groupBy"
+      >
+        <option value="month" ${groupBy === 'month' ? 'selected' : ''}>
+          Gom theo tháng
+        </option>
+
+        <option value="quarter" ${groupBy === 'quarter' ? 'selected' : ''}>
+          Gom theo quý
+        </option>
+
+        <option value="year" ${groupBy === 'year' ? 'selected' : ''}>
+          Gom theo năm
+        </option>
+      </select>
+
+      ${selectFilter(
+        'acc-report-cashflow',
+        'type',
+        [
+          ['THU', 'Thu'],
+          ['CHI', 'Chi']
+        ],
+        'Tất cả Thu / Chi'
+      )}
+
+      <input
+        class="inp"
+        type="date"
+        data-f="acc-report-cashflow.from"
+        value="${esc(from)}"
+      >
+
+      <input
+        class="inp"
+        type="date"
+        data-f="acc-report-cashflow.to"
+        value="${esc(to)}"
+      >
+
+      <span class="spacer"></span>
+
+      <span class="chip">
+        ${rows.length} giao dịch
+      </span>
+
+    </div>
+
+  </div>
+
+  <div
+    class="grid g-auto-sm"
+    style="margin-bottom:14px"
+  >
+
+    ${mkpi(
+      'Tổng thu',
+      fmtVND(totalIn),
+      'fa-arrow-down',
+      'green'
+    )}
+
+    ${mkpi(
+      'Tổng chi',
+      fmtVND(totalOut),
+      'fa-arrow-up',
+      'red'
+    )}
+
+    ${mkpi(
+      'Dòng tiền thuần',
+      fmtVND(totalIn - totalOut),
+      'fa-scale-balanced',
+      totalIn >= totalOut ? 'blue' : 'orange'
+    )}
+
+    ${mkpi(
+      'Tồn quỹ hiện tại',
+      fmtVND(AccFin.totalBankBalance()),
+      'fa-building-columns',
+      'indigo'
+    )}
+
+  </div>
+
+  <div class="card">
+
+    ${tableShell(
+      [
+        { t: 'Kỳ' },
+        { t: 'Thu', cls: 'right' },
+        { t: 'Chi', cls: 'right' },
+        { t: 'Dòng tiền thuần', cls: 'right' },
+        { t: 'Lũy kế', cls: 'right' }
+      ],
+      htmlRows,
+      {
+        emptyTitle:
+          'Không có dữ liệu dòng tiền trong kỳ'
+      }
+    )}
+
+  </div>`;
 }
 
-/* ---- 2.13 Sổ nhật ký chung (đọc) ---- */
+/* ---- 2.13 Sổ nhật ký chung / Hạch toán ---- */
 function accLedgerView() {
-  const rows = accAllCashRows().slice(0, 100);
-  return `${pageHead('Sổ nhật ký chung', 'Nhật ký tự động tổng hợp mọi giao dịch tiền — chỉ xem, chỉnh sửa tại từng phân hệ nguồn', '')}
-    ${accTabsBar('general_ledger')}
-    <div class="card">${tableShell([{ t: 'Ngày' }, { t: 'Loại' }, { t: 'Diễn giải' }, { t: 'Nguồn' }, { t: 'Số tiền', cls: 'right' }],
-      rows.map((r) => `<tr><td class="num">${fmtDate(r.date)}</td><td>${r.type === 'THU' ? 'Thu' : 'Chi'}</td><td>${esc(r.note)}</td><td class="muted">${esc(r.source)}</td><td class="right num strong" style="color:${r.type === 'THU' ? 'var(--green)' : 'var(--red)'}">${r.type === 'THU' ? '+' : '−'}${fmtVND(r.amount)}</td></tr>`))}</div>`;
+  const f = F('acc-ledger', {
+    type: '',
+    from: '',
+    to: '',
+    source: '',
+    q: ''
+  });
+
+  let rows = accAllCashRows();
+
+  /* Lọc Thu / Chi */
+  if (f.type) {
+    rows = rows.filter((r) => r.type === f.type);
+  }
+
+  /* Lọc khoảng ngày */
+  if (f.from || f.to) {
+    rows = rows.filter((r) =>
+      accDateInRange(r.date, f.from, f.to)
+    );
+  }
+
+  /* Lọc nguồn */
+  if (f.source) {
+    rows = rows.filter((r) => {
+      const source = String(r.source || '').toLowerCase();
+      return source.includes(String(f.source).toLowerCase());
+    });
+  }
+
+  /* Tìm kiếm */
+  if (f.q) {
+    rows = rows.filter((r) =>
+      accTextMatch(
+        [
+          r.id,
+          r.ref,
+          r.note,
+          r.source,
+          r.kind,
+          r.date
+        ],
+        f.q
+      )
+    );
+  }
+
+  const totalIn = rows
+    .filter((r) => r.type === 'THU')
+    .reduce((s, r) => s + Number(r.amount || 0), 0);
+
+  const totalOut = rows
+    .filter((r) => r.type === 'CHI')
+    .reduce((s, r) => s + Number(r.amount || 0), 0);
+
+  const pg = paged(rows, 'acc-ledger', 20);
+
+  const sourceOptions = [
+    ['', 'Tất cả nguồn'],
+    ['Tự động', 'Tự động'],
+    ['Thủ công', 'Thủ công']
+  ];
+
+  return `${pageHead(
+    'Sổ nhật ký chung',
+    'Tổng hợp các nghiệp vụ thu – chi từ công nợ, mua hàng, bán hàng và giao dịch thủ công',
+    '<button class="btn" data-act="export-report" data-key="general-ledger"><i class="fa-solid fa-file-export"></i>Xuất sổ</button>'
+  )}
+
+  <div class="grid g-auto-sm" style="margin-bottom:14px">
+    ${mkpi(
+      'Tổng thu',
+      fmtVND(totalIn),
+      'fa-arrow-down',
+      'green'
+    )}
+
+    ${mkpi(
+      'Tổng chi',
+      fmtVND(totalOut),
+      'fa-arrow-up',
+      'red'
+    )}
+
+    ${mkpi('Dòng tiền thuần',fmtVND(totalIn - totalOut),'fa-scale-balanced',totalIn >= totalOut ? 'blue' : 'orange')}
+    ${mkpi('Số nghiệp vụ',fmtN(rows.length),'fa-list-check','indigo')}
+  </div>
+
+  <div class="card">
+    <div class="toolbar">
+      ${selectFilter('acc-ledger','type',
+        [
+          ['THU', 'Thu'],
+          ['CHI', 'Chi']
+        ],
+        'Tất cả Thu / Chi'
+      )}
+
+      <select class="inp" data-f="acc-ledger.source" style="min-width:150px">
+        ${sourceOptions.map(([v, label]) =>
+          `<option value="${esc(v)}" ${f.source === v ? 'selected' : ''}>
+            ${esc(label)}
+          </option>`
+        ).join('')}
+      </select>
+	  <span class="muted" style="font-size:13px;white-space:nowrap">Từ ngày</span>
+      <input class="inp" type="date" data-f="acc-ledger.from" value="${esc(f.from || '')}">
+	  <span class="muted" style="font-size:13px;white-space:nowrap">Đến ngày</span>
+      <input class="inp" type="date" data-f="acc-ledger.to" value="${esc(f.to || '')}">
+      <input class="inp" type="search" data-f="acc-ledger.q" value="${esc(f.q || '')}" placeholder="Tìm mã, diễn giải, chứng từ..." style="min-width:230px">
+
+      ${(f.type || f.source || f.from || f.to || f.q)
+        ? `<button class="btn btn-sm" data-act="clear-filter" data-key="acc-ledger">
+            <i class="fa-solid fa-filter-circle-xmark"></i>
+            Xóa lọc
+          </button>`
+        : ''
+      }
+
+      <span class="spacer"></span>
+      <span class="chip">
+        ${rows.length} nghiệp vụ
+      </span>
+    </div>
+
+    ${tableShell(
+      [
+        { t: 'Ngày' },
+        { t: 'Loại' },
+        { t: 'Diễn giải' },
+        { t: 'Chứng từ' },
+        { t: 'Nguồn' },
+        { t: 'Số tiền', cls: 'right' }
+      ],
+      pg.items.map((r) => `
+        <tr>
+          <td class="num">
+            ${fmtDate(r.date)}
+          </td>
+          <td>
+            ${
+              r.type === 'THU'
+                ? '<span class="badge green">Thu</span>'
+                : '<span class="badge red">Chi</span>'
+            }
+          </td>
+          <td>
+            ${cell2(esc(r.note),esc(r.kind || ''))}
+          </td>
+          <td>
+            ${
+              r.ref
+                ? `<span class="code">${esc(r.ref)}</span>`
+                : '<span class="muted">—</span>'
+            }
+          </td>
+          <td class="muted">
+            ${esc(r.source || '')}
+          </td>
+          <td class="right num strong"
+            style="color:${r.type === 'THU'
+              ? 'var(--green)'
+              : 'var(--red)'}">
+            ${r.type === 'THU' ? '+' : '−'}${fmtVND(r.amount)}
+          </td>
+        </tr>
+      `),
+
+      {
+        emptyTitle: 'Không có nghiệp vụ phù hợp với bộ lọc'
+      }
+    )}
+
+    ${pagiHTML(
+      'acc-ledger',
+      pg,
+      'nghiệp vụ'
+    )}
+
+  </div>`;
 }
 
 /* ---- 2.14 Hub báo cáo ---- */
@@ -575,8 +1291,6 @@ function accReportsHubView() {
     ['balance_sheet', 'fa-scale-balanced', 't-indigo', 'Bảng cân đối kế toán', 'Tài sản, nợ phải trả và vốn chủ sở hữu tại một thời điểm'],
     ['cashflow', 'fa-money-bill-trend-up', 't-green', 'Lưu chuyển tiền tệ', 'Dòng tiền vào/ra và tồn quỹ lũy kế theo tháng'],
     ['budget', 'fa-bullseye', 't-orange', 'Ngân sách vs Thực tế', 'So sánh ngân sách được cấp với thực chi mua hàng'],
-    ['tax', 'fa-landmark', 't-red', 'Thuế', 'VAT đầu vào/đầu ra và ước tính thuế TNDN'],
-    ['fixed_assets', 'fa-warehouse', 't-slate', 'Tài sản cố định', 'Nguyên giá, khấu hao và giá trị còn lại'],
   ];
   return `${pageHead('Báo cáo tài chính', 'Chọn báo cáo quản trị đa chiều cần xem', '')}
     ${accTabsBar('reports_hub')}

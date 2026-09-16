@@ -3469,7 +3469,14 @@ const Actions = {
 
   /* --- Nhân sự & hệ thống --- */
   'open-employee': (d) => switchTo(() => openEmployeeModal(d.id)),
-  'new-employee': () => Toast.info('Thêm nhân sự', 'Form hồ sơ nhân sự đầy đủ (hợp đồng, bảo hiểm, bằng cấp) có ở bản triển khai.'),
+  'new-employee': () => switchTo(() => openEmployeeForm()),
+  'employee-edit': (d) => switchTo(() => openEmployeeForm(d.id)),
+  'employee-save': () => saveEmployeeForm(),
+  'employee-toggle-active': (d) => toggleEmployeeActive(d.id),
+  'employee-import': () => openEmployeeImportModal(),
+  'hr-download-template': () => Exporter.csv('Mau-import-nhan-su.csv',
+    ['Mã NV (để trống nếu thêm mới)', 'Họ tên', 'Phòng ban', 'Chức vụ', 'Giới tính', 'Số điện thoại', 'Email', 'Ngày vào làm (YYYY-MM-DD)', 'Loại hợp đồng', 'Trạng thái làm việc'],
+    [['', 'Nguyễn Văn Mẫu', DB.departments[0] || '', 'Công nhân', 'Nam', '0909 000 000', 'mau@lenamfood.vn', currentDateYMD(), (DB.contractTypes || [])[0] || '', statusLabel('ns_dang_lam')]]),
   'new-user': () => Toast.info('Thêm người dùng', 'Cấp tài khoản gắn với hồ sơ nhân sự và vai trò phân quyền.'),
   'user-toggle': async (d) => {
     const u = DB.users.find((x) => x.id === d.id); if (!u) return;
@@ -3570,8 +3577,8 @@ const Actions = {
     ['Mã YC', 'Người yêu cầu', 'Nhà cung cấp', 'Giá trị', 'Ngày yêu cầu', 'Trạng thái'],
     DB.purchases.map((p) => [p.id, Q.employeeName(p.requesterId), Q.supplierName(p.supplierId), p.total, fmtDate(p.date), statusLabel(p.status)])),
   'export-hr': () => Exporter.csv('Danh-sach-nhan-su.csv',
-    ['Mã NV', 'Họ tên', 'Phòng ban', 'Chức vụ', 'Điện thoại', 'Ngày vào làm', 'Trạng thái'],
-    DB.employees.map((e) => [e.id, e.name, e.dept, e.position, e.phone, fmtDate(e.joinDate), statusLabel(e.status)])),
+	['Mã NV', 'Họ tên', 'Phòng ban', 'Chức vụ', 'Giới tính', 'Số điện thoại', 'Email', 'Ngày vào làm (YYYY-MM-DD)', 'Loại hợp đồng', 'Trạng thái làm việc', 'Tình trạng sử dụng'],
+    DB.employees.map((e) => [e.id, e.name, e.dept, e.position, e.gender, e.phone, e.email, e.joinDate, e.contractType || '', statusLabel(e.status), e.active === false ? 'Ngừng sử dụng' : 'Đang sử dụng'])),
   'export-attendance': () => Exporter.csv('Bang-cong-thang-08-2026.csv',
     ['Mã NV', 'Họ tên', 'Phòng ban', 'Công chuẩn', 'Đi làm', 'Nghỉ phép', 'Đi muộn', 'Tăng ca (giờ)', 'Tỷ lệ %'],
     DB.attendance.map((a) => [a.empId, a.name, a.dept, a.standard, a.worked, a.leave, a.late, a.ot, a.rate])),
