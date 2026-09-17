@@ -1775,6 +1775,7 @@ function openFinalInspectionModal(id) {
   const ins = (DB.productionFinalInspections || []).find(x=>x.id===id); if (!ins) return;
   const po = Q.po(ins.productionOrderId);
   const row = (DB.inventory || []).find(r=>r.lotId===ins.lotId && r.productId===ins.productId);
+  const lot = Q.lot(ins.lotId);
   const readonly = (ins.status||'PENDING') !== 'PENDING' || !Auth.hasPermission('QC_INSPECT');
   const total = Number(ins.qty || row?.qtyPending || po?.qty || 0);
   Modal.open({
@@ -1787,6 +1788,8 @@ function openFinalInspectionModal(id) {
       ${infoItem('Số lượng chờ QC',`<b>${fmtN(total)} ${esc(ins.unit||po?.unit||'')}</b>`)}
       ${infoItem('Kho chờ QC',`${esc(Q.warehouseName(ins.warehouseId))} · ${esc(Q.locationName(ins.locationId))}`)}
       ${infoItem('Mã lô',`<span class="code">${esc(ins.lotNumber||'—')}</span>`)}
+      ${infoItem('Ngày sản xuất', lot?.mfgDate ? fmtDate(lot.mfgDate) : '—')}
+      ${infoItem('Hạn sử dụng', lot?.expiryDate ? fmtDate(lot.expiryDate) : '<span class="muted">Chưa quy định</span>')}
       ${infoItem('Trạng thái',finalInspectionStatusHtml(ins.status||'PENDING'))}
     </div>
     <div class="note-box" style="margin-bottom:14px"><b>Nguyên tắc tồn kho:</b> ${fmtN(total)} ${esc(ins.unit||po?.unit||'')} hiện chỉ là <b>tồn chờ QC</b>, chưa được tính vào tồn khả dụng. Khi QC xác nhận, chỉ số lượng đạt mới được cộng vào tồn kho thành phẩm.</div>
@@ -2187,14 +2190,67 @@ function openSubcontractingQcModal(id,receiptId=''){
 function subcontractingQcConfirm(id,receiptId){const o=subcontractV3Orders().find(x=>x.id===id);if(!o)return;const r=subcontractV3Receipts(o).find(x=>x.id===receiptId);if(!r||r.qcStatus==='DONE')return;const good=Number($('#subQcGood')?.value||0),bad=Number($('#subQcBad')?.value||0);if(good<0||bad<0||Math.abs(good+bad-Number(r.qty||0))>1e-6){Toast.err('Kết quả QC không hợp lệ','Số đạt + số lỗi phải bằng số lượng nhận.');return;}r.goodQty=good;r.defectQty=bad;r.qcNote=$('#subQcNote')?.value?.trim()||'';r.qcStatus='DONE';r.qcAt=new Date().toISOString();r.qcBy=DB.currentUser?.id||'';o.goodQty=subcontractV3Receipts(o).reduce((s,x)=>s+Number(x.goodQty||0),0);o.defectQty=subcontractV3Receipts(o).reduce((s,x)=>s+Number(x.defectQty||0),0);subcontractV3RecalcStatus(o);subcontractPersist();Modal.close();render();Toast.ok('Đã kiểm tra chất lượng',`${r.id} · đạt ${fmtDec(good,2)} · lỗi ${fmtDec(bad,2)}. Kết quả đã chuyển sang Kho → Nhập kho → Kho thành phẩm.`);}
 
 function openSubcontractingWarehouseModal(id,receiptId=''){
-  const o=subcontractV3Orders().find(x=>x.id===id);if(!o)return;const r=subcontractV3Receipts(o).find(x=>x.id===receiptId)||(subcontractV3Receipts(o).find(x=>x.qcStatus==='DONE'&&!x.warehoused));if(!r){Toast.info('Không có lô chờ nhập kho',id);return;}
-  Modal.open({title:`Nhập kho hàng gia công · ${r.id}`,sub:`${o.id} · ${esc(Q.product(o.productId)?.name||o.productId)}`,size:'lg',body:`<div class="info-grid">${infoItem('QC đạt',`${fmtDec(r.goodQty,2)} ${esc(Q.product(o.productId)?.unit||'')}`)}${infoItem('QC lỗi',`${fmtDec(r.defectQty,2)} ${esc(Q.product(o.productId)?.unit||'')}`)}${infoItem('Kho hàng đạt','Kho Thành phẩm - Thủ Đức')}${infoItem('Kho hàng lỗi','Kho Hàng lỗi / Tiêu hủy')}</div><div class="note-box" style="margin-top:12px">Hàng đạt sẽ cộng vào <b>Kho thành phẩm</b>; hàng lỗi được tách vào <b>Kho Hàng lỗi</b> và không tính vào tồn bán được.</div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-warehouse-confirm" data-id="${esc(id)}" data-receipt="${esc(r.id)}"><i class="fa-solid fa-warehouse"></i>Xác nhận nhập kho</button>`});
+  const o=subcontractV3Orders().find(x=>x.id===id);if(!o)return;
+  const r=subcontractV3Receipts(o).find(x=>x.id===receiptId)||(subcontractV3Receipts(o).find(x=>x.qcStatus==='DONE'&&!x.warehoused));
+  if(!r){Toast.info('Không có lô chờ nhập kho',id);return;}
+  const product=Q.product(o.productId)||{};
+  const mfgDate=r.mfgDate||r.date||subcontractToday();
+  const shelfLifeDays=Math.max(0,Number(product.shelfLifeDays||0));
+  const expiryDate=shelfLifeDays>0?addDays(mfgDate,shelfLifeDays):'';
+  const finished=(DB.warehouses||[]).filter(w=>w.type==='FINISHED_GOODS'&&w.status!=='inactive');
+  const defect=(DB.warehouses||[]).find(w=>w.type==='DEFECTIVE'&&w.status!=='inactive');
+  const first=finished[0];const locs=first?Q.locationsOf(first.id).filter(l=>l.status!=='inactive'):[];
+  Modal.open({title:`Nhập kho hàng gia công · ${r.id}`,sub:`${o.id} · ${esc(product.name||o.productId)}`,size:'lg',body:`
+    <div class="info-grid">${infoItem('QC đạt',`${fmtDec(r.goodQty,2)} ${esc(product.unit||'')}`)}${infoItem('QC lỗi',`${fmtDec(r.defectQty,2)} ${esc(product.unit||'')}`)}${infoItem('Hàng lỗi',esc(defect?.name||'Chưa cấu hình Kho Hàng lỗi'))}</div>
+    <div class="form-grid cols-2" style="margin-top:14px">
+      <div class="field"><label>Kho thành phẩm nhận hàng đạt *</label><select class="inp" id="subWarehouseGoodWh">${finished.map(w=>`<option value="${esc(w.id)}">${esc(w.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Vị trí/kệ nhận *</label><select class="inp" id="subWarehouseGoodLoc">${locs.map(l=>`<option value="${esc(l.id)}">${esc(l.name)} · ${esc(l.code)}</option>`).join('')}</select></div>
+      <div class="field"><label>Số lô từ đối tác *</label><input class="inp" id="subWarehouseLotNumber" value="${esc(r.lotNumber||'')}" placeholder="Nhập đúng số lô trên hàng/chứng từ đối tác"></div>
+      <div class="field"><label>Ngày sản xuất / hoàn thành *</label><input class="inp" id="subWarehouseMfgDate" type="date" value="${esc(mfgDate)}"></div>
+      <div class="field"><label>Hạn sử dụng theo quy định thành phẩm</label><input class="inp" value="${expiryDate?esc(fmtDate(expiryDate)):'Chưa quy định số ngày HSD'}" disabled></div>
+      <div class="field"><label>Quy định HSD</label><input class="inp" value="${shelfLifeDays>0?`${shelfLifeDays} ngày từ ngày sản xuất`:'Chưa khai báo'}" disabled></div>
+    </div>
+    <div class="note-box" style="margin-top:12px"><b>Quy tắc lô:</b> hàng từ gia công không tự sinh số lô. Kho phải nhập số lô thực tế từ đối tác. HSD được hệ thống tính từ ngày sản xuất theo quy định của master Thành phẩm.</div>
+    <div class="note-box" style="margin-top:8px">Hàng đạt vào <b>Kho thành phẩm được chọn ở trên</b>; hàng lỗi vào <b>Kho Hàng lỗi</b>, không tính vào tồn bán được.</div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-warehouse-confirm" data-id="${esc(id)}" data-receipt="${esc(r.id)}"><i class="fa-solid fa-warehouse"></i>Xác nhận nhập kho</button>`});
+  const whSel=document.querySelector('#subWarehouseGoodWh'),locSel=document.querySelector('#subWarehouseGoodLoc');
+  const fill=()=>{const ls=Q.locationsOf(whSel?.value||'').filter(l=>l.status!=='inactive');if(locSel)locSel.innerHTML=ls.map(l=>`<option value="${esc(l.id)}">${esc(l.name)} · ${esc(l.code)}</option>`).join('');};
+  whSel?.addEventListener('change',fill);
 }
+
 function subcontractingWarehouseConfirm(id,receiptId){
-  const o=subcontractV3Orders().find(x=>x.id===id);if(!o)return;const r=subcontractV3Receipts(o).find(x=>x.id===receiptId);if(!r||r.qcStatus!=='DONE'||r.warehoused)return;const today=subcontractToday(),product=Q.product(o.productId),receiptIdDoc=nextCode('PNGC-2026-',DB.goodsReceipts||[]),items=[];
-  function post(qty,warehouseId,locationId,suffix,qc){if(Number(qty||0)<=0)return;const lotId=nextCode('LOT-',DB.inventoryLots||[]),lotNumber=`LOT-${o.id.replace('GC-','GC')}-${r.id.replace('NHGC-2026-','')}${suffix}`;(DB.inventoryLots||(DB.inventoryLots=[])).unshift({id:lotId,lotNumber,productId:o.productId,productionOrderId:'',mfgDate:today,expiryDate:addDays(today,7),supplierLot:'',supplierId:'',qcStatus:qc,status:'active',createdAt:`${today} 09:00`,subcontractingOrderId:o.id,subcontractingReceiptId:r.id});const result=InventoryService.apply({productId:o.productId,warehouseId,locationId,lotId,quantity:Number(qty),type:'PRODUCTION_RECEIPT',refType:'SUBCONTRACTING',refId:receiptIdDoc,note:`Nhập hàng gia công ${o.id} · ${r.id}`,updateMaterial:false});if(!result.ok)throw new Error(result.message);items.push({materialId:o.productId,name:product?.name||o.productId,unit:product?.unit||'',qty:Number(qty),lotNumber,locationId,qcStatus:qc});}
-  try{post(r.goodQty,'WH-004','LOC-007','-OK','PASSED');post(r.defectQty,'WH-006','LOC-010','-DEF','FAILED');}catch(err){Toast.err('Không thể nhập kho',err.message);return;}
-  (DB.goodsReceipts||(DB.goodsReceipts=[])).unshift({id:receiptIdDoc,poId:'',prId:'',date:today,receivedBy:DB.currentUser?.id||'',warehouse:'Gia công',warehouseId:'WH-004',locationId:'LOC-007',status:'RECEIVED',note:`Nhập kho sau QC từ ${o.partner} · ${o.id} · ${r.id}`,sourceType:'SUBCONTRACTING',refDoc:o.id,sourceReceiptId:r.id,items});r.warehoused=true;r.warehouseAt=new Date().toISOString();r.warehouseBy=DB.currentUser?.id||'';r.goodsReceiptId=receiptIdDoc;o.storedGoodQty=subcontractV3Receipts(o).filter(x=>x.warehoused).reduce((s,x)=>s+Number(x.goodQty||0),0);o.storedDefectQty=subcontractV3Receipts(o).filter(x=>x.warehoused).reduce((s,x)=>s+Number(x.defectQty||0),0);o.lastReceiptId=receiptIdDoc;subcontractV3RecalcStatus(o);subcontractPersist();subcontractSyncInventory();Modal.close();render();Toast.ok('Đã nhập kho hàng gia công',`${receiptIdDoc} · đạt ${fmtDec(r.goodQty,2)} · lỗi ${fmtDec(r.defectQty,2)}`);
+  const o=subcontractV3Orders().find(x=>x.id===id);if(!o)return;
+  const r=subcontractV3Receipts(o).find(x=>x.id===receiptId);if(!r||r.qcStatus!=='DONE'||r.warehoused)return;
+  const today=subcontractToday(),product=Q.product(o.productId)||{},receiptIdDoc=nextCode('PNGC-2026-',DB.goodsReceipts||[]),items=[];
+  const lotNumber=String($('#subWarehouseLotNumber')?.value||'').trim();
+  const mfgDate=$('#subWarehouseMfgDate')?.value||'';
+  const shelfLifeDays=Math.max(0,Number(product.shelfLifeDays||0));
+  if(!lotNumber){Toast.err('Thiếu số lô','Hàng gia công phải nhập số lô thực tế từ đối tác; hệ thống không tự sinh lô.');return;}
+  if(!mfgDate){Toast.err('Thiếu ngày sản xuất','Vui lòng nhập ngày sản xuất / hoàn thành từ đối tác.');return;}
+  if(mfgDate>today){Toast.err('Ngày sản xuất không hợp lệ','Ngày sản xuất / hoàn thành không được lớn hơn ngày hiện tại.');return;}
+  const expiryDate=shelfLifeDays>0?addDays(mfgDate,shelfLifeDays):'';
+  let lot=(DB.inventoryLots||[]).find(x=>x.productId===o.productId&&String(x.lotNumber||'').trim().toLowerCase()===lotNumber.toLowerCase());
+  if(lot && String(lot.subcontractingOrderId||'')!==String(o.id)){
+    Toast.err('Số lô đã tồn tại',`${lotNumber} đã thuộc nguồn khác. Vui lòng kiểm tra số lô đối tác.`);return;
+  }
+  if(!lot){
+    lot={id:nextCode('LOT-',DB.inventoryLots||[]),lotNumber,productId:o.productId,productionOrderId:'',mfgDate,expiryDate,supplierLot:lotNumber,supplierId:'',qcStatus:Number(r.defectQty||0)>0?(Number(r.goodQty||0)>0?'PARTIAL_FAILED':'FAILED'):'PASSED',status:'active',createdAt:`${today} 09:00`,subcontractingOrderId:o.id,subcontractingReceiptId:r.id};
+    (DB.inventoryLots||(DB.inventoryLots=[])).unshift(lot);
+  }
+  function post(qty,warehouseId,locationId,qc){
+    if(Number(qty||0)<=0)return;
+    const result=InventoryService.apply({productId:o.productId,warehouseId,locationId,lotId:lot.id,quantity:Number(qty),type:'PRODUCTION_RECEIPT',refType:'SUBCONTRACTING',refId:receiptIdDoc,note:`Nhập hàng gia công ${o.id} · ${r.id}`,updateMaterial:false});
+    if(!result.ok)throw new Error(result.message);
+    items.push({materialId:o.productId,name:product.name||o.productId,unit:product.unit||'',qty:Number(qty),lotId:lot.id,lotNumber,locationId,qcStatus:qc,mfgDate,expiryDate});
+  }
+  const goodWhId=document.querySelector('#subWarehouseGoodWh')?.value||'';const goodLocId=document.querySelector('#subWarehouseGoodLoc')?.value||'';
+  const goodWh=(DB.warehouses||[]).find(w=>w.id===goodWhId&&w.type==='FINISHED_GOODS'&&w.status!=='inactive');const goodLoc=(DB.warehouseLocations||[]).find(l=>l.id===goodLocId&&l.warehouseId===goodWhId&&l.status!=='inactive');
+  if(Number(r.goodQty||0)>0&&(!goodWh||!goodLoc)){Toast.err('Thiếu kho thành phẩm','Hãy chọn Kho thành phẩm và vị trí nhận hàng đạt.');return;}
+  const defectWh=(DB.warehouses||[]).find(w=>w.type==='DEFECTIVE'&&w.status!=='inactive');const defectLoc=(DB.warehouseLocations||[]).find(l=>l.warehouseId===defectWh?.id&&l.status!=='inactive');
+  if(Number(r.defectQty||0)>0&&(!defectWh||!defectLoc)){Toast.err('Thiếu Kho Hàng lỗi','Cần cấu hình Kho Hàng lỗi và vị trí lưu.');return;}
+  try{post(r.goodQty,goodWhId,goodLocId,'PASSED');post(r.defectQty,defectWh?.id||'',defectLoc?.id||'','FAILED');}catch(err){Toast.err('Không thể nhập kho',err.message);return;}
+  (DB.goodsReceipts||(DB.goodsReceipts=[])).unshift({id:receiptIdDoc,poId:'',prId:'',date:today,receivedBy:DB.currentUser?.id||'',warehouse:'Gia công',warehouseId:goodWhId,locationId:goodLocId,status:'RECEIVED',note:`Nhập kho sau QC từ ${o.partner} · ${o.id} · ${r.id}`,sourceType:'SUBCONTRACTING',refDoc:o.id,sourceReceiptId:r.id,items});
+  r.lotNumber=lotNumber;r.lotId=lot.id;r.mfgDate=mfgDate;r.expiryDate=expiryDate;r.warehoused=true;r.warehouseAt=new Date().toISOString();r.warehouseBy=DB.currentUser?.id||'';r.goodsReceiptId=receiptIdDoc;
+  o.storedGoodQty=subcontractV3Receipts(o).filter(x=>x.warehoused).reduce((s,x)=>s+Number(x.goodQty||0),0);o.storedDefectQty=subcontractV3Receipts(o).filter(x=>x.warehoused).reduce((s,x)=>s+Number(x.defectQty||0),0);o.lastReceiptId=receiptIdDoc;subcontractV3RecalcStatus(o);subcontractPersist();subcontractSyncInventory();Modal.close();render();Toast.ok('Đã nhập kho hàng gia công',`${receiptIdDoc} · lô ${lotNumber} · đạt ${fmtDec(r.goodQty,2)} · lỗi ${fmtDec(r.defectQty,2)}`);
 }
 
 function openSubcontractingReconcileModal(id){const o=subcontractV3Orders().find(x=>x.id===id);if(!o||o.status!=='COMPLETED'){Toast.warn('Chưa thể đối chiếu','Chỉ đối chiếu công nợ sau khi nhận, QC và nhập kho hoàn tất.');return;}const expected=Number(o.goodQty||0)*Number(o.unitCost||0);Modal.open({title:`Đối chiếu công nợ · ${o.id}`,sub:`${esc(o.partner)} · nghiệm thu ${fmtDec(o.goodQty,2)} ${esc(Q.product(o.productId)?.unit||'')}`,size:'md',body:`<div class="info-grid">${infoItem('SL QC đạt',fmtDec(o.goodQty,2))}${infoItem('Đơn giá',fmtVND(o.unitCost||0))}${infoItem('Giá trị theo hệ thống',fmtVND(expected))}</div><div class="field" style="margin-top:14px"><label>Giá trị đối chiếu *</label><input class="inp right num" id="subReconcileAmount" type="number" min="0" value="${Number(o.reconciledAmount??expected)}"></div><div class="field"><label>Ghi chú đối chiếu</label><textarea class="inp" id="subReconcileNote" rows="3">${esc(o.reconcileNote||'')}</textarea></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-reconcile-confirm" data-id="${esc(id)}"><i class="fa-solid fa-scale-balanced"></i>Xác nhận đối chiếu</button>`});}

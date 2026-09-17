@@ -165,9 +165,12 @@ function ensureFinishedQcPending(po, qty) {
   const safeQty = Math.max(0, Number(qty || po.qty || 0));
   const lotId = nextCode('LOT-', DB.inventoryLots || []);
   const lotNumber = `LOT-${po.id}`;
+  const productMaster = Q.product(po.productId) || {};
+  const mfgDate = currentDateYMD();
+  const shelfLifeDays = Math.max(0, Number(productMaster.shelfLifeDays || 0));
   const lot = {
     id: lotId, lotNumber, productId: po.productId, productionOrderId: po.id,
-    mfgDate: currentDateYMD(), expiryDate: addDays(currentDateYMD(), 7),
+    mfgDate, expiryDate: shelfLifeDays > 0 ? addDays(mfgDate, shelfLifeDays) : '',
     supplierLot:'', supplierId:'', qcStatus:'QC_PENDING', status:'active', createdAt:new Date().toISOString()
   };
   DB.inventoryLots.unshift(lot);
@@ -297,6 +300,7 @@ const Actions = {
     const wrap=$('#crmOrderLines'); if(!wrap)return;
     const options=decodeURIComponent(wrap.dataset.options||'');
     wrap.insertAdjacentHTML('beforeend', crmOrderLineHTML(options,false));
+    if (typeof bindCrmOrderWeightEvents === 'function') bindCrmOrderWeightEvents(wrap);
     const rows=wrap.querySelectorAll('.crm-order-line');
     if(rows.length>1) rows[0].querySelector('[data-act="crm-order-remove-line"]')?.removeAttribute('disabled');
   },
@@ -314,10 +318,17 @@ const Actions = {
     const dueDate=$('#crmOrderDue')?.value||'';
     const ownerId=$('#crmOrderOwner')?.value||DB.currentUser?.id||'';
     if(!customerId){Toast.err('Chưa chọn khách hàng','Vui lòng chọn khách hàng mua thành phẩm.');return;}
-    const deliveryAddress=$('#crmDeliveryAddress')?.value.trim()||'';
+    const deliveryParts=typeof crmReadDeliveryAddressForm==='function'?crmReadDeliveryAddressForm():{address:$('#crmDeliveryAddressDetail')?.value.trim()||'',province:'',district:'',ward:'',addressDetail:$('#crmDeliveryAddressDetail')?.value.trim()||''};
+    const deliveryAddress=deliveryParts.address;
+    const deliveryProvince=deliveryParts.province||'';
+    const deliveryDistrict=deliveryParts.district||'';
+    const deliveryWard=deliveryParts.ward||'';
+    const deliveryAddressDetail=deliveryParts.addressDetail||'';
     const deliveryRecipient=$('#crmDeliveryRecipient')?.value.trim()||'';
     const deliveryPhone=$('#crmDeliveryPhone')?.value.trim()||'';
     const deliveryNote=$('#crmDeliveryNote')?.value.trim()||'';
+    const deliveryLat=Number($('#crmDeliveryLat')?.value||0)||null;
+    const deliveryLng=Number($('#crmDeliveryLng')?.value||0)||null;
     const shippingFee=Math.max(0,Number($('#crmShippingFee')?.value)||0);
     if(!deliveryAddress){Toast.err('Thiếu địa chỉ giao hàng','Vui lòng nhập địa chỉ nhận hàng của đơn bán.');return;}
     if(!date||!dueDate){Toast.err('Thiếu ngày','Vui lòng nhập ngày đặt và ngày giao dự kiến.');return;}
@@ -328,17 +339,19 @@ const Actions = {
       const qty=Number(row.querySelector('input[name="qty"]')?.value)||0;
       const p=Q.product(productId);
       const price=Number(row.querySelector('input[name="price"]')?.value)||Number(p?.price||0);
-      return {index,productId,qty,price,p};
+      const packedWeightKg=Math.max(0, Number(p?.packedWeightG||0)>0 ? Number(p.packedWeightG)/1000 : Number(p?.packedWeightKg||0));
+      return {index,productId,qty,price,p,packedWeightKg};
     });
     if(!rows.length||rows.some(x=>!x.productId||x.qty<=0)){Toast.err('Dòng hàng chưa hợp lệ','Mỗi dòng phải chọn thành phẩm và nhập số lượng lớn hơn 0.');return;}
     if(new Set(rows.map(x=>x.productId)).size!==rows.length){Toast.err('Thành phẩm bị trùng','Vui lòng gộp cùng thành phẩm vào một dòng.');return;}
-    const items=rows.map((x,i)=>({no:i+1,productId:x.productId,name:x.p?.name||x.productId,spec:x.p?.spec||'',unit:x.p?.unit||'',qty:x.qty,price:x.price,amount:x.qty*x.price}));
+    const items=rows.map((x,i)=>({no:i+1,productId:x.productId,name:x.p?.name||x.productId,spec:x.p?.spec||'',unit:x.p?.unit||'',qty:x.qty,price:x.price,amount:x.qty*x.price,packedWeightKg:x.packedWeightKg,shippingWeightKg:Math.round(x.qty*x.packedWeightKg*1000)/1000}));
+    const shippingWeightKg=Math.round(items.reduce((sum,it)=>sum+Number(it.shippingWeightKg||0),0)*1000)/1000;
     const vatRate=Number($('#crmOrderVat')?.value)||0;
     const subtotal=items.reduce((sum,it)=>sum+it.amount,0); const vat=Math.round(subtotal*vatRate/100); const total=subtotal+vat+shippingFee;
     const id=SalesCRM.nextNumericCode('DH-2026-',DB.orders,4);
     const opportunityId=$('#crmOrderOpportunity')?.value||'';
     const nowIso=new Date().toISOString();
-    const order={id,customerId,date,dueDate,ownerId,status:'dh_cho_xu_ly',quoteId:null,opportunityId,items,subtotal,discountPct:0,discount:0,vatRate,vat,shippingFee,total,deliveryAddress,deliveryRecipient,deliveryPhone,deliveryNote,note:$('#crmOrderNote')?.value.trim()||'',createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:DB.currentUser?.name||DB.currentUser?.fullName||'',createdAt:nowIso};
+    const order={id,customerId,date,dueDate,ownerId,status:'dh_cho_xu_ly',quoteId:null,opportunityId,items,subtotal,discountPct:0,discount:0,vatRate,vat,shippingFee,total,shippingWeightKg,deliveryAddress,deliveryProvince,deliveryDistrict,deliveryWard,deliveryAddressDetail,deliveryLat,deliveryLng,deliveryRecipient,deliveryPhone,deliveryNote,note:$('#crmOrderNote')?.value.trim()||'',createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:DB.currentUser?.name||DB.currentUser?.fullName||'',createdAt:nowIso};
     DB.orders.unshift(order);
     if(opportunityId){const opp=(DB.crmOpportunities||[]).find(x=>x.id===opportunityId);if(opp){opp.customerId=opp.customerId||customerId;opp.stage='CLOSED_WON';opp.probability=100;opp.updatedAt=actualToday;opp.orderId=id;}}
     SalesCRM.saveLocal(['orders']); SEARCH_INDEX=null; Modal.close();
@@ -524,10 +537,17 @@ const Actions = {
     const date = $('#crmOrderDate')?.value || '';
     const dueDate = $('#crmOrderDue')?.value || '';
     const ownerId = $('#crmOrderOwner')?.value || o.ownerId || '';
-    const deliveryAddress = $('#crmDeliveryAddress')?.value.trim() || '';
+    const deliveryParts = typeof crmReadDeliveryAddressForm==='function' ? crmReadDeliveryAddressForm() : {address:$('#crmDeliveryAddressDetail')?.value.trim()||'',province:'',district:'',ward:'',addressDetail:$('#crmDeliveryAddressDetail')?.value.trim()||''};
+    const deliveryAddress = deliveryParts.address;
+    const deliveryProvince = deliveryParts.province||'';
+    const deliveryDistrict = deliveryParts.district||'';
+    const deliveryWard = deliveryParts.ward||'';
+    const deliveryAddressDetail = deliveryParts.addressDetail||'';
     const deliveryRecipient = $('#crmDeliveryRecipient')?.value.trim() || '';
     const deliveryPhone = $('#crmDeliveryPhone')?.value.trim() || '';
     const deliveryNote = $('#crmDeliveryNote')?.value.trim() || '';
+    const deliveryLat = Number($('#crmDeliveryLat')?.value||0)||null;
+    const deliveryLng = Number($('#crmDeliveryLng')?.value||0)||null;
     const shippingFee = Math.max(0, Number($('#crmShippingFee')?.value) || 0);
     if (!customerId) { Toast.err('Chưa chọn khách hàng', 'Vui lòng chọn khách hàng.'); return; }
     if (!deliveryAddress) { Toast.err('Thiếu địa chỉ giao hàng', 'Vui lòng nhập địa chỉ nhận hàng.'); return; }
@@ -538,15 +558,17 @@ const Actions = {
       const qty = Number(row.querySelector('input[name="qty"]')?.value) || 0;
       const product = Q.product(productId);
       const price = Number(row.querySelector('input[name="price"]')?.value) || Number(product?.price || 0);
-      return { index, productId, qty, price, product };
+      const packedWeightKg = Math.max(0, Number(product?.packedWeightG||0)>0 ? Number(product.packedWeightG)/1000 : Number(product?.packedWeightKg || 0));
+      return { index, productId, qty, price, product, packedWeightKg };
     });
     if (!rows.length || rows.some(x => !x.productId || x.qty <= 0)) { Toast.err('Dòng hàng chưa hợp lệ', 'Mỗi dòng phải chọn thành phẩm và nhập số lượng lớn hơn 0.'); return; }
     if (new Set(rows.map(x => x.productId)).size !== rows.length) { Toast.err('Thành phẩm bị trùng', 'Vui lòng gộp cùng thành phẩm vào một dòng.'); return; }
-    const items = rows.map((x, i) => ({ no:i+1, productId:x.productId, name:x.product?.name||x.productId, spec:x.product?.spec||'', unit:x.product?.unit||'', qty:x.qty, price:x.price, amount:x.qty*x.price }));
+    const items = rows.map((x, i) => ({ no:i+1, productId:x.productId, name:x.product?.name||x.productId, spec:x.product?.spec||'', unit:x.product?.unit||'', qty:x.qty, price:x.price, amount:x.qty*x.price, packedWeightKg:x.packedWeightKg, shippingWeightKg:Math.round(x.qty*x.packedWeightKg*1000)/1000 }));
+    const shippingWeightKg = Math.round(items.reduce((sum,it)=>sum+Number(it.shippingWeightKg||0),0)*1000)/1000;
     const vatRate = Number($('#crmOrderVat')?.value) || 0;
     const subtotal = items.reduce((sum, it) => sum + it.amount, 0);
     const vat = Math.round(subtotal * vatRate / 100);
-    Object.assign(o, { customerId, ownerId, date, dueDate, items, subtotal, vatRate, vat, shippingFee, total:subtotal+vat+shippingFee, deliveryAddress, deliveryRecipient, deliveryPhone, deliveryNote, note:$('#crmOrderNote')?.value.trim()||'', updatedAt:new Date().toISOString(), updatedBy:DB.currentUser?.userId||DB.currentUser?.id||'' });
+    Object.assign(o, { customerId, ownerId, date, dueDate, items, subtotal, vatRate, vat, shippingFee, shippingWeightKg, total:subtotal+vat+shippingFee, deliveryAddress, deliveryProvince, deliveryDistrict, deliveryWard, deliveryAddressDetail, deliveryLat, deliveryLng, deliveryRecipient, deliveryPhone, deliveryNote, note:$('#crmOrderNote')?.value.trim()||'', updatedAt:new Date().toISOString(), updatedBy:DB.currentUser?.userId||DB.currentUser?.id||'' });
     SalesCRM.saveLocal(['orders']); SEARCH_INDEX = null;
     if (typeof SystemAPI !== 'undefined') SystemAPI.audit({module:'CRM',entityType:'SALES_ORDER',entityId:o.id,action:'UPDATE',description:`${DB.currentUser?.name||'Người dùng'} cập nhật đơn hàng ${o.id}`,newData:{status:o.status,total:o.total}});
     Modal.close(); render(); Toast.ok('Đã cập nhật đơn hàng', o.id);
@@ -1216,6 +1238,21 @@ const Actions = {
       item.spec=$('#invItemSpec')?.value.trim()||item.spec||'';
       if(isSemi) item.minStock=Number($('#invItemMinStock')?.value||0);
       else {
+        // [FINISHED GOODS MASTER] Khối lượng đóng gói lưu theo gram để dễ khai báo,
+        // đồng thời duy trì packedWeightKg tương thích với Sales/Logistics hiện hữu.
+        const packedWeightG = Number($('#invItemPackedWeightG')?.value || 0);
+        const shelfLifeDays = Number($('#invItemShelfLifeDays')?.value || 0);
+        if (!Number.isFinite(packedWeightG) || packedWeightG < 0) {
+          Toast.err('Khối lượng không hợp lệ', 'Khối lượng đóng gói phải lớn hơn hoặc bằng 0 gram.');
+          return;
+        }
+        if (!Number.isFinite(shelfLifeDays) || shelfLifeDays < 0 || !Number.isInteger(shelfLifeDays)) {
+          Toast.err('Hạn sử dụng không hợp lệ', 'Số ngày hạn sử dụng phải là số nguyên lớn hơn hoặc bằng 0.');
+          return;
+        }
+        item.packedWeightG = packedWeightG;
+        item.packedWeightKg = Math.round((packedWeightG / 1000) * 1000000) / 1000000;
+        item.shelfLifeDays = shelfLifeDays;
         DB.finishedMinStock=DB.finishedMinStock||{};
         DB.finishedMinStock[id]=Number($('#invItemMinStock')?.value||0);
         item.bom=item.bom||[];
@@ -1242,7 +1279,7 @@ const Actions = {
             productId: id,
             productionOrderId: '',
             mfgDate: actualToday,
-            expiryDate: '',
+            expiryDate: Number(item.shelfLifeDays||0) > 0 ? addDays(actualToday, Number(item.shelfLifeDays)) : '',
             supplierLot: 'TỒN-ĐẦU-KỲ',
             supplierId: '',
             qcStatus: 'PASSED',
@@ -1378,6 +1415,25 @@ const Actions = {
     Toast.ok(type === 'in' ? 'Đã nhập kho' : 'Đã xuất kho', `${m.name} · ${fmtN(qty)} ${m.unit} — tồn mới ${fmtDec(m.stock, 2)} ${m.unit}`);
   },
   'material-request': (d) => switchTo(() => openPRForm(d.id)),
+  'inv-warehouse-new': () => openWarehouseMasterForm(''),
+  'inv-warehouse-view': (d) => openWarehouseMasterDetail(d.id),
+  'inv-warehouse-edit': (d) => openWarehouseMasterForm(d.id),
+  'inv-warehouse-delete': (d) => deleteWarehouseMaster(d.id || ''),
+  'inv-warehouse-save': (d) => saveWarehouseMaster(d.id || ''),
+  'inv-warehouse-site-open': (d) => { const f=F('inv-warehouses'); Object.assign(f,{siteId:d.id||'',zoneId:'',rackId:'',itemType:'',q:'',tab:'overview'}); render(); },
+  'inv-warehouse-site-back': () => { const f=F('inv-warehouses'); Object.assign(f,{siteId:'',zoneId:'',rackId:'',itemType:'',q:'',tab:'overview'}); render(); },
+  'inv-warehouse-tab': (d) => { const f=F('inv-warehouses'); f.tab=d.tab||'overview'; if(f.tab!=='zones')f.rackId=''; render(); },
+  'inv-warehouse-zone-open': (d) => { const f=F('inv-warehouses'); f.siteId=d.site||f.siteId||''; f.zoneId=d.id||''; f.rackId=''; f.q=''; f.tab='zones'; render(); },
+  'inv-warehouse-zone-new': (d) => openWarehouseZoneForm(d.site||F('inv-warehouses').siteId||'', ''),
+  'inv-warehouse-zone-edit': (d) => openWarehouseZoneForm(d.site||F('inv-warehouses').siteId||'', d.id||''),
+  'inv-warehouse-zone-save': (d) => saveWarehouseZone(d.site||'', d.id||''),
+  'inv-warehouse-zone-filter-clear': () => { const f=F('inv-warehouses'); f.itemType=''; f.zoneId=''; f.rackId=''; f.q=''; render(); },
+  'inv-warehouse-rack-new': (d) => openWarehouseRackForm(d.site||F('inv-warehouses').siteId||'', d.zone||F('inv-warehouses').zoneId||'', ''),
+  'inv-warehouse-rack-edit': (d) => openWarehouseRackForm(d.site||F('inv-warehouses').siteId||'', d.zone||F('inv-warehouses').zoneId||'', d.id||''),
+  'inv-warehouse-rack-save': (d) => saveWarehouseRack(d.site||'', d.zone||'', d.id||''),
+  'inv-warehouse-rack-delete': (d) => deleteWarehouseRack(d.id||''),
+  'inv-warehouse-rack-open': (d) => { const f=F('inv-warehouses'); f.rackId=d.id||''; f.tab='zones'; render(); },
+  'inv-warehouse-rack-close': () => { const f=F('inv-warehouses'); f.rackId=''; render(); },
   'inv-new-receipt': (d) => switchTo(() => (d.tab && d.tab !== 'raw' ? openWarehouseReceiptModal(d.tab) : openNewReceiptModal(d.poid || ''))),
   'inv-new-issue': (d) => switchTo(() => openNewIssueModal(d.tab || F('inv-issues').issueTab || 'raw')),
   'inv-new-transfer': (d) => switchTo(() => openNewTransferModal(d.type || State.invTransferType || 'RAW_MATERIAL')),
@@ -3469,7 +3525,14 @@ const Actions = {
 
   /* --- Nhân sự & hệ thống --- */
   'open-employee': (d) => switchTo(() => openEmployeeModal(d.id)),
-  'new-employee': () => Toast.info('Thêm nhân sự', 'Form hồ sơ nhân sự đầy đủ (hợp đồng, bảo hiểm, bằng cấp) có ở bản triển khai.'),
+  'new-employee': () => switchTo(() => openEmployeeForm()),
+  'employee-edit': (d) => switchTo(() => openEmployeeForm(d.id)),
+  'employee-save': () => saveEmployeeForm(),
+  'employee-toggle-active': (d) => toggleEmployeeActive(d.id),
+  'employee-import': () => openEmployeeImportModal(),
+  'hr-download-template': () => Exporter.csv('Mau-import-nhan-su.csv',
+    ['Mã NV (để trống nếu thêm mới)', 'Họ tên', 'Phòng ban', 'Chức vụ', 'Giới tính', 'Số điện thoại', 'Email', 'Ngày vào làm (YYYY-MM-DD)', 'Loại hợp đồng', 'Trạng thái làm việc'],
+    [['', 'Nguyễn Văn Mẫu', DB.departments[0] || '', 'Công nhân', 'Nam', '0909 000 000', 'mau@lenamfood.vn', currentDateYMD(), (DB.contractTypes || [])[0] || '', statusLabel('ns_dang_lam')]]),
   'new-user': () => Toast.info('Thêm người dùng', 'Cấp tài khoản gắn với hồ sơ nhân sự và vai trò phân quyền.'),
   'user-toggle': async (d) => {
     const u = DB.users.find((x) => x.id === d.id); if (!u) return;
@@ -3570,8 +3633,8 @@ const Actions = {
     ['Mã YC', 'Người yêu cầu', 'Nhà cung cấp', 'Giá trị', 'Ngày yêu cầu', 'Trạng thái'],
     DB.purchases.map((p) => [p.id, Q.employeeName(p.requesterId), Q.supplierName(p.supplierId), p.total, fmtDate(p.date), statusLabel(p.status)])),
   'export-hr': () => Exporter.csv('Danh-sach-nhan-su.csv',
-    ['Mã NV', 'Họ tên', 'Phòng ban', 'Chức vụ', 'Điện thoại', 'Ngày vào làm', 'Trạng thái'],
-    DB.employees.map((e) => [e.id, e.name, e.dept, e.position, e.phone, fmtDate(e.joinDate), statusLabel(e.status)])),
+	['Mã NV', 'Họ tên', 'Phòng ban', 'Chức vụ', 'Giới tính', 'Số điện thoại', 'Email', 'Ngày vào làm (YYYY-MM-DD)', 'Loại hợp đồng', 'Trạng thái làm việc', 'Tình trạng sử dụng'],
+    DB.employees.map((e) => [e.id, e.name, e.dept, e.position, e.gender, e.phone, e.email, e.joinDate, e.contractType || '', statusLabel(e.status), e.active === false ? 'Ngừng sử dụng' : 'Đang sử dụng'])),
   'export-attendance': () => Exporter.csv('Bang-cong-thang-08-2026.csv',
     ['Mã NV', 'Họ tên', 'Phòng ban', 'Công chuẩn', 'Đi làm', 'Nghỉ phép', 'Đi muộn', 'Tăng ca (giờ)', 'Tỷ lệ %'],
     DB.attendance.map((a) => [a.empId, a.name, a.dept, a.standard, a.worked, a.leave, a.late, a.ot, a.rate])),
@@ -4465,7 +4528,7 @@ function routeRefreshPlan(module, tab) {
   if (module === 'warehouse') {
     const map = {
       dashboard: ['inventory', 'inventoryLots', 'warehouses', 'materials', 'semiFinishedProducts', 'products'],
-      inventory: ['inventory', 'inventoryLots', 'warehouses', 'warehouseLocations', 'materials', 'semiFinishedProducts', 'products', 'itemCategories'],
+      inventory: ['inventory', 'goodsIssues', 'inventoryLots', 'warehouses', 'warehouseLocations', 'materials', 'semiFinishedProducts', 'products', 'itemCategories'],
       receipts: ['goodsReceipts', 'warehouses', 'inventoryLots'],
       issues: ['goodsIssues', 'warehouses', 'inventoryLots'],
       transfers: ['stockTransfers', 'warehouses'],

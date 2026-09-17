@@ -804,3 +804,21 @@ Kế hoạch gia công
 - Đổi tên chỉ số kỹ thuật trên giao diện thành cách gọi dễ hiểu: **Thời gian máy chạy ổn định giữa các lần hỏng**, **Thời gian trung bình để sửa xong một sự cố**, **Tổng thời gian máy ngừng hoạt động**.
 - Cảnh báo **Sắp đến hạn bảo trì** khi lịch còn từ 0 đến 7 ngày.
 - Cảnh báo **Quá hạn bảo trì** khi ngày kế hoạch đã qua nhưng lịch chưa hoàn thành.
+
+## Google Maps cho Logistics (Routes API)
+
+Bản này hỗ trợ tính quãng đường và thời gian dự kiến theo Google Maps ngay trong **Logistics → Đơn giao hàng → Điều phối**. Khi ghép nhiều đơn, hệ thống gửi Kho xuất phát + các điểm giao đến Google Routes API, sau đó tự tính phí gợi ý theo `đ/km`. Người điều phối vẫn có thể sửa phí dự kiến bằng tay.
+
+### Cấu hình API key
+
+1. Trong Google Cloud, bật **Routes API**. Nếu muốn nhúng bản đồ trực tiếp trong modal, bật thêm **Maps Embed API**.
+2. Copy `api/google-maps.local.php.example` thành `api/google-maps.local.php`.
+3. Điền key server vào `api_key`. Có thể dùng key browser riêng trong `browser_key` để nhúng bản đồ.
+4. File `api/google-maps.local.php` đã được đưa vào `.gitignore`, không commit API key lên GitHub.
+5. Đơn giá mặc định được cấu hình bằng `default_rate_per_km` (mặc định 10.000 đ/km).
+
+Nếu chưa cấu hình Google Maps, ERP vẫn chạy bình thường; trường **Km dự kiến (dự phòng)** có thể nhập tay như trước.
+
+### Dữ liệu vị trí
+
+Hệ thống ưu tiên `lat/lng` nếu master Kho hoặc Đơn hàng có khai báo. Nếu chưa có tọa độ, Routes API dùng chuỗi địa chỉ hiện tại. Vì vậy nên khai báo địa chỉ Kho và địa chỉ giao hàng càng chính xác càng tốt.

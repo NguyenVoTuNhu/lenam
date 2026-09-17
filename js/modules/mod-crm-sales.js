@@ -84,9 +84,13 @@ const SalesCRM = (() => {
   // [SALES RESERVATION] Duyệt đơn chỉ giữ chỗ tồn kho, chưa trừ qtyOnHand.
   // Kho xác nhận phiếu xuất thì mới trừ tồn thật.
   function findWarehouseForOrder(order) {
-    return finishedWarehouses().find(wh =>
+    const lat=Number(order?.deliveryLat||0), lng=Number(order?.deliveryLng||0);
+    const distance=(wh)=>{const a=Number(wh?.lat||wh?.latitude||0),b=Number(wh?.lng||wh?.longitude||0);if(!lat||!lng||!a||!b)return null;const R=6371,rad=x=>x*Math.PI/180,dLat=rad(a-lat),dLng=rad(b-lng);const h=Math.sin(dLat/2)**2+Math.cos(rad(lat))*Math.cos(rad(a))*Math.sin(dLng/2)**2;return R*2*Math.atan2(Math.sqrt(h),Math.sqrt(1-h));};
+    const eligible=finishedWarehouses().filter(wh =>
       (order?.items || []).every(item => finishedAvailable(item.productId, wh.id) >= Number(item.qty || 0))
-    ) || null;
+    );
+    eligible.sort((a,b)=>{const da=distance(a),db=distance(b);if(da==null&&db==null)return String(a.name||'').localeCompare(String(b.name||''),'vi');if(da==null)return 1;if(db==null)return -1;return da-db;});
+    return eligible[0] || null;
   }
 
   function reserveOrderStock(order) {
@@ -429,7 +433,12 @@ function openOrderForm(customerId = '', opportunityId = '') {
         <div class="field"><label>Nhân viên sale</label><select class="inp" id="crmOrderOwner"><option value="${esc(DB.currentUser?.id||'NV-001')}">${esc(Q.employeeName(DB.currentUser?.id)||'Người hiện tại')}</option>${ownerOptions}</select></div>
         <div class="field"><label>Ngày đặt hàng <b>*</b></label><input class="inp" type="date" id="crmOrderDate" value="${currentDateYMD()}" min="${currentDateYMD()}"></div>
         <div class="field"><label>Ngày giao dự kiến <b>*</b></label><input class="inp" type="date" id="crmOrderDue" value="${currentDateYMD()}" min="${currentDateYMD()}"></div>
-        <div class="field" style="grid-column:1/-1"><label>Địa chỉ giao hàng <b>*</b></label><input class="inp" id="crmDeliveryAddress" placeholder="Địa chỉ nhận hàng theo đơn"></div>
+        <div class="field"><label>Tỉnh / Thành phố <b>*</b></label><select class="inp" id="crmDeliveryProvince"><option value="">-- Chọn Tỉnh/Thành phố --</option></select></div>
+        <div class="field"><label>Quận / Huyện <b>*</b></label><select class="inp" id="crmDeliveryDistrict"><option value="">-- Chọn Quận/Huyện --</option></select></div>
+        <div class="field"><label>Phường / Xã</label><select class="inp" id="crmDeliveryWard"><option value="">-- Chọn Phường/Xã --</option></select></div>
+        <div class="field"><label>Địa chỉ chi tiết <b>*</b></label><input class="inp" id="crmDeliveryAddressDetail" placeholder="Số nhà, tên đường, tòa nhà..."> <div class="cell-sub" id="crmDeliveryAddressNote">Hệ thống tự ghép thành địa chỉ giao hàng đầy đủ; nhân viên không cần nhập tọa độ.</div></div>
+        <input type="hidden" id="crmDeliveryLat" value="">
+        <input type="hidden" id="crmDeliveryLng" value="">
         <div class="field"><label>Người nhận</label><input class="inp" id="crmDeliveryRecipient" placeholder="Tên người nhận"></div>
         <div class="field"><label>Số điện thoại nhận hàng</label><input class="inp" id="crmDeliveryPhone" placeholder="SĐT người nhận"></div>
       </div>
@@ -445,7 +454,7 @@ function openOrderForm(customerId = '', opportunityId = '') {
       </div>`}
       <div class="grid g-2" style="margin-top:14px">
         <div class="field"><label>VAT (%)</label><input class="inp right num" type="number" id="crmOrderVat" min="0" max="20" value="10"></div>
-        <div class="field"><label>Phí giao hàng khách trả</label><input class="inp right num" type="number" id="crmShippingFee" min="0" step="1000" value="0"><div class="cell-sub">Khoản này được cộng vào tổng thanh toán của đơn hàng.</div></div>
+        <div class="field"><label>Phí vận chuyển thu khách</label><input class="inp right num" type="number" id="crmShippingFee" min="0" step="1000" value="0"><div class="cell-sub">Số tiền vận chuyển khách đồng ý thanh toán; được cộng vào tổng thanh toán của đơn hàng.</div></div>
         <div class="field"><label>Ghi chú đơn hàng</label><input class="inp" id="crmOrderNote" placeholder="Ghi chú bán hàng"></div>
         <div class="field"><label>Ghi chú giao hàng</label><input class="inp" id="crmDeliveryNote" placeholder="Giờ nhận, cổng giao, yêu cầu liên hệ…"></div>
       </div>
@@ -453,25 +462,58 @@ function openOrderForm(customerId = '', opportunityId = '') {
     </form>`,
     foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="crm-order-save" ${sellableProducts.length ? '' : 'disabled'}><i class="fa-solid fa-floppy-disk"></i>Lưu đơn hàng</button>`
   });
-  const fillDeliveryFromCustomer = () => {
+  const initDeliveryAddress = async (values={}) => {
+    if (typeof VNAddress !== 'undefined') await VNAddress.init({provinceId:'crmDeliveryProvince',districtId:'crmDeliveryDistrict',wardId:'crmDeliveryWard',noteId:'crmDeliveryAddressNote',province:values.province||'',district:values.district||'',ward:values.ward||''});
+  };
+  const fillDeliveryFromCustomer = async () => {
     const c = Q.customer(document.querySelector('#crmOrderCustomer')?.value || '');
-    const addr = document.querySelector('#crmDeliveryAddress');
+    const detail = document.querySelector('#crmDeliveryAddressDetail');
     const recipient = document.querySelector('#crmDeliveryRecipient');
     const phone = document.querySelector('#crmDeliveryPhone');
-    if (addr && (!addr.value || addr.dataset.auto === '1')) { addr.value = c?.address || ''; addr.dataset.auto = '1'; }
+    const structured = {province:c?.province||'',district:c?.district||'',ward:c?.ward||''};
+    await initDeliveryAddress(structured);
+    if (detail && (!detail.value || detail.dataset.auto === '1')) { detail.value = c?.addressDetail || c?.address || ''; detail.dataset.auto = '1'; }
     if (recipient && (!recipient.value || recipient.dataset.auto === '1')) { recipient.value = c?.contact || c?.name || ''; recipient.dataset.auto = '1'; }
     if (phone && (!phone.value || phone.dataset.auto === '1')) { phone.value = c?.phone || ''; phone.dataset.auto = '1'; }
   };
   document.querySelector('#crmOrderCustomer')?.addEventListener('change', fillDeliveryFromCustomer);
-  ['#crmDeliveryAddress','#crmDeliveryRecipient','#crmDeliveryPhone'].forEach(sel => document.querySelector(sel)?.addEventListener('input', ev => { ev.currentTarget.dataset.auto = '0'; }));
+  ['#crmDeliveryAddressDetail','#crmDeliveryRecipient','#crmDeliveryPhone'].forEach(sel => document.querySelector(sel)?.addEventListener('input', ev => { ev.currentTarget.dataset.auto = '0'; }));
   fillDeliveryFromCustomer();
+  setTimeout(() => bindCrmOrderWeightEvents(document), 0);
+}
+
+function crmPackedWeightKg(productId) {
+  const p = Q.product(productId);
+  return Math.max(0, Number(p?.packedWeightG||0)>0 ? Number(p.packedWeightG)/1000 : Number(p?.packedWeightKg || 0));
+}
+
+function updateCrmOrderLineWeight(row) {
+  if (!row) return;
+  const productId = row.querySelector('select[name="product"]')?.value || '';
+  const qty = Math.max(0, Number(row.querySelector('input[name="qty"]')?.value || 0));
+  const perUnit = crmPackedWeightKg(productId);
+  const out = row.querySelector('[data-role="line-weight"]');
+  const hint = row.querySelector('[data-role="weight-hint"]');
+  if (out) out.value = perUnit > 0 && qty > 0 ? (perUnit * qty).toFixed(3).replace(/\.?0+$/, '') : '';
+  if (hint) hint.textContent = productId ? (perUnit > 0 ? `${perUnit.toLocaleString('vi-VN',{maximumFractionDigits:3})} kg / ${Q.product(productId)?.unit || 'ĐVT'}` : 'Chưa khai báo khối lượng đóng gói') : '';
+}
+
+function bindCrmOrderWeightEvents(root=document) {
+  root.querySelectorAll?.('.crm-order-line').forEach(row => {
+    if (row.dataset.weightBound === '1') { updateCrmOrderLineWeight(row); return; }
+    row.dataset.weightBound = '1';
+    row.querySelector('select[name="product"]')?.addEventListener('change', () => updateCrmOrderLineWeight(row));
+    row.querySelector('input[name="qty"]')?.addEventListener('input', () => updateCrmOrderLineWeight(row));
+    updateCrmOrderLineWeight(row);
+  });
 }
 
 function crmOrderLineHTML(options, first=false) {
-  return `<div class="crm-order-line" style="display:grid;grid-template-columns:minmax(280px,2fr) 120px 150px 44px;gap:8px;align-items:end;margin-bottom:8px">
+  return `<div class="crm-order-line" style="display:grid;grid-template-columns:minmax(250px,2fr) 105px 135px 135px 44px;gap:8px;align-items:end;margin-bottom:8px">
     <div class="field" style="margin:0"><label>Thành phẩm</label><select class="inp" name="product"><option value="">-- Chọn thành phẩm --</option>${options}</select></div>
     <div class="field" style="margin:0"><label>Số lượng</label><input class="inp right num" name="qty" type="number" min="1" step="1"></div>
     <div class="field" style="margin:0"><label>Đơn giá</label><input class="inp right num" name="price" type="number" min="0" step="1000"></div>
+    <div class="field" style="margin:0"><label>Khối lượng (kg)</label><input class="inp right num" data-role="line-weight" readonly placeholder="0"></div>
     <button type="button" class="btn btn-sm" data-act="crm-order-remove-line" ${first?'disabled':''}><i class="fa-solid fa-trash"></i></button>
   </div>`;
 }
@@ -487,10 +529,11 @@ function openOrderEditForm(id) {
     const stockText = available > 0 ? `tồn TP ${fmtN(available)} ${p.unit||''}` : 'HẾT HÀNG';
     return `<option value="${p.id}" data-price="${Number(p.price||0)}">${esc(p.id+' · '+p.name+' · '+stockText)}</option>`;
   }).join('');
-  const rows = (o.items||[]).map((it,idx)=>`<div class="crm-order-line" style="display:grid;grid-template-columns:minmax(280px,2fr) 120px 150px 44px;gap:8px;align-items:end;margin-bottom:8px">
+  const rows = (o.items||[]).map((it,idx)=>`<div class="crm-order-line" style="display:grid;grid-template-columns:minmax(250px,2fr) 105px 135px 135px 44px;gap:8px;align-items:end;margin-bottom:8px">
     <div class="field" style="margin:0"><label>Thành phẩm</label><select class="inp" name="product"><option value="">-- Chọn thành phẩm --</option>${products.map(p=>{const av=Number(SalesCRM.finishedAvailable(p.id)||0);return `<option value="${p.id}" ${p.id===it.productId?'selected':''}>${esc(p.id+' · '+p.name+' · '+(av>0?`tồn TP ${fmtN(av)} ${p.unit||''}`:'HẾT HÀNG'))}</option>`;}).join('')}</select></div>
     <div class="field" style="margin:0"><label>Số lượng</label><input class="inp right num" name="qty" type="number" min="1" step="1" value="${Number(it.qty||0)}"></div>
     <div class="field" style="margin:0"><label>Đơn giá</label><input class="inp right num" name="price" type="number" min="0" step="1000" value="${Number(it.price||0)}"></div>
+    <div class="field" style="margin:0"><label>Khối lượng</label><input class="inp right num" data-role="line-weight" readonly value="${Number(it.shippingWeightKg||0)>0?Number(it.shippingWeightKg).toFixed(3).replace(/\.?0+$/,''):''}"><div class="cell-sub" data-role="weight-hint"></div></div>
     <button type="button" class="btn btn-sm" data-act="crm-order-remove-line" ${(o.items||[]).length===1?'disabled':''}><i class="fa-solid fa-trash"></i></button>
   </div>`).join('');
   Modal.open({title:`Cập nhật đơn hàng ${o.id}`,sub:'Cập nhật thông tin đơn hàng bán; trạng thái duyệt được giữ nguyên.',size:'lg',body:`<form id="crmOrderEditForm" novalidate>
@@ -499,15 +542,28 @@ function openOrderEditForm(id) {
       <div class="field"><label>Nhân viên sale</label><select class="inp" id="crmOrderOwner">${ownerOptions}</select></div>
       <div class="field"><label>Ngày đặt hàng *</label><input class="inp" type="date" id="crmOrderDate" value="${esc(o.date||currentDateYMD())}"></div>
       <div class="field"><label>Ngày giao dự kiến *</label><input class="inp" type="date" id="crmOrderDue" value="${esc(o.dueDate||currentDateYMD())}"></div>
-      <div class="field" style="grid-column:1/-1"><label>Địa chỉ giao hàng *</label><input class="inp" id="crmDeliveryAddress" value="${esc(o.deliveryAddress||Q.customer(o.customerId)?.address||'')}"></div>
+      <div class="field"><label>Tỉnh / Thành phố *</label><select class="inp" id="crmDeliveryProvince"><option value="${esc(o.deliveryProvince||'')}">${esc(o.deliveryProvince||'-- Chọn Tỉnh/Thành phố --')}</option></select></div>
+      <div class="field"><label>Quận / Huyện *</label><select class="inp" id="crmDeliveryDistrict"><option value="${esc(o.deliveryDistrict||'')}">${esc(o.deliveryDistrict||'-- Chọn Quận/Huyện --')}</option></select></div>
+      <div class="field"><label>Phường / Xã</label><select class="inp" id="crmDeliveryWard"><option value="${esc(o.deliveryWard||'')}">${esc(o.deliveryWard||'-- Chọn Phường/Xã --')}</option></select></div>
+      <div class="field"><label>Địa chỉ chi tiết *</label><input class="inp" id="crmDeliveryAddressDetail" value="${esc(o.deliveryAddressDetail || (!o.deliveryProvince ? (o.deliveryAddress||Q.customer(o.customerId)?.address||'') : ''))}" placeholder="Số nhà, tên đường, tòa nhà..."><div class="cell-sub" id="crmDeliveryAddressNote">Tọa độ được xử lý nội bộ khi Logistics cần tính tuyến.</div></div>
+      <input type="hidden" id="crmDeliveryLat" value="${Number(o.deliveryLat||0)||''}">
+      <input type="hidden" id="crmDeliveryLng" value="${Number(o.deliveryLng||0)||''}">
       <div class="field"><label>Người nhận</label><input class="inp" id="crmDeliveryRecipient" value="${esc(o.deliveryRecipient||Q.customer(o.customerId)?.contact||Q.customerName(o.customerId)||'')}"></div>
       <div class="field"><label>Số điện thoại nhận hàng</label><input class="inp" id="crmDeliveryPhone" value="${esc(o.deliveryPhone||Q.customer(o.customerId)?.phone||'')}"></div>
     </div>
     <div class="form-sec-title"><i class="fa-solid fa-box"></i>Thành phẩm bán</div>
     <div id="crmOrderLines" data-options="${encodeURIComponent(productOptions)}">${rows}</div>
     <button type="button" class="btn btn-sm" data-act="crm-order-add-line"><i class="fa-solid fa-plus"></i>Thêm thành phẩm</button>
-    <div class="grid g-2" style="margin-top:14px"><div class="field"><label>VAT (%)</label><input class="inp right num" type="number" id="crmOrderVat" min="0" max="20" value="${Number(o.vatRate||0)}"></div><div class="field"><label>Phí giao hàng khách trả</label><input class="inp right num" type="number" id="crmShippingFee" min="0" step="1000" value="${Number(o.shippingFee||0)}"></div><div class="field"><label>Ghi chú đơn hàng</label><input class="inp" id="crmOrderNote" value="${esc(o.note||'')}"></div><div class="field"><label>Ghi chú giao hàng</label><input class="inp" id="crmDeliveryNote" value="${esc(o.deliveryNote||'')}"></div></div>
+    <div class="grid g-2" style="margin-top:14px"><div class="field"><label>VAT (%)</label><input class="inp right num" type="number" id="crmOrderVat" min="0" max="20" value="${Number(o.vatRate||0)}"></div><div class="field"><label>Phí vận chuyển thu khách</label><input class="inp right num" type="number" id="crmShippingFee" min="0" step="1000" value="${Number(o.shippingFee||0)}"></div><div class="field"><label>Ghi chú đơn hàng</label><input class="inp" id="crmOrderNote" value="${esc(o.note||'')}"></div><div class="field"><label>Ghi chú giao hàng</label><input class="inp" id="crmDeliveryNote" value="${esc(o.deliveryNote||'')}"></div></div>
   </form>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="crm-order-edit-save" data-id="${esc(o.id)}"><i class="fa-solid fa-floppy-disk"></i>Lưu thay đổi</button>`});
+  if (typeof VNAddress !== 'undefined') VNAddress.init({provinceId:'crmDeliveryProvince',districtId:'crmDeliveryDistrict',wardId:'crmDeliveryWard',noteId:'crmDeliveryAddressNote',province:o.deliveryProvince||'',district:o.deliveryDistrict||'',ward:o.deliveryWard||''});
+  setTimeout(() => bindCrmOrderWeightEvents(document), 0);
+}
+
+function crmReadDeliveryAddressForm(){
+  const x = (typeof VNAddress !== 'undefined') ? VNAddress.read('crmDelivery') : {province:document.querySelector('#crmDeliveryProvince')?.value?.trim()||'',district:document.querySelector('#crmDeliveryDistrict')?.value?.trim()||'',ward:document.querySelector('#crmDeliveryWard')?.value?.trim()||'',addressDetail:document.querySelector('#crmDeliveryAddressDetail')?.value?.trim()||''};
+  if(!x.address) x.address=[x.addressDetail,x.ward,x.district,x.province].filter(Boolean).join(', ');
+  return x;
 }
 
 Views['order-detail'] = function (params) {
@@ -532,7 +588,8 @@ Views['order-detail'] = function (params) {
     ${o.status==='dh_da_giao' ? `<button class="btn btn-primary" data-act="crm-order-complete-open" data-id="${o.id}"><i class="fa-solid fa-circle-check"></i>Xác nhận hoàn thành đơn hàng</button>` : ''}`)}
     <div class="grid g-auto-sm" style="margin-bottom:14px">
       ${mkpi('Giá trị đơn', fmtShort(o.total), 'fa-sack-dollar','blue')}
-      ${mkpi('Phí giao hàng', fmtShort(Number(o.shippingFee||0)), 'fa-truck','indigo')}
+      ${mkpi('Phí vận chuyển thu khách', fmtShort(Number(o.shippingFee||0)), 'fa-truck','indigo')}
+      ${mkpi('Khối lượng vận chuyển', `${Number(o.shippingWeightKg||0).toLocaleString('vi-VN',{maximumFractionDigits:3})} kg`, 'fa-weight-hanging','slate')}
       ${mkpi('Số dòng hàng', (o.items||[]).length, 'fa-boxes-stacked','indigo')}
       ${mkpi('Tình trạng tồn TP', stock.enough?'Đủ':'Thiếu', stock.enough?'fa-circle-check':'fa-triangle-exclamation', stock.enough?'green':'orange')}
       ${mkpi('Xuất kho bán hàng', issued?'Đã xuất':'Chưa xuất', 'fa-arrow-up-from-bracket', issued?'green':'slate')}
@@ -540,13 +597,14 @@ Views['order-detail'] = function (params) {
     </div>
     <div class="grid g-2" style="margin-bottom:14px">
       <div class="card"><div class="card-head"><div><h3>Thành phẩm đặt mua</h3><p>Tồn chỉ đọc từ Kho thành phẩm đạt QC / còn hạn</p></div></div>
-        ${tableShell([{t:'Thành phẩm'},{t:'SL đặt',cls:'right'},{t:'Tồn khả dụng',cls:'right'},{t:'Đơn giá',cls:'right'},{t:'Thành tiền',cls:'right'}], (o.items||[]).map(it=>{const av=SalesCRM.finishedAvailable(it.productId);return `<tr><td>${cell2(esc(it.name),`<span class="code">${esc(it.productId)}</span> · ${esc(it.unit||'')}`)}</td><td class="right num">${fmtN(it.qty)}</td><td class="right num" style="color:${av>=Number(it.qty)?'var(--green)':'var(--orange)'}">${fmtN(av)}</td><td class="right num">${fmtVND(it.price)}</td><td class="right strong num">${fmtVND(it.amount)}</td></tr>`;}),{emptyTitle:'Đơn chưa có thành phẩm'})}
+        ${tableShell([{t:'Thành phẩm'},{t:'SL đặt',cls:'right'},{t:'Tồn khả dụng',cls:'right'},{t:'KL đóng gói',cls:'right'},{t:'Khối lượng',cls:'right'},{t:'Đơn giá',cls:'right'},{t:'Thành tiền',cls:'right'}], (o.items||[]).map(it=>{const av=SalesCRM.finishedAvailable(it.productId);const p=Q.product(it.productId);const per=Number(it.packedWeightKg || (Number(p?.packedWeightG||0)>0 ? Number(p.packedWeightG)/1000 : p?.packedWeightKg) || 0);const line=Number(it.shippingWeightKg||Number(it.qty||0)*per);return `<tr><td>${cell2(esc(it.name),`<span class="code">${esc(it.productId)}</span> · ${esc(it.unit||'')}`)}</td><td class="right num">${fmtN(it.qty)}</td><td class="right num" style="color:${av>=Number(it.qty)?'var(--green)':'var(--orange)'}">${fmtN(av)}</td><td class="right num">${per>0?(per*1000).toLocaleString('vi-VN',{maximumFractionDigits:2})+' g':'—'}</td><td class="right num">${line>0?line.toLocaleString('vi-VN',{maximumFractionDigits:3})+' kg':'—'}</td><td class="right num">${fmtVND(it.price)}</td><td class="right strong num">${fmtVND(it.amount)}</td></tr>`;}),{emptyTitle:'Đơn chưa có thành phẩm'})}
       </div>
       <div class="card"><div class="card-head"><div><h3>Thông tin bán hàng</h3></div></div><div class="card-body"><dl class="dl">
         <dt>Khách hàng</dt><dd>${esc(customer?.name||'—')}</dd><dt>Khu vực</dt><dd>${esc(customer?.province||'—')}</dd>
         <dt>Sale phụ trách</dt><dd>${esc(Q.employeeName(o.ownerId))}</dd><dt>Ngày đặt</dt><dd>${fmtDate(o.date)}</dd><dt>Ngày giao</dt><dd>${fmtDate(o.dueDate)}</dd>
         <dt>Địa chỉ giao</dt><dd>${esc(o.deliveryAddress||customer?.address||'—')}</dd><dt>Người nhận</dt><dd>${esc(o.deliveryRecipient||customer?.contact||'—')} ${o.deliveryPhone?`· ${esc(o.deliveryPhone)}`:''}</dd>
-        <dt>Phí giao hàng khách trả</dt><dd><b>${fmtVND(Number(o.shippingFee||0))}</b></dd><dt>Chi phí vận chuyển thực tế</dt><dd>${o.actualTransportCost!=null?`<b>${fmtVND(Number(o.actualTransportCost||0))}</b>`:'<span class="muted">Chưa chốt chuyến</span>'}</dd>
+        <dt>Phí vận chuyển thu khách</dt><dd><b>${fmtVND(Number(o.shippingFee||0))}</b></dd><dt>Chi phí vận chuyển thực tế</dt><dd>${o.actualTransportCost!=null?`<b>${fmtVND(Number(o.actualTransportCost||0))}</b>`:'<span class="muted">Chưa chốt chuyến</span>'}</dd>
+        <dt>Chính sách phí vận chuyển</dt><dd>${o.actualTransportCost!=null?(()=>{const diff=Number(o.shippingFee||0)-Number(o.actualTransportCost||0);if(Math.abs(diff)<0.5)return '<span class="badge green">Thu đúng chi phí</span>';if(diff<0)return `<span class="badge orange">Doanh nghiệp hỗ trợ ${fmtVND(Math.abs(diff))}</span>`;return `<span class="badge green">Thu cao hơn chi phí ${fmtVND(diff)}</span>`;})():'<span class="muted">Xác định sau khi chốt chuyến</span>'}</dd>
         <dt>Trạng thái vận chuyển</dt><dd>${esc(o.logisticsStatus||'Chưa chuyển Logistics')}</dd><dt>Đơn giao</dt><dd>${o.logisticsDeliveryId?`<span class="code">${esc(o.logisticsDeliveryId)}</span>`:'—'}</dd>
         <dt>Nguồn đơn</dt><dd>${o.opportunityId?`Cơ hội ${esc(o.opportunityId)}`:'Tạo trực tiếp'}</dd><dt>Phiếu xuất bán</dt><dd>${issues.length?issues.map(x=>`<span class="code">${esc(x.id)}</span>`).join(', '):'<span class="muted">Chưa có</span>'}</dd>
         <dt>Hoàn thành đơn</dt><dd>${o.completedAt?fmtDate(String(o.completedAt).slice(0,10)):'—'}</dd><dt>Hàng trả về</dt><dd>${(o.returnedItems||[]).length?(o.returnedItems||[]).map(x=>`${esc(Q.product(x.productId)?.name||x.productId)}: <b>${fmtN(x.qty)}</b>`).join('<br>'):'Không có'}</dd>
@@ -567,13 +625,22 @@ Views['order-detail'] = function (params) {
     </div>`;
 };
 
+function crmGeoDistanceKm(lat1,lng1,lat2,lng2){
+  lat1=Number(lat1||0);lng1=Number(lng1||0);lat2=Number(lat2||0);lng2=Number(lng2||0);if(!lat1||!lng1||!lat2||!lng2)return null;
+  const R=6371,rad=x=>x*Math.PI/180,dLat=rad(lat2-lat1),dLng=rad(lng2-lng1);const a=Math.sin(dLat/2)**2+Math.cos(rad(lat1))*Math.cos(rad(lat2))*Math.sin(dLng/2)**2;return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+function orderWarehouseAvailability(o,w){
+  let ok=true,total=0;for(const item of o.items||[]){const rows=SalesCRM.eligibleFinishedRows(item.productId,w.id);const av=rows.reduce((s,r)=>s+Number(r.qtyAvailable??r.qtyOnHand??0),0);total+=av;if(av<Number(item.qty||0))ok=false;}return {ok,total};
+}
 function openSalesIssueModal(orderId) {
   const o = Q.order(orderId); if (!o) return;
   const whs = SalesCRM.finishedWarehouses();
   const stock = SalesCRM.orderStockState(o);
+  const ranked=whs.map(w=>{const a=orderWarehouseAvailability(o,w);const dist=crmGeoDistanceKm(o.deliveryLat,o.deliveryLng,w.lat||w.latitude,w.lng||w.longitude);return {w,...a,dist};}).sort((a,b)=>(b.ok-a.ok)||((a.dist??1e9)-(b.dist??1e9))||String(a.w.name).localeCompare(String(b.w.name),'vi'));
+  const options=ranked.map((x,i)=>`<option value="${x.w.id}" ${i===0&&x.ok?'selected':''}>${x.ok?'✓ ':'⚠ '}${esc(x.w.name)}${x.dist!=null?` · ~${x.dist.toLocaleString('vi-VN',{maximumFractionDigits:1})} km`:''}${!x.ok?' · thiếu hàng':''}</option>`).join('');
   Modal.open({title:'Xuất kho bán hàng',sub:`${o.id} · ${esc(Q.customerName(o.customerId))}`,size:'md',body:`
-    <div class="note-box" style="margin-bottom:12px">Phiếu này chỉ xuất <b>Kho thành phẩm</b>, chọn lô <b>đạt QC và còn hạn</b> theo FEFO. Khi hoàn tất mới trừ tồn.</div>
-    <div class="field"><label>Kho thành phẩm xuất <b>*</b></label><select class="inp" id="crmSalesWarehouse"><option value="">-- Chọn kho thành phẩm --</option>${whs.map(w=>`<option value="${w.id}">${esc(w.name)}</option>`).join('')}</select></div>
+    <div class="note-box" style="margin-bottom:12px">Hệ thống <b>gợi ý kho thành phẩm còn đủ hàng và gần điểm giao hơn</b> nếu cả Kho và Đơn hàng đã có tọa độ. Người dùng vẫn là người xác nhận kho xuất thực tế.</div>
+    <div class="field"><label>Kho thành phẩm xuất <b>*</b></label><select class="inp" id="crmSalesWarehouse"><option value="">-- Chọn kho thành phẩm --</option>${options}</select><div class="cell-sub">✓ đủ toàn bộ đơn · ⚠ thiếu ít nhất một thành phẩm</div></div>
     ${tableShell([{t:'Thành phẩm'},{t:'SL cần',cls:'right'},{t:'Tồn tất cả kho TP',cls:'right'}],stock.lines.map(x=>`<tr><td>${esc(x.name)}</td><td class="right num">${fmtN(x.need)}</td><td class="right num">${fmtN(x.available)}</td></tr>`))}
     <div class="field"><label>Ghi chú xuất hàng</label><textarea class="inp" id="crmSalesIssueNote" rows="2" placeholder="Xuất bán theo đơn ${esc(o.id)}"></textarea></div>`,
     foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="crm-order-issue-confirm" data-id="${o.id}"><i class="fa-solid fa-arrow-up-from-bracket"></i>Xác nhận xuất kho</button>`});

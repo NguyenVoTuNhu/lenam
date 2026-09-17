@@ -175,7 +175,8 @@ const Auth = {
       'crm-order-approve':'SALES_APPROVE','crm-order-reject':'SALES_APPROVE','sales-production-request':'SALES_ORDER_OPERATE','sales-production-request-approve':'SALES_APPROVE',
       'crm-order-issue':'INVENTORY_OPERATE','crm-order-issue-confirm':'INVENTORY_OPERATE','inv-sales-issue-confirm':'INVENTORY_OPERATE',
       'order-status-save':'SALES_ORDER_OPERATE',
-      'new-user':'ADMIN_USER_MANAGE','user-toggle':'ADMIN_USER_MANAGE','user-role':'ADMIN_USER_MANAGE','user-role-save':'ADMIN_USER_MANAGE'
+      'new-user':'ADMIN_USER_MANAGE','user-toggle':'ADMIN_USER_MANAGE','user-role':'ADMIN_USER_MANAGE','user-role-save':'ADMIN_USER_MANAGE',
+      'new-employee':'HR_OPERATE','employee-edit':'HR_OPERATE','employee-save':'HR_OPERATE','employee-toggle-active':'HR_OPERATE','employee-import':'HR_OPERATE'
     };
     return map[action] || null;
   }
@@ -530,6 +531,7 @@ const NAV = [
         { id: 'transfers', label: 'Chuyển kho' },
         { id: 'stocktake', label: 'Kiểm kê' },
         { id: 'inventory', label: 'Tồn kho' },
+        { id: 'locations', label: 'Quản lý kho' },
         { id: 'batches', label: 'Lô và hạn sử dụng' },
         { id: 'defects', label: 'Hàng lỗi & hàng trả về' },
         { id: 'production_plan', label: 'Kế hoạch sản xuất & gia công' },
@@ -597,10 +599,6 @@ const NAV = [
         { id: 'costing', label: 'Giá thành' },
         { id: 'fixed_assets', label: 'Tài sản cố định' },
         { id: 'tax', label: 'Thuế' },
-        { id: 'budget', label: 'Ngân sách' },
-        { id: 'pnl', label: 'P&L' },
-        { id: 'balance_sheet', label: 'Balance Sheet' },
-        { id: 'cashflow', label: 'Cashflow' },
         { id: 'reports', label: 'Báo cáo tài chính' }
       ]
     },
@@ -610,14 +608,12 @@ const NAV = [
       icon: 'fa-users',
       children: [
         { id: 'dashboard', label: 'Tổng quan nhân sự' },
-        { id: 'profile', label: 'Hồ sơ nhân sự' },
         { id: 'attendance', label: 'Chấm công' },
         { id: 'shifts', label: 'Phân ca' },
         { id: 'kpi', label: 'KPI' },
         { id: 'evaluations', label: 'Đánh giá' },
         { id: 'payroll', label: 'Tính lương' },
-        { id: 'labour_cost', label: 'Chi phí nhân công' },
-        { id: 'reports', label: 'Báo cáo nhân sự' }
+        { id: 'labour_cost', label: 'Chi phí nhân công' }
       ]
     },
     {
@@ -671,6 +667,7 @@ const NAV = [
         { id: 'deliveries', label: 'Đơn giao hàng' },
         { id: 'maintenance', label: 'Bảo trì xe' },
         { id: 'fleet', label: 'Danh sách xe' },
+        { id: 'vehicle-types', label: 'Danh mục xe' },
         { id: 'gps', label: 'GPS / Theo dõi xe' },
         { id: 'drivers', label: 'Danh sách tài xế' },
         { id: 'schedule', label: 'Lịch giao hàng' }
@@ -710,17 +707,12 @@ const NAV = [
       label: 'Quản trị doanh nghiệp — BI',
       icon: 'fa-chart-line',
       children: [
-        { id: 'dashboard', label: 'Tổng quan' },
         { id: 'finance', label: 'Tài chính' },
         { id: 'warehouse', label: 'Kho' },
         { id: 'production', label: 'Sản xuất' },
         { id: 'sales', label: 'Kinh doanh' },
         { id: 'restaurant', label: 'Nhà hàng' },
-        { id: 'hr', label: 'Nhân sự' },
-        { id: 'purchases', label: 'Mua hàng' },
-        { id: 'quality', label: 'Chất lượng' },
-        { id: 'logistics', label: 'Logistics' },
-        { id: 'advanced_bi', label: 'Phân tích chuyên sâu' }
+        { id: 'hr', label: 'Nhân sự' }
       ]
     }
   ]},

@@ -20,6 +20,7 @@ const KIO_CONFIG = Object.freeze({
   }),
 
   inventoryTables: Object.freeze({
+    warehouseSites: 'lenam_warehouse_sites',
     warehouses: 'lenam_warehouses',
     warehouseLocations: 'lenam_warehouse_locations',
     inventoryLots: 'lenam_inventory_lots',
@@ -53,6 +54,7 @@ const KIO_CONFIG = Object.freeze({
 
   // LOGISTICS & FLEET — persistence thật trên KIO; localStorage chỉ là cache.
   logisticsTables: Object.freeze({
+    vehicleTypes: 'lenam_logistics_vehicle_types',
     vehicles: 'lenam_logistics_vehicles',
     drivers: 'lenam_logistics_drivers',
     deliveries: 'lenam_logistics_deliveries',
