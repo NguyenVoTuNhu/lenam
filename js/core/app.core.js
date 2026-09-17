@@ -682,7 +682,6 @@ const NAV = [
         { id: 'versions', label: 'Phiên bản công thức' },
         { id: 'trials', label: 'Thử nghiệm' },
         { id: 'costs', label: 'Chi phí nghiên cứu' },
-        { id: 'npd', label: 'Phát triển sản phẩm mới' },
         { id: 'approvals', label: 'Quy trình duyệt' },
         { id: 'reports', label: 'Báo cáo R&D' }
       ]
