@@ -432,7 +432,7 @@ function deleteCatalog(list, name) {
 //           </select></div>
 //       </div>
 //       <div class="field"><label>Đơn giá</label>
-//         <input class="inp num right" type="number" min="0" step="1000" id="opRate" value="${n?.rate || 0}" /></div>
+//         <input class="inp num right" type="number" min="0" step="1000" id="opRate" data-money="1" value="${n?.rate || 0}" /></div>
 //       <div style="font-size:12.3px;color:var(--text-3);background:var(--surface-2);border-radius:var(--r);padding:10px 12px;line-height:1.7">
 //         <i class="fa-solid fa-circle-info" style="color:var(--primary)"></i>
 //         <b>Theo lần</b>: đơn giá × số lần khai × số cấu kiện × số lượng sản phẩm.
@@ -527,7 +527,7 @@ function deleteOperation(key) {
 //       </div>
 
 //       <div class="field ${basis === 'thickness' ? 'hidden' : ''}" id="svRateBox"><label>Đơn giá</label>
-//         <input class="inp num right" type="number" min="0" step="500" id="svRate" value="${s?.rate || 0}" /></div>
+//         <input class="inp num right" type="number" min="0" step="500" id="svRate" data-money="1" value="${s?.rate || 0}" /></div>
 
 //       <div id="svTierBox" class="${basis === 'thickness' ? '' : 'hidden'}">
 //         <div class="form-sec-title"><i class="fa-solid fa-layer-group"></i>Bậc giá theo chiều dày

@@ -15,6 +15,15 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
 
 const fmtN     = (n) => (Math.round(Number(n) || 0)).toLocaleString('vi-VN');
 const fmtVND   = (n) => fmtN(n) + 'đ';
+// Tiền trong form: hiển thị dấu chấm phân cách hàng nghìn nhưng vẫn parse về Number khi lưu.
+const parseMoney = (v) => {
+  const raw = String(v ?? '').trim().replace(/\s/g, '').replace(/\./g, '').replace(/,/g, '').replace(/[^0-9-]/g, '');
+  return Number(raw) || 0;
+};
+const fmtMoneyInput = (v) => {
+  const n = parseMoney(v);
+  return n ? Math.round(n).toLocaleString('vi-VN') : '';
+};
 const fmtDec   = (n, d = 1) => (Number(n) || 0).toLocaleString('vi-VN', { maximumFractionDigits: d });
 const fmtDate  = (s) => (s ? String(s).slice(0, 10).split('-').reverse().join('/') : '—');
 const fmtMonth = (s) => (s ? 'Tháng ' + Number(s.slice(5, 7)) + '/' + s.slice(0, 4) : '—');
@@ -171,7 +180,7 @@ const Auth = {
       'iqc-save-inspection':'QC_INSPECT','iqc-open-inspection':'QC_VIEW','po-qc':'QC_INSPECT',
       'new-po':'PRODUCTION_OPERATE','po-edit':'PRODUCTION_OPERATE','po-edit-save':'PRODUCTION_OPERATE','po-delete':'PRODUCTION_OPERATE','po-approve':'PRODUCTION_OPERATE','po-advance':'PRODUCTION_OPERATE','stage-start':'PRODUCTION_OPERATE','stage-update':'PRODUCTION_OPERATE','stage-save':'PRODUCTION_OPERATE',
       'edit-customer':'CRM_OPERATE','save-customer':'CRM_OPERATE','customer-care':'CRM_OPERATE','save-customer-care':'CRM_OPERATE','delete-customer':'CRM_DELETE_CUSTOMER',
-      'new-order':'SALES_ORDER_OPERATE','new-order-for':'SALES_ORDER_OPERATE','crm-order-save':'SALES_ORDER_OPERATE','crm-order-edit':'SALES_ORDER_OPERATE','crm-order-edit-save':'SALES_ORDER_OPERATE','crm-order-delete':'SALES_ORDER_OPERATE',
+      'new-order':'SALES_ORDER_OPERATE','new-order-for':'SALES_ORDER_OPERATE','crm-order-save':'SALES_ORDER_OPERATE','crm-order-edit':'SALES_ORDER_OPERATE','crm-order-edit-save':'SALES_ORDER_OPERATE','crm-order-delete':'SALES_ORDER_OPERATE','crm-customer-pay-modal':'CRM_OPERATE','crm-customer-pay-save':'CRM_OPERATE',
       'crm-order-approve':'SALES_APPROVE','crm-order-reject':'SALES_APPROVE','sales-production-request':'SALES_ORDER_OPERATE','sales-production-request-approve':'SALES_APPROVE',
       'crm-order-issue':'INVENTORY_OPERATE','crm-order-issue-confirm':'INVENTORY_OPERATE','inv-sales-issue-confirm':'INVENTORY_OPERATE',
       'order-status-save':'SALES_ORDER_OPERATE',
@@ -513,7 +522,7 @@ const NAV = [
         { id: 'pr', label: 'Đề nghị mua hàng' },
         { id: 'quotes', label: 'Báo giá nhà cung cấp' },
         { id: 'po', label: 'Đơn đặt hàng' },
-        { id: 'debts', label: 'Công nợ nhà cung cấp' },
+        { id: 'debts', label: 'Công nợ NCC' },
         { id: 'price_history', label: 'Lịch sử giá mua' },
         { id: 'suppliers', label: 'Nhà cung cấp' }
       ],
@@ -535,6 +544,7 @@ const NAV = [
         { id: 'batches', label: 'Lô và hạn sử dụng' },
         { id: 'defects', label: 'Hàng lỗi & hàng trả về' },
         { id: 'production_plan', label: 'Kế hoạch sản xuất & gia công' },
+        { id: 'store_replenishment', label: 'Duyệt bổ sung cửa hàng' },
         // Tạm ẩn: Cảnh báo kho, Barcode / QR Code
       ],
       count: () => (typeof Q !== 'undefined' && Q.nearExpiryLots) ? Q.nearExpiryLots().length + Q.expiredLots().length : 0,
@@ -580,6 +590,8 @@ const NAV = [
         { id: 'recipe', label: 'Recipe / BOM món' },
         { id: 'orders', label: 'Đơn hàng' },
         { id: 'branches', label: 'Chi nhánh' },
+        { id: 'store_stock', label: 'Tồn kho cửa hàng' },
+        { id: 'replenishment', label: 'Yêu cầu bổ sung' },
         { id: 'issue', label: 'Xuất kho nguyên liệu' },
         { id: 'revenue', label: 'Doanh thu' },
         { id: 'reports', label: 'Báo cáo cửa hàng' }
@@ -593,7 +605,7 @@ const NAV = [
         { id: 'dashboard', label: 'Tổng quan tài chính' },
         { id: 'general_ledger', label: 'Hạch toán' },
         { id: 'ar', label: 'Công nợ phải thu' },
-        { id: 'ap', label: 'Công nợ phải trả' },
+        { id: 'ap', label: 'Công nợ phải chi' },
         { id: 'cashflow_inout', label: 'Thu – Chi' },
         { id: 'banking', label: 'Ngân hàng' },
         { id: 'costing', label: 'Giá thành' },
@@ -628,10 +640,7 @@ const NAV = [
         { id: 'subcontracting_qc', label: 'Kiểm tra gia công' },
         { id: 'coa', label: 'Hồ sơ kiểm nghiệm' },
         { id: 'capa', label: 'CAPA' },
-        { id: 'recall', label: 'Thu hồi sản phẩm' },
-        { id: 'traceability', label: 'Truy xuất nguồn gốc' },
-        { id: 'defects', label: 'Quản lý lỗi' },
-        { id: 'reports', label: 'Báo cáo chất lượng' }
+        { id: 'recall', label: 'Thu hồi sản phẩm' }
       ]
     },
     {
@@ -655,7 +664,8 @@ const NAV = [
         { id: 'dashboard', label: 'Tổng quan' },
         { id: 'customers', label: 'Khách hàng' },
         { id: 'transactions', label: 'Lịch sử giao dịch' },
-        { id: 'orders', label: 'Đơn hàng bán' }
+        { id: 'orders', label: 'Đơn hàng bán' },
+        { id: 'debts', label: 'Công nợ khách hàng' },
       ]
     },
     {

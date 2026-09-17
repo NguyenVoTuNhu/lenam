@@ -113,7 +113,7 @@ const tabs =
         const supplierText = itemSupplierIds.map((supplierId) => Q.supplierName(supplierId)).join(' ');
         if (q && ![p.id, supplierText, Q.employeeName(p.requesterId), p.reason].some((v) => String(v).toLowerCase().includes(q))) return false;
       return true;
-    }).sort((a, b) => b.id.localeCompare(a.id));
+    }).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.id || '').localeCompare(String(a.id || '')));
     const pg = paged(list, 'purchases');
     const suppliers = DB.suppliers.map((s) => [s.id, s.name]);
     const cnt = (s) => DB.purchases.filter((p) => p.status === s).length;
@@ -428,7 +428,7 @@ const tabs =
             const isSelected = selectedSupplierId === supplierId;
             return `<div class="quote-supplier-line" style="display:grid;grid-template-columns:minmax(220px,1fr) 150px auto;align-items:center;gap:10px;padding:9px 11px;margin:5px 0;border:1px solid ${quotationLocked || isLowest ? 'var(--green)' : 'var(--border)'};border-radius:var(--r);background:${quotationLocked || isLowest ? 'var(--green-soft)' : 'var(--surface)'}">
               <label style="display:flex;align-items:center;gap:7px;min-width:0"><input type="radio" class="quote-supplier-choice" name="quoteSupplier_${pr.id}_${item.materialId}" data-pr-id="${pr.id}" data-material-id="${item.materialId}" data-supplier-id="${supplierId}" ${isSelected ? 'checked' : ''} ${quotationLocked ? 'disabled' : ''}/><span class="strong">${esc(Q.supplierName(supplierId))}</span></label>
-              <input class="inp right num quote-supplier-price" data-pr-id="${pr.id}" data-material-id="${item.materialId}" data-supplier-id="${supplierId}" type="number" min="1" value="${price || ''}" placeholder="Nhập giá" ${quotationLocked ? 'disabled' : ''} style="width:150px;${quotationLocked || isLowest ? 'border-color:var(--green);font-weight:700;' : ''}" />
+              <input class="inp right num quote-supplier-price" data-money="1" data-pr-id="${pr.id}" data-material-id="${item.materialId}" data-supplier-id="${supplierId}" type="number" min="1" value="${price || ''}" placeholder="Nhập giá" ${quotationLocked ? 'disabled' : ''} style="width:150px;${quotationLocked || isLowest ? 'border-color:var(--green);font-weight:700;' : ''}" />
               ${quotationLocked ? '<span class="badge green"><i class="fa-solid fa-lock"></i> Đã xác nhận</span>' : (isLowest ? '<span class="badge green"><i class="fa-solid fa-arrow-down"></i> Giá tốt nhất</span>' : '<span></span>')}
             </div>`;
           }).join('') : '<span class="muted">Chưa có NCC được chọn trong đề nghị</span>'}</td>
@@ -474,16 +474,33 @@ const tabs =
   /* -------------------------------------------------- TAB 3: PO (ĐƠN ĐẶT HÀNG) */
   const renderPoTab = () => {
     const list = DB.purchaseOrders.filter((po) => {
+      const returnedQty = (DB.goodsIssues || [])
+        .filter(x => x.type === 'RETURN_OUT' && (x.refDoc === po.id || x.poId === po.id))
+        .reduce((sum, issue) => sum + (issue.items || []).reduce((n, item) => n + Number(item.qty || 0), 0), 0);
       if (f.status === '__PO_WAITING__' && !['DRAFT','PENDING_APPROVAL','APPROVED','SENT_TO_SUPPLIER'].includes(po.status)) return false;
       else if (f.status === '__PO_INBOUND__' && !['SHIPPING','PARTIAL_RECEIVED'].includes(po.status)) return false;
-      else if (f.status && !['__PO_WAITING__','__PO_INBOUND__'].includes(f.status) && po.status !== f.status) return false;
+      else if (f.status === '__RECEIVED_RETURNED__' && !(po.status === 'RECEIVED' && returnedQty > 0)) return false;
+      else if (f.status && !['__PO_WAITING__','__PO_INBOUND__','__RECEIVED_RETURNED__'].includes(f.status) && po.status !== f.status) return false;
       if (f.supplier && po.supplierId !== f.supplier) return false;
       if (!inDateRange(po.date, f.poDateFrom, f.poDateTo)) return false;
       if (q && ![po.id, po.prId, Q.supplierName(po.supplierId), po.note].some((v) => String(v).toLowerCase().includes(q))) return false;
       return true;
-    }).sort((a, b) => b.id.localeCompare(a.id));
+    }).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.id || '').localeCompare(String(a.id || '')));
     const pg = paged(list, 'purchases');
     const suppliers = DB.suppliers.map((s) => [s.id, s.name]);
+
+    const poReturnQty = (po) => (DB.goodsIssues || [])
+      .filter(x => x.type === 'RETURN_OUT' && (x.refDoc === po.id || x.poId === po.id))
+      .reduce((sum, issue) => sum + (issue.items || []).reduce((n, item) => n + Number(item.qty || 0), 0), 0);
+    const poReceivedQty = (po) => (po.items || []).reduce((sum, item) => sum + Number(item.receivedQty || 0), 0);
+    const poStatusHtml = (po) => {
+      const returned = poReturnQty(po);
+      const received = poReceivedQty(po);
+      if (po.status === 'RECEIVED' && returned > 0 && returned < Math.max(received, 0.000001)) {
+        return '<span class="badge orange">Đã nhận đủ, trả hàng 1 phần</span>';
+      }
+      return badge(po.status);
+    };
 
     const rows = pg.items.map((po) => `
       <tr class="clickable" data-act="open-po" data-id="${po.id}">
@@ -493,7 +510,7 @@ const tabs =
         <td class="num hide-sm">${fmtDate(po.expectedDate)}</td>
         <td class="right strong num">${fmtVND(Number(po.total || 0))}</td>
         <td class="right num hide-sm" style="color:var(--green)">${fmtVND(Number(po.paid || 0))}</td>
-        <td>${badge(po.status)}</td>
+        <td>${poStatusHtml(po)}</td>
         <td>${rowActions([
           { act: 'open-po', data: `data-id="${po.id}"`, icon: 'fa-eye', title: 'Xem chi tiết PO' },
           ...(['DRAFT', 'APPROVED'].includes(po.status) ? [{ act: 'po-edit', data: `data-id="${po.id}"`, icon: 'fa-pen-to-square', title: 'Sửa và chuyển lại thành đề nghị mua' }] : []),
@@ -525,7 +542,7 @@ const tabs =
     <div class="card">
       <div class="toolbar">
         ${searchBox('purchases', 'Tìm mã đơn hàng, mã đề nghị, nhà cung cấp…')}
-        ${selectFilter('purchases', 'status', [['__PO_WAITING__','Chờ / đã gửi NCC'],['__PO_INBOUND__','Đang giao / nhận một phần'],['DRAFT','Nháp'],['PENDING_APPROVAL','Chờ duyệt'],['APPROVED','Đã duyệt'],['SENT_TO_SUPPLIER','Đã gửi NCC'],['SHIPPING','Đang giao hàng'],['PARTIAL_RECEIVED','Nhận một phần'],['RECEIVED','Đã nhận đủ'],['CANCELLED','Đã hủy']], 'Tất cả trạng thái đơn hàng')}
+        ${selectFilter('purchases', 'status', [['__PO_WAITING__','Chờ / đã gửi NCC'],['__PO_INBOUND__','Đang giao / nhận một phần'],['DRAFT','Nháp'],['PENDING_APPROVAL','Chờ duyệt'],['APPROVED','Đã duyệt'],['SENT_TO_SUPPLIER','Đã gửi NCC'],['SHIPPING','Đang giao hàng'],['PARTIAL_RECEIVED','Nhận một phần'],['RECEIVED','Đã nhận đủ'],['__RECEIVED_RETURNED__','Đã nhận đủ, trả hàng 1 phần'],['CANCELLED','Đã hủy']], 'Tất cả trạng thái đơn hàng')}
         ${selectFilter('purchases', 'supplier', suppliers, 'Tất cả nhà cung cấp')}
         ${dateRangeInputs('poDateFrom', 'poDateTo')}
         ${(f.q || f.status || f.supplier || f.poDateFrom || f.poDateTo) ? '<button class="btn btn-sm" data-act="clear-filter" data-key="purchases"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>' : ''}
@@ -571,42 +588,97 @@ const tabs =
 
   /* -------------------------------------------------- TAB 5: CÔNG NỢ NCC */
   const renderDebtsTab = () => {
-    const pos = (DB.purchaseOrders || []).filter((po) => inDateRange(po.date, f.debtDateFrom, f.debtDateTo));
-    const totalPoVal = pos.filter(p=>p.status!=='CANCELLED').reduce((s, p) => s + Number(p.total || 0), 0);
-    const totalPaidVal = pos.filter(p=>p.status!=='CANCELLED').reduce((s, p) => s + Number(p.paid || 0), 0);
-    const remainingDebt = totalPoVal - totalPaidVal;
+    const debtQ = String(f.debtQ || '').trim().toLowerCase();
+    const debtSupplier = String(f.debtSupplier || '');
+    const debtStatus = String(f.debtStatus || '');
+    const suppliers = (DB.suppliers || []).map(s => [s.id, s.name]);
+    const debtStatuses = [['UNPAID','Chưa thanh toán'],['PARTIALLY_PAID','Thanh toán một phần'],['PAID','Đã thanh toán'],['REFUND_DUE','NCC phải hoàn lại']];
+
+    const pos = (DB.purchaseOrders || []).filter((po) => {
+      if (po.status === 'CANCELLED') return false;
+      if (!inDateRange(po.date, f.debtDateFrom, f.debtDateTo)) return false;
+      if (debtSupplier && po.supplierId !== debtSupplier) return false;
+      const paid = purchasePaidAmount(po), remain = purchasePayableRemaining(po), refund = purchaseSupplierRefundDue(po);
+      const payStatus = refund > 0 ? 'REFUND_DUE' : remain <= 0 ? 'PAID' : paid > 0 ? 'PARTIALLY_PAID' : 'UNPAID';
+      if (debtStatus && payStatus !== debtStatus) return false;
+      if (debtQ && ![po.id, po.prId, Q.supplierName(po.supplierId), po.note].some(v => String(v || '').toLowerCase().includes(debtQ))) return false;
+      return true;
+    }).sort((a,b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.id || '').localeCompare(String(a.id || '')));
+
+    const totalPoVal = pos.reduce((s, p) => s + Number(p.total || 0), 0);
+    const totalPaidVal = pos.reduce((s, p) => s + purchasePaidAmount(p), 0);
+    const remainingDebt = pos.reduce((s,p)=>s+purchasePayableRemaining(p),0);
+    const supplierRefundTotal = pos.reduce((s,p)=>s+purchaseSupplierRefundDue(p),0);
 
     const rows = pos.map((p) => {
-      const remain = Number(p.total || 0) - Number(p.paid || 0);
-      const payStatus = remain <= 0 ? 'PAID' : p.paid > 0 ? 'PARTIALLY_PAID' : 'UNPAID';
+      const paid = purchasePaidAmount(p), remain = purchasePayableRemaining(p), refund = purchaseSupplierRefundDue(p);
+      const payStatus = refund > 0 ? 'REFUND_DUE' : remain <= 0 ? 'PAID' : paid > 0 ? 'PARTIALLY_PAID' : 'UNPAID';
+      const statusHtml = refund > 0 ? '<span class="badge orange">NCC phải hoàn lại</span>' : badge(payStatus);
       return `<tr>
         <td><span class="code">${p.id}</span></td>
         <td><div class="strong">${esc(Q.supplierName(p.supplierId))}</div></td>
         <td class="num hide-sm">${fmtDate(p.date)}</td>
         <td class="right num strong">${fmtVND(p.total)}</td>
-        <td class="right num" style="color:var(--green)">${fmtVND(p.paid)}</td>
+        <td class="right num" style="color:var(--green)">${fmtVND(paid)}</td>
         <td class="right num strong" style="color:${remain > 0 ? 'var(--red)' : 'var(--text-3)'}">${fmtVND(remain)}</td>
-        <td>${badge(payStatus)}</td>
-        <td class="right">${remain > 0 ? `<button class="btn btn-xs btn-primary" data-act="supplier-pay-modal" data-id="${p.id}"><i class="fa-solid fa-hand-holding-dollar"></i>Thanh toán</button>` : '<span class="muted">Tất toán</span>'}</td>
+        <td class="right num strong" style="color:${refund > 0 ? 'var(--orange)' : 'var(--text-3)'}">${fmtVND(refund)}</td>
+        <td>${statusHtml}</td>
+        <td class="right">${remain > 0 ? `<button class="btn btn-xs btn-primary" data-act="supplier-pay-modal" data-id="${p.id}"><i class="fa-solid fa-hand-holding-dollar"></i>Thanh toán</button>` : (refund>0?`<button class="btn btn-xs btn-primary" data-act="supplier-refund-modal" data-id="${p.id}"><i class="fa-solid fa-rotate-left"></i>Ghi nhận hoàn tiền</button>`:'<span class="muted">Tất toán</span>')}</td>
       </tr>`;
     });
 
+    const paymentList = (DB.supplierPayments || []).filter(p => {
+      if (!inDateRange(p.date, f.debtDateFrom, f.debtDateTo)) return false;
+      if (debtSupplier && p.supplierId !== debtSupplier) return false;
+      if (debtQ && ![p.id, p.poId, Q.supplierName(p.supplierId), p.payerName, p.bankName, p.reference, p.bankRef].some(v => String(v || '').toLowerCase().includes(debtQ))) return false;
+      return true;
+    }).sort((a,b) => String(b.createdAt || b.date || '').localeCompare(String(a.createdAt || a.date || '')) || String(b.id || '').localeCompare(String(a.id || '')));
+
+    const paymentRows = paymentList.slice(0,100).map(p => `<tr>
+      <td><span class="code">${esc(p.id)}</span></td>
+      <td class="num">${fmtDate(p.date)}</td>
+      <td><span class="code">${esc(p.poId || '—')}</span></td>
+      <td>${esc(Q.supplierName(p.supplierId))}</td>
+      <td class="right strong num">${fmtVND(Number(p.amount || 0))}</td>
+      <td>${esc(p.method || '—')}</td>
+      <td>${esc(p.bankName || '—')}</td>
+      <td>${esc(p.payerName || p.paidByName || '—')}</td>
+      <td class="muted">${esc(p.reference || p.bankRef || '')}</td>
+    </tr>`);
+
+    const refundList=(DB.supplierRefunds||[]).filter(r=>{ if(!inDateRange(r.date,f.debtDateFrom,f.debtDateTo))return false; if(debtSupplier&&r.supplierId!==debtSupplier)return false; if(debtQ&&![r.id,r.poId,Q.supplierName(r.supplierId),r.receivedByName,r.bankName,r.reference].some(v=>String(v||'').toLowerCase().includes(debtQ)))return false; return true; }).sort((a,b)=>String(b.createdAt||b.date||'').localeCompare(String(a.createdAt||a.date||'')));
+    const refundRows=refundList.slice(0,100).map(r=>`<tr><td><span class="code">${esc(r.id)}</span></td><td>${fmtDate(r.date)}</td><td><span class="code">${esc(r.poId||'—')}</span></td><td>${esc(Q.supplierName(r.supplierId))}</td><td class="right strong num" style="color:var(--green)">${fmtVND(r.amount)}</td><td>${esc(r.method==='BANK_TRANSFER'?'Chuyển khoản ngân hàng':r.method==='CASH'?'Tiền mặt':r.method||'—')}</td><td>${esc(r.bankName||'—')}</td><td>${esc(r.receivedByName||r.createdByName||'—')}</td><td>${esc(r.reference||'')}</td></tr>`);
+
+    const hasDebtFilter = debtQ || debtSupplier || debtStatus || f.debtDateFrom || f.debtDateTo;
     return `
     <div class="grid g-auto-sm" style="margin-bottom:14px">
       ${mkpi('Tổng giá trị mua PO', fmtShort(totalPoVal), 'fa-sack-dollar', 'blue')}
       ${mkpi('Đã thanh toán', fmtShort(totalPaidVal), 'fa-circle-check', 'green')}
       ${mkpi('Công nợ còn lại', fmtShort(remainingDebt), 'fa-file-invoice-dollar', 'red')}
-      ${mkpi('Số đợt thanh toán', (DB.supplierPayments || []).filter(p => inDateRange(p.date, f.debtDateFrom, f.debtDateTo)).length, 'fa-receipt', 'indigo')}
+      ${mkpi('NCC phải hoàn lại', fmtShort(supplierRefundTotal), 'fa-rotate-left', 'orange')}
+      ${mkpi('Số đợt thanh toán', paymentList.length, 'fa-receipt', 'indigo')}
     </div>
 
-    <div class="card">
-      <div class="card-head"><div><h3>Sổ theo dõi công nợ nhà cung cấp theo PO</h3><p>Công nợ còn lại = Tổng giá trị PO − Đã thanh toán</p></div></div>
-      <div class="toolbar">${dateRangeInputs('debtDateFrom', 'debtDateTo')}${(f.debtDateFrom || f.debtDateTo) ? '<button class="btn btn-sm" data-act="purchase-clear-date-range" data-fields="debtDateFrom,debtDateTo"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>' : ''}<span class="spacer"></span><span class="chip">${fmtN(pos.length)} PO</span></div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-head"><div><h3>Sổ theo dõi công nợ nhà cung cấp theo PO</h3><p>Mặc định hiển thị PO mới nhất trước. Công nợ phải trả được tính sau khi trừ giá trị hàng trả; nếu đã trả dư, hệ thống chuyển phần chênh lệch thành NCC phải hoàn lại.</p></div></div>
+      <div class="toolbar">
+        <div class="search-wrap"><i class="fa-solid fa-magnifying-glass"></i><input class="inp" data-f="purchases.debtQ" value="${esc(f.debtQ || '')}" placeholder="Tìm mã PO, PR, nhà cung cấp…" /></div>
+        ${selectFilter('purchases','debtSupplier',suppliers,'Tất cả nhà cung cấp')}
+        ${selectFilter('purchases','debtStatus',debtStatuses,'Tất cả trạng thái công nợ')}
+        ${dateRangeInputs('debtDateFrom', 'debtDateTo')}
+        ${hasDebtFilter ? '<button class="btn btn-sm" data-act="purchase-clear-debt-filters"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>' : ''}
+        <span class="spacer"></span><span class="chip">${fmtN(pos.length)} PO</span>
+      </div>
       ${tableShell(
         [{ t: 'Mã PO', w: '120px' }, { t: 'Nhà cung cấp' }, { t: 'Ngày PO', cls: 'hide-sm' },
-         { t: 'Tổng PO', cls: 'right' }, { t: 'Đã thanh toán', cls: 'right' }, { t: 'Công nợ còn lại', cls: 'right' }, { t: 'Trạng thái', w: '130px' }, { t: 'Thao tác', cls: 'right' }],
-        rows, { emptyTitle: 'Không có dữ liệu công nợ' })}
-    </div>`;
+         { t: 'Tổng PO', cls: 'right' }, { t: 'Đã thanh toán', cls: 'right' }, { t: 'Còn phải trả', cls: 'right' }, { t: 'NCC phải hoàn lại', cls: 'right' }, { t: 'Trạng thái', w: '150px' }, { t: 'Thao tác', cls: 'right' }],
+        rows, { emptyTitle: 'Không có dữ liệu công nợ phù hợp' })}
+    </div>
+
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-head"><div><h3>Lịch sử thanh toán nhà cung cấp</h3><p>Mới nhất hiển thị trước; mỗi lần thanh toán được lưu thành một giao dịch riêng.</p></div><span class="chip">${fmtN(paymentList.length)} giao dịch</span></div>
+      ${tableShell([{t:'Mã chi'},{t:'Ngày'},{t:'Mã PO'},{t:'Nhà cung cấp'},{t:'Số tiền',cls:'right'},{t:'Phương thức'},{t:'Ngân hàng'},{t:'Người thực hiện'},{t:'Tham chiếu'}], paymentRows, {emptyTitle:'Chưa có lịch sử thanh toán phù hợp'})}
+    </div><div class="card"><div class="card-head"><div><h3>Lịch sử NCC hoàn tiền</h3><p>Các khoản doanh nghiệp nhận lại từ NCC sau khi trả hàng hoặc thanh toán dư.</p></div><span class="chip">${fmtN(refundList.length)} giao dịch</span></div>${tableShell([{t:'Mã nhận hoàn'},{t:'Ngày'},{t:'Mã PO'},{t:'Nhà cung cấp'},{t:'Số tiền',cls:'right'},{t:'Phương thức'},{t:'Ngân hàng nhận'},{t:'Người ghi nhận'},{t:'Tham chiếu'}],refundRows,{emptyTitle:'Chưa có lịch sử NCC hoàn tiền'})}</div>`;
   };
 
   /* -------------------------------------------------- TAB 6: LỊCH SỬ GIÁ MUA */
@@ -1776,7 +1848,7 @@ function renderPRMaterialItem(m) {
             </label>
 
             <input
-              class="inp right num pr-expected-price"
+              class="inp right num pr-expected-price" data-money="1"
               data-id="${m.id}"
               type="number"
               min="0"
@@ -1971,7 +2043,7 @@ function openPRRejectModal(prId) {
 //             ${pr.items.map((it) => `<tr>
 //               <td><div class="strong">${esc(it.name)}</div><div class="cell-sub">${it.materialId}</div></td>
 //               <td class="right num">${fmtN(it.qty)} ${esc(it.unit)}</td>
-//               <td class="right"><input class="inp right num sq-price" data-id="${it.materialId}" data-qty="${it.qty}" type="number" value="" style="width:130px" /></td>
+//               <td class="right"><input class="inp right num sq-price" data-money="1" data-id="${it.materialId}" data-qty="${it.qty}" type="number" value="" style="width:130px" /></td>
 //             </tr>`).join('')}
 //           </tbody>
 //         </table>
@@ -2124,7 +2196,7 @@ function openQuotationModal(prId) {
                 <td class="right">
 
                   <input
-                    class="inp right num sq-price"
+                    class="inp right num sq-price" data-money="1"
                     data-id="${it.materialId}"
                     data-qty="${it.qty}"
                     type="number"
@@ -2206,14 +2278,55 @@ function openPOEditRequest(id) {
   Toast.info('Đang tạo đề nghị thay thế', `${po.id} · Khi lưu sẽ tạo YCM mới; ${sourcePr.id} vẫn giữ nguyên.`);
 }
 
+
+/* Giá trị hàng trả NCC theo đúng giá PO (gồm VAT của dòng/PO).
+ * Đây là khoản giảm giá trị phải trả; nếu đã thanh toán vượt giá trị mua sau trả
+ * thì phần chênh lệch trở thành khoản NCC phải hoàn lại cho doanh nghiệp. */
+function purchaseReturnGrossValue(po) {
+  if (!po) return 0;
+  const returns = (DB.goodsIssues || []).filter(x => x.type === 'RETURN_OUT' && (x.refDoc === po.id || x.poId === po.id));
+  let total = 0;
+  for (const r of returns) for (const line of (r.items || [])) {
+    const materialId = line.productId || line.materialId;
+    const item = (po.items || []).find(i => String(i.materialId) === String(materialId));
+    if (!item) continue;
+    const qty = Number(line.qty || 0);
+    const price = Number(item.price || 0);
+    const vatRate = Number(item.vatRate != null ? item.vatRate : (po.vatRate || 0));
+    total += qty * price * (1 + vatRate / 100);
+  }
+  return Math.round(total);
+}
+function purchasePaidAmount(po) {
+  const hist = (DB.supplierPayments || []).filter(p => String(p.poId) === String(po?.id)).reduce((s,p)=>s+Number(p.amount||0),0);
+  return Math.max(Number(po?.paid || 0), hist);
+}
+function purchaseAdjustedTotal(po) { return Math.max(0, Number(po?.total || 0) - purchaseReturnGrossValue(po)); }
+function purchasePayableRemaining(po) { return Math.max(0, purchaseAdjustedTotal(po) - purchasePaidAmount(po)); }
+function purchaseSupplierRefundedAmount(po) {
+  return (DB.supplierRefunds || []).filter(r => String(r.poId) === String(po?.id)).reduce((s,r)=>s+Number(r.amount||0),0);
+}
+function purchaseSupplierRefundGrossDue(po) { return Math.max(0, purchasePaidAmount(po) - purchaseAdjustedTotal(po)); }
+function purchaseSupplierRefundDue(po) { return Math.max(0, purchaseSupplierRefundGrossDue(po) - purchaseSupplierRefundedAmount(po)); }
+
 /** Modal Xem Chi tiết Đơn đặt hàng PO */
 function openPOModal(id) {
   const po = Q.purchaseOrder(id);
   if (!po) return;
   const s = Q.supplier(po.supplierId);
-  const receipts = Q.receiptsOfPo(id);
-  const payments = Q.paymentsOfPo(id);
-  const returns = (DB.goodsIssues || []).filter(x => x.type === 'RETURN_OUT' && (x.refDoc === id || x.poId === id));
+  const receipts = [...Q.receiptsOfPo(id)].sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')) || String(b.id||'').localeCompare(String(a.id||'')));
+  const payments = [...Q.paymentsOfPo(id)].sort((a,b)=>String(b.createdAt||b.date||'').localeCompare(String(a.createdAt||a.date||'')) || String(b.id||'').localeCompare(String(a.id||'')));
+  const returns = (DB.goodsIssues || []).filter(x => x.type === 'RETURN_OUT' && (x.refDoc === id || x.poId === id)).sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')) || String(b.id||'').localeCompare(String(a.id||'')));
+  const returnedQty = returns.reduce((sum,r)=>sum+(r.items||[]).reduce((n,it)=>n+Number(it.qty||0),0),0);
+  const receivedQty = (po.items||[]).reduce((sum,it)=>sum+Number(it.receivedQty||0),0);
+  const returnedValue = purchaseReturnGrossValue(po);
+  const paidValue = purchasePaidAmount(po);
+  const adjustedTotal = purchaseAdjustedTotal(po);
+  const payableRemain = purchasePayableRemaining(po);
+  const supplierRefundDue = purchaseSupplierRefundDue(po);
+  const poModalStatus = po.status === 'RECEIVED' && returnedQty > 0 && returnedQty < Math.max(receivedQty,0.000001)
+    ? '<span class="badge orange">Đã nhận đủ, trả hàng 1 phần</span>'
+    : badge(po.status);
 
   Modal.open({
     title: `Đơn đặt hàng (Purchase Order) ${po.id}`,
@@ -2221,7 +2334,7 @@ function openPOModal(id) {
     size: 'md',
     body: `
       <div style="display:flex;gap:9px;flex-wrap:wrap;margin-bottom:16px">
-        ${badge(po.status)}
+        ${poModalStatus}
         <span class="chip"><i class="fa-regular fa-calendar"></i> Ngày PO: ${fmtDate(po.date)}</span>
         <span class="chip"><i class="fa-solid fa-truck"></i> Dự kiến giao: ${fmtDate(po.expectedDate)}</span>
       </div>
@@ -2232,8 +2345,13 @@ function openPOModal(id) {
         ${infoItem('Đầu mối liên hệ', `${esc(s.contact)} · ${esc(s.phone)}`)}
         ${infoItem('Điều khoản thanh toán', esc(po.paymentTerm))}
         ${infoItem('Tổng tiền PO', `<b class="num" style="color:var(--primary);font-size:15px">${fmtVND(Number(po.total || 0))}</b>`)}
-        ${infoItem('Đã thanh toán', `<b class="num" style="color:var(--green)">${fmtVND(Number(po.paid || 0))}</b>`)}
-        ${infoItem('Công nợ còn lại', `<b class="num" style="color:var(--red)">${fmtVND(po.total - po.paid)}</b>`)}
+        ${returnedValue > 0 ? infoItem('Giá trị hàng đã trả', `<b class="num" style="color:var(--orange)">− ${fmtVND(returnedValue)}</b>`) : ''}
+        ${returnedValue > 0 ? infoItem('Giá trị mua sau trả hàng', `<b class="num">${fmtVND(adjustedTotal)}</b>`) : ''}
+        ${infoItem('Đã thanh toán', `<b class="num" style="color:var(--green)">${fmtVND(paidValue)}</b>`)}
+        ${infoItem('Còn phải trả NCC', `<b class="num" style="color:${payableRemain > 0 ? 'var(--red)' : 'var(--text-3)'}">${fmtVND(payableRemain)}</b>`)}
+        ${purchaseSupplierRefundGrossDue(po) > 0 ? infoItem('NCC phát sinh phải hoàn', `<b class="num" style="color:var(--orange);font-size:15px">${fmtVND(purchaseSupplierRefundGrossDue(po))}</b>`) : ''}
+        ${purchaseSupplierRefundedAmount(po) > 0 ? infoItem('NCC đã hoàn', `<b class="num" style="color:var(--green);font-size:15px">${fmtVND(purchaseSupplierRefundedAmount(po))}</b>`) : ''}
+        ${supplierRefundDue > 0 ? infoItem('NCC còn phải hoàn', `<b class="num" style="color:var(--orange);font-size:15px">${fmtVND(supplierRefundDue)}</b>`) : ''}
       </div>
 
       <div class="form-sec-title"><i class="fa-solid fa-boxes-stacked"></i>Danh sách vật tư đặt hàng</div>
@@ -2316,7 +2434,14 @@ function openGoodsReceiptModal(poId) {
 function openPaymentModal(poId) {
   const po = Q.purchaseOrder(poId);
   if (!po) return;
-  const remain = po.total - po.paid;
+  const paid = purchasePaidAmount(po);
+  const remain = purchasePayableRemaining(po);
+  const actorId = DB.currentUser?.userId || DB.currentUser?.id || '';
+  const actorName = (String(DB.currentUser?.username||'').toLowerCase()==='admin' || DB.currentUser?.roleId==='ROLE_ADMIN') ? 'Admin' : (DB.currentUser?.name || Q.employeeName(DB.currentUser?.id));
+  const employeePeople = (DB.employees || []).map(e => `<option value="${esc(e.id)}" ${String(e.id)===String(DB.currentUser?.id)?'selected':''}>${esc(e.id+' · '+(e.name||e.fullName||''))}</option>`).join('');
+  const hasActor = (DB.employees || []).some(e => String(e.id)===String(DB.currentUser?.id) || String(e.id)===String(actorId));
+  const people = `${hasActor?'':`<option value="${esc(actorId)}" selected>${esc(actorName)}</option>`}${employeePeople}`;
+  const banks = (DB.bankAccounts || []).map(b => `<option value="${esc(b.id)}">${esc(b.name || ((b.bankName||'Ngân hàng')+' · '+(b.accountNumber||'')))}</option>`).join('');
 
   Modal.open({
     title: 'Ghi nhận Thanh toán Công nợ NCC',
@@ -2324,15 +2449,69 @@ function openPaymentModal(poId) {
     body: `
       <div class="form-grid">
         <div class="field"><label>Số tiền thanh toán (VND) <span class="req">*</span></label>
-          <input class="inp right num" type="number" id="payAmount" min="1" max="${remain}" value="${remain}" /></div>
+          <input class="inp right num" type="text" inputmode="numeric" id="payAmount" data-money="1" value="${remain}" /></div>
+        <div class="field"><label>Ngày thanh toán</label><input class="inp" type="date" id="payDate" value="${typeof currentDateYMD==='function'?currentDateYMD():DB.today}" /></div>
         <div class="field"><label>Hình thức thanh toán</label>
-          <select class="inp" id="payMethod"><option value="Chuyển khoản">Chuyển khoản ngân hàng</option><option value="Tiền mặt">Tiền mặt</option></select></div>
+          <select class="inp" id="payMethod"><option value="BANK_TRANSFER">Chuyển khoản ngân hàng</option><option value="CASH">Tiền mặt</option></select></div>
+        <div class="field"><label>Người thực hiện</label><select class="inp" id="payPayer"><option value="">-- Chọn người thực hiện --</option>${people}</select></div>
       </div>
-      <div class="field"><label>Mã giao dịch / Số chứng từ bank</label>
-        <input class="inp" id="payRef" value="FT${Date.now().toString().slice(-8)}" /></div>
-      <div class="field"><label>Ghi chú thanh toán</label>
-        <input class="inp" id="payNote" value="Thanh toán công nợ PO ${po.id}" /></div>`,
+      <div class="form-grid" id="payBankWrap">
+        <div class="field"><label>Tài khoản ngân hàng thanh toán</label><select class="inp" id="payBank"><option value="">-- Chọn ngân hàng --</option>${banks}</select></div>
+        <div class="field"><label>Mã giao dịch / Số chứng từ bank</label><input class="inp" id="payRef" value="FT${Date.now().toString().slice(-8)}" /></div>
+      </div>
+      <div class="field"><label>Ghi chú thanh toán</label><input class="inp" id="payNote" value="Thanh toán công nợ PO ${po.id}" /></div>`,
     foot: `<button class="btn" data-act="modal-close">Hủy</button>
            <button class="btn btn-primary" data-act="supplier-pay-save" data-poid="${po.id}"><i class="fa-solid fa-floppy-disk"></i>Lưu thanh toán</button>`,
+    onMount: () => {
+      const method = $('#payMethod'); const wrap = $('#payBankWrap');
+      const sync = () => { if (wrap) wrap.style.display = method?.value === 'BANK_TRANSFER' ? 'grid' : 'none'; };
+      method?.addEventListener('change', sync); sync();
+    }
   });
+}
+
+
+/* ==================== NCC HOÀN TIỀN ==================== */
+function openSupplierRefundModal(poId) {
+  const po = Q.purchaseOrder(poId); if (!po) return;
+  const due = purchaseSupplierRefundDue(po);
+  if (due <= 0) { Toast.ok('Khoản hoàn đã tất toán', 'Nhà cung cấp không còn số tiền phải hoàn cho PO này.'); return; }
+  const supplier = Q.supplier(po.supplierId) || {};
+  const banks=(DB.bankAccounts||[]).map(b=>`<option value="${esc(b.id)}">${esc(b.bankName||b.name||'Ngân hàng')} · ${esc(b.accountNumber||'')}</option>`).join('');
+  Modal.open({title:'Ghi nhận NCC hoàn tiền',sub:`${esc(po.id)} · ${esc(supplier.name||po.supplierId)}`,size:'md',body:`
+    <div class="grid g-auto-sm" style="margin-bottom:14px">
+      ${mkpi('NCC phát sinh phải hoàn',fmtVND(purchaseSupplierRefundGrossDue(po)),'fa-rotate-left','orange')}
+      ${mkpi('Đã hoàn',fmtVND(purchaseSupplierRefundedAmount(po)),'fa-circle-check','green')}
+      ${mkpi('Còn phải hoàn',fmtVND(due),'fa-hourglass-half','red')}
+    </div>
+    <div class="form-grid">
+      <div class="field"><label>Ngày nhận tiền <span class="req">*</span></label><input class="inp" id="supplierRefundDate" type="date" value="${currentDateYMD()}"></div>
+      <div class="field"><label>Số tiền NCC hoàn <span class="req">*</span></label><input class="inp money-input" id="supplierRefundAmount" inputmode="numeric" value="${fmtN(due)}"></div>
+      <div class="field"><label>Phương thức <span class="req">*</span></label><select class="inp" id="supplierRefundMethod"><option value="BANK_TRANSFER">Chuyển khoản ngân hàng</option><option value="CASH">Tiền mặt</option></select></div>
+      <div class="field" id="supplierRefundBankField"><label>Tài khoản nhận tiền <span class="req">*</span></label><select class="inp" id="supplierRefundBank"><option value="">-- Chọn tài khoản ngân hàng --</option>${banks}</select></div>
+      <div class="field"><label>Mã giao dịch / tham chiếu</label><input class="inp" id="supplierRefundRef" placeholder="VD: FT260917..." /></div>
+      <div class="field"><label>Người ghi nhận</label><input class="inp" value="${esc((String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||'Người dùng'))}" disabled></div>
+      <div class="field span-2"><label>Ghi chú</label><textarea class="inp" id="supplierRefundNote" rows="2" placeholder="Nội dung NCC hoàn tiền..."></textarea></div>
+    </div>`,
+    foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="supplier-refund-save" data-id="${esc(po.id)}"><i class="fa-solid fa-floppy-disk"></i>Ghi nhận hoàn tiền</button>`,
+    onMount:()=>{ const m=$('#supplierRefundMethod'); const bank=$('#supplierRefundBankField'); if(m) m.onchange=()=>{bank.style.display=m.value==='BANK_TRANSFER'?'':'none'}; }
+  });
+}
+
+function saveSupplierRefund(poId) {
+  const po=Q.purchaseOrder(poId); if(!po)return;
+  const due=purchaseSupplierRefundDue(po);
+  const raw=String($('#supplierRefundAmount')?.value||'').replace(/\./g,'').replace(/,/g,'');
+  const amount=Number(raw||0), method=$('#supplierRefundMethod')?.value||'BANK_TRANSFER', bankId=$('#supplierRefundBank')?.value||'';
+  if(!amount||amount<=0){Toast.err('Thiếu số tiền','Vui lòng nhập số tiền NCC hoàn.');return;}
+  if(amount>due+0.001){Toast.err('Số tiền vượt khoản phải hoàn',`NCC hiện chỉ còn phải hoàn ${fmtVND(due)}.`);return;}
+  if(method==='BANK_TRANSFER'&&!bankId){Toast.err('Chưa chọn tài khoản nhận','Vui lòng chọn tài khoản ngân hàng nhận tiền.');return;}
+  const bank=(DB.bankAccounts||[]).find(b=>String(b.id)===String(bankId));
+  DB.supplierRefunds=DB.supplierRefunds||[];
+  const id=nextCode('HTNCC-2026-',DB.supplierRefunds);
+  const isAdmin=String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN';
+  DB.supplierRefunds.unshift({id,poId:po.id,supplierId:po.supplierId,date:$('#supplierRefundDate')?.value||currentDateYMD(),amount,method,bankId,bankName:bank?(bank.bankName||bank.name||''):'',accountNumber:bank?.accountNumber||'',reference:$('#supplierRefundRef')?.value.trim()||'',note:$('#supplierRefundNote')?.value.trim()||'',receivedBy:DB.currentUser?.userId||DB.currentUser?.id||'',receivedByName:isAdmin?'Admin':(DB.currentUser?.name||DB.currentUser?.fullName||''),createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:isAdmin?'Admin':(DB.currentUser?.name||DB.currentUser?.fullName||''),createdAt:new Date().toISOString()});
+  po.updatedAt=new Date().toISOString(); po.updatedBy=DB.currentUser?.userId||DB.currentUser?.id||'';
+  if(typeof SystemAPI!=='undefined')SystemAPI.audit({module:'PURCHASE',entityType:'SUPPLIER_REFUND',entityId:id,action:'CREATE',description:`Ghi nhận ${Q.supplierName(po.supplierId)} hoàn ${fmtVND(amount)} cho ${po.id}`,newData:{poId:po.id,amount}});
+  Modal.close(); render(); Toast.ok('Đã ghi nhận NCC hoàn tiền',`${id} · ${fmtVND(amount)} · Còn phải hoàn ${fmtVND(purchaseSupplierRefundDue(po))}`);
 }

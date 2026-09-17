@@ -196,25 +196,31 @@ const SalesCRM = (() => {
       crmTickets: DB.crmTickets || [],
       customerCareLogs: DB.customerCareLogs || [],
       crmActivities: DB.crmActivities || [],
+      customerPayments: DB.customerPayments || [],
       updatedAt: new Date().toISOString(),
     };
   }
 
   function applyState(saved) {
     if (!saved || typeof saved !== 'object') return false;
-    ['orders','customers','crmOpportunities','crmTickets','customerCareLogs','crmActivities'].forEach(key => {
+    ['orders','customers','crmOpportunities','crmTickets','customerCareLogs','crmActivities','customerPayments'].forEach(key => {
       if (Array.isArray(saved?.[key])) DB[key] = saved[key];
     });
     return true;
   }
 
-  function saveLocal(keys = null) {
+  function saveLocal(keys = null, options = {}) {
     // Cache local giúp mở giao diện nhanh, KHÔNG phải database chính.
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshotState()));
     } catch (e) {
       console.warn('[SalesCRM] Không lưu được cache CRM:', e);
     }
+
+    // Cho phép các action quan trọng đã await KIO trực tiếp chỉ cập nhật cache,
+    // tránh schedule một lượt ghi thứ hai không cần thiết. Mặc định giữ nguyên
+    // hành vi cũ cho toàn bộ các nơi khác.
+    if (options?.sync === false) return;
 
     // Persistence thật: đồng bộ vào các bảng lenam_* riêng trên KIO.
     if (typeof CRMAPI !== 'undefined') {
@@ -259,11 +265,38 @@ const SalesCRM = (() => {
     return `${prefix}${String(max + 1).padStart(width, '0')}`;
   }
 
+
+  function customerPaymentsOfOrder(orderId) {
+    return (DB.customerPayments || []).filter(p => String(p.orderId || '') === String(orderId || ''));
+  }
+
+  function paidOfOrder(orderId) {
+    return customerPaymentsOfOrder(orderId).reduce((sum, p) => sum + Number(p.amount || 0), 0);
+  }
+
+  function receivableOfOrder(order) {
+    if (!order) return 0;
+    return Math.max(0, Number(order.total || 0) - paidOfOrder(order.id));
+  }
+
+  function receivableStatus(order) {
+    const total = Number(order?.total || 0);
+    const paid = paidOfOrder(order?.id);
+    const remain = Math.max(0, total - paid);
+    const dueDate = String(order?.paymentDueDate || order?.dueDate || '').slice(0, 10);
+    const today = typeof currentDateYMD === 'function' ? currentDateYMD() : new Date().toISOString().slice(0, 10);
+    if (remain <= 0 && total > 0) return 'PAID';
+    if (dueDate && dueDate < today && remain > 0) return 'OVERDUE';
+    if (paid > 0) return 'PARTIALLY_PAID';
+    return 'UNPAID';
+  }
+
   return {
     orderStatus, oppStage, ticketStatus, badgeFrom,
     finishedWarehouses, eligibleFinishedRows, finishedAvailable,
     salesIssuesOf, hasSalesIssue, orderStockState,
     completedOrders, revenueOfCustomer, repeatStats, customerNameForOpp,
+    customerPaymentsOfOrder, paidOfOrder, receivableOfOrder, receivableStatus,
     nextNumericCode, saveLocal, restoreLocal, bootstrap,
     findWarehouseForOrder, reserveOrderStock, releaseOrderReservation,
   };
@@ -433,6 +466,7 @@ function openOrderForm(customerId = '', opportunityId = '') {
         <div class="field"><label>Nhân viên sale</label><select class="inp" id="crmOrderOwner"><option value="${esc(DB.currentUser?.id||'NV-001')}">${esc(Q.employeeName(DB.currentUser?.id)||'Người hiện tại')}</option>${ownerOptions}</select></div>
         <div class="field"><label>Ngày đặt hàng <b>*</b></label><input class="inp" type="date" id="crmOrderDate" value="${currentDateYMD()}" min="${currentDateYMD()}"></div>
         <div class="field"><label>Ngày giao dự kiến <b>*</b></label><input class="inp" type="date" id="crmOrderDue" value="${currentDateYMD()}" min="${currentDateYMD()}"></div>
+        <div class="field"><label>Hạn thanh toán</label><input class="inp" type="date" id="crmPaymentDue" value="${currentDateYMD()}" min="${currentDateYMD()}"><div class="cell-sub">Dùng để cảnh báo công nợ quá hạn.</div></div>
         <div class="field"><label>Tỉnh / Thành phố <b>*</b></label><select class="inp" id="crmDeliveryProvince"><option value="">-- Chọn Tỉnh/Thành phố --</option></select></div>
         <div class="field"><label>Quận / Huyện <b>*</b></label><select class="inp" id="crmDeliveryDistrict"><option value="">-- Chọn Quận/Huyện --</option></select></div>
         <div class="field"><label>Phường / Xã</label><select class="inp" id="crmDeliveryWard"><option value="">-- Chọn Phường/Xã --</option></select></div>
@@ -453,10 +487,19 @@ function openOrderForm(customerId = '', opportunityId = '') {
         <b>Chưa có danh mục thành phẩm.</b><br>Vui lòng khai báo thành phẩm trước khi tạo đơn bán.
       </div>`}
       <div class="grid g-2" style="margin-top:14px">
-        <div class="field"><label>VAT (%)</label><input class="inp right num" type="number" id="crmOrderVat" min="0" max="20" value="10"></div>
-        <div class="field"><label>Phí vận chuyển thu khách</label><input class="inp right num" type="number" id="crmShippingFee" min="0" step="1000" value="0"><div class="cell-sub">Số tiền vận chuyển khách đồng ý thanh toán; được cộng vào tổng thanh toán của đơn hàng.</div></div>
+        <div class="field"><label>Phí vận chuyển thu khách</label><input class="inp right num" type="text" inputmode="numeric" id="crmShippingFee" data-money="1" value="0"><div class="cell-sub">Số tiền vận chuyển khách đồng ý thanh toán; được cộng vào tổng thanh toán của đơn hàng.</div></div>
+        <div class="field" style="grid-column:1/-1"><label>Chi phí khác</label><div id="crmOtherCosts">${crmOtherCostLineHTML({}, true)}</div><button type="button" class="btn btn-sm" data-act="crm-order-add-cost"><i class="fa-solid fa-plus"></i>Thêm chi phí</button><div class="cell-sub">Có thể thêm nhiều khoản chi phí; mỗi khoản ghi rõ nội dung và số tiền.</div></div>
         <div class="field"><label>Ghi chú đơn hàng</label><input class="inp" id="crmOrderNote" placeholder="Ghi chú bán hàng"></div>
         <div class="field"><label>Ghi chú giao hàng</label><input class="inp" id="crmDeliveryNote" placeholder="Giờ nhận, cổng giao, yêu cầu liên hệ…"></div>
+      </div>
+      <div class="note-box" id="crmOrderTotals" style="margin-top:10px">
+        <div style="display:grid;grid-template-columns:repeat(5,minmax(110px,1fr));gap:10px">
+          <div><span class="cell-sub">Tạm tính</span><div class="strong" data-total="subtotal">0 ₫</div></div>
+          <div><span class="cell-sub">VAT</span><div class="strong" data-total="vat">0 ₫</div></div>
+          <div><span class="cell-sub">Phí vận chuyển</span><div class="strong" data-total="shipping">0 ₫</div></div>
+          <div><span class="cell-sub">Chi phí khác</span><div class="strong" data-total="other">0 ₫</div></div>
+          <div><span class="cell-sub">Tổng thanh toán</span><div class="strong" data-total="grand" style="font-size:16px">0 ₫</div></div>
+        </div>
       </div>
       <div class="note-box"><b>Nguyên tắc kho:</b> Có thể đặt cả thành phẩm đang hết/thiếu tồn. Tạo đơn không trừ tồn. Sau khi đơn được duyệt, Kho kiểm tra tồn: phần thiếu sẽ xuất hiện tại <b>Kho → Kế hoạch sản xuất → Nhu cầu từ đơn bán</b> để lập kế hoạch sản xuất; phần đủ tồn chỉ trừ khi Kho xác nhận xuất bán.</div>
     </form>`,
@@ -479,7 +522,7 @@ function openOrderForm(customerId = '', opportunityId = '') {
   document.querySelector('#crmOrderCustomer')?.addEventListener('change', fillDeliveryFromCustomer);
   ['#crmDeliveryAddressDetail','#crmDeliveryRecipient','#crmDeliveryPhone'].forEach(sel => document.querySelector(sel)?.addEventListener('input', ev => { ev.currentTarget.dataset.auto = '0'; }));
   fillDeliveryFromCustomer();
-  setTimeout(() => bindCrmOrderWeightEvents(document), 0);
+  setTimeout(() => { bindCrmOrderWeightEvents(document); bindCrmOtherCostEvents(document); document.getElementById('crmShippingFee')?.addEventListener('input',()=>updateCrmOrderTotals(document)); updateCrmOrderTotals(document); }, 0);
 }
 
 function crmPackedWeightKg(productId) {
@@ -498,21 +541,68 @@ function updateCrmOrderLineWeight(row) {
   if (hint) hint.textContent = productId ? (perUnit > 0 ? `${perUnit.toLocaleString('vi-VN',{maximumFractionDigits:3})} kg / ${Q.product(productId)?.unit || 'ĐVT'}` : 'Chưa khai báo khối lượng đóng gói') : '';
 }
 
+function crmOtherCostLineHTML(item={}, first=false) {
+  const name = esc(item.name || item.label || '');
+  const amount = Number(item.amount || item.value || 0);
+  return `<div class="crm-other-cost-line" style="display:grid;grid-template-columns:minmax(220px,2fr) 170px 44px;gap:8px;align-items:end;margin-bottom:8px">
+    <div class="field" style="margin:0"><label>Nội dung chi phí</label><input class="inp" name="otherCostName" value="${name}" placeholder="Ví dụ: Phí đóng gói đặc biệt"></div>
+    <div class="field" style="margin:0"><label>Số tiền</label><input class="inp right num" name="otherCostAmount" data-money="1" type="text" inputmode="numeric" value="${amount}" placeholder="0"></div>
+    <button type="button" class="btn btn-sm" data-act="crm-order-remove-cost" ${first?'disabled':''}><i class="fa-solid fa-trash"></i></button>
+  </div>`;
+}
+
+function crmReadOtherCosts(root=document) {
+  return [...(root.querySelectorAll?.('.crm-other-cost-line') || [])].map(row=>({
+    name:(row.querySelector('input[name="otherCostName"]')?.value||'').trim(),
+    amount:Math.max(0, parseMoney(row.querySelector('input[name="otherCostAmount"]')?.value)||0)
+  })).filter(x=>x.name || x.amount>0);
+}
+
+function bindCrmOtherCostEvents(root=document) {
+  root.querySelectorAll?.('.crm-other-cost-line').forEach(row=>{
+    if(row.dataset.costBound==='1') return;
+    row.dataset.costBound='1';
+    row.querySelector('input[name="otherCostAmount"]')?.addEventListener('input',()=>updateCrmOrderTotals(document));
+  });
+}
+
+function updateCrmOrderTotals(root=document) {
+  const box = root.querySelector?.('#crmOrderTotals') || document.querySelector('#crmOrderTotals');
+  const wrap = root.querySelector?.('#crmOrderLines') || document.querySelector('#crmOrderLines');
+  if (!box || !wrap) return;
+  let subtotal=0, vat=0;
+  wrap.querySelectorAll('.crm-order-line').forEach(row=>{
+    const qty=Math.max(0,Number(row.querySelector('input[name="qty"]')?.value||0));
+    const product=Q.product(row.querySelector('select[name="product"]')?.value||'');
+    const price=parseMoney(row.querySelector('input[name="price"]')?.value)||Number(product?.price||0);
+    const rate=Math.max(0,Number(row.querySelector('select[name="vatRate"]')?.value||0));
+    const amount=qty*price; subtotal+=amount; vat+=Math.round(amount*rate/100);
+  });
+  const shipping=Math.max(0,parseMoney(document.querySelector('#crmShippingFee')?.value)||0);
+  const other=crmReadOtherCosts(document).reduce((sum,x)=>sum+Number(x.amount||0),0);
+  const values={subtotal,vat,shipping,other,grand:subtotal+vat+shipping+other};
+  Object.entries(values).forEach(([k,v])=>{const el=box.querySelector(`[data-total="${k}"]`);if(el)el.textContent=fmtVND(v);});
+}
+
 function bindCrmOrderWeightEvents(root=document) {
   root.querySelectorAll?.('.crm-order-line').forEach(row => {
     if (row.dataset.weightBound === '1') { updateCrmOrderLineWeight(row); return; }
     row.dataset.weightBound = '1';
-    row.querySelector('select[name="product"]')?.addEventListener('change', () => updateCrmOrderLineWeight(row));
-    row.querySelector('input[name="qty"]')?.addEventListener('input', () => updateCrmOrderLineWeight(row));
+    row.querySelector('select[name="product"]')?.addEventListener('change', () => { updateCrmOrderLineWeight(row); updateCrmOrderTotals(document); });
+    row.querySelector('input[name="qty"]')?.addEventListener('input', () => { updateCrmOrderLineWeight(row); updateCrmOrderTotals(document); });
+    row.querySelector('input[name="price"]')?.addEventListener('input', () => updateCrmOrderTotals(document));
+    row.querySelector('select[name="vatRate"]')?.addEventListener('change', () => updateCrmOrderTotals(document));
     updateCrmOrderLineWeight(row);
+    updateCrmOrderTotals(document);
   });
 }
 
 function crmOrderLineHTML(options, first=false) {
-  return `<div class="crm-order-line" style="display:grid;grid-template-columns:minmax(250px,2fr) 105px 135px 135px 44px;gap:8px;align-items:end;margin-bottom:8px">
+  return `<div class="crm-order-line" style="display:grid;grid-template-columns:minmax(230px,2fr) 90px 125px 92px 125px 44px;gap:8px;align-items:end;margin-bottom:8px">
     <div class="field" style="margin:0"><label>Thành phẩm</label><select class="inp" name="product"><option value="">-- Chọn thành phẩm --</option>${options}</select></div>
     <div class="field" style="margin:0"><label>Số lượng</label><input class="inp right num" name="qty" type="number" min="1" step="1"></div>
-    <div class="field" style="margin:0"><label>Đơn giá</label><input class="inp right num" name="price" type="number" min="0" step="1000"></div>
+    <div class="field" style="margin:0"><label>Đơn giá</label><input class="inp right num" name="price" data-money="1" type="text" inputmode="numeric"></div>
+    <div class="field" style="margin:0"><label>VAT</label><select class="inp" name="vatRate"><option value="0">0%</option><option value="5">5%</option><option value="8">8%</option><option value="10" selected>10%</option></select></div>
     <div class="field" style="margin:0"><label>Khối lượng (kg)</label><input class="inp right num" data-role="line-weight" readonly placeholder="0"></div>
     <button type="button" class="btn btn-sm" data-act="crm-order-remove-line" ${first?'disabled':''}><i class="fa-solid fa-trash"></i></button>
   </div>`;
@@ -529,10 +619,11 @@ function openOrderEditForm(id) {
     const stockText = available > 0 ? `tồn TP ${fmtN(available)} ${p.unit||''}` : 'HẾT HÀNG';
     return `<option value="${p.id}" data-price="${Number(p.price||0)}">${esc(p.id+' · '+p.name+' · '+stockText)}</option>`;
   }).join('');
-  const rows = (o.items||[]).map((it,idx)=>`<div class="crm-order-line" style="display:grid;grid-template-columns:minmax(250px,2fr) 105px 135px 135px 44px;gap:8px;align-items:end;margin-bottom:8px">
+  const rows = (o.items||[]).map((it,idx)=>`<div class="crm-order-line" style="display:grid;grid-template-columns:minmax(230px,2fr) 90px 125px 92px 125px 44px;gap:8px;align-items:end;margin-bottom:8px">
     <div class="field" style="margin:0"><label>Thành phẩm</label><select class="inp" name="product"><option value="">-- Chọn thành phẩm --</option>${products.map(p=>{const av=Number(SalesCRM.finishedAvailable(p.id)||0);return `<option value="${p.id}" ${p.id===it.productId?'selected':''}>${esc(p.id+' · '+p.name+' · '+(av>0?`tồn TP ${fmtN(av)} ${p.unit||''}`:'HẾT HÀNG'))}</option>`;}).join('')}</select></div>
     <div class="field" style="margin:0"><label>Số lượng</label><input class="inp right num" name="qty" type="number" min="1" step="1" value="${Number(it.qty||0)}"></div>
-    <div class="field" style="margin:0"><label>Đơn giá</label><input class="inp right num" name="price" type="number" min="0" step="1000" value="${Number(it.price||0)}"></div>
+    <div class="field" style="margin:0"><label>Đơn giá</label><input class="inp right num" name="price" data-money="1" type="text" inputmode="numeric" value="${Number(it.price||0)}"></div>
+    <div class="field" style="margin:0"><label>VAT</label><select class="inp" name="vatRate">${[0,5,8,10].map(v=>`<option value="${v}" ${Number(it.vatRate ?? o.vatRate ?? 10)===v?'selected':''}>${v}%</option>`).join('')}</select></div>
     <div class="field" style="margin:0"><label>Khối lượng</label><input class="inp right num" data-role="line-weight" readonly value="${Number(it.shippingWeightKg||0)>0?Number(it.shippingWeightKg).toFixed(3).replace(/\.?0+$/,''):''}"><div class="cell-sub" data-role="weight-hint"></div></div>
     <button type="button" class="btn btn-sm" data-act="crm-order-remove-line" ${(o.items||[]).length===1?'disabled':''}><i class="fa-solid fa-trash"></i></button>
   </div>`).join('');
@@ -542,6 +633,7 @@ function openOrderEditForm(id) {
       <div class="field"><label>Nhân viên sale</label><select class="inp" id="crmOrderOwner">${ownerOptions}</select></div>
       <div class="field"><label>Ngày đặt hàng *</label><input class="inp" type="date" id="crmOrderDate" value="${esc(o.date||currentDateYMD())}"></div>
       <div class="field"><label>Ngày giao dự kiến *</label><input class="inp" type="date" id="crmOrderDue" value="${esc(o.dueDate||currentDateYMD())}"></div>
+      <div class="field"><label>Hạn thanh toán</label><input class="inp" type="date" id="crmPaymentDue" value="${esc(o.paymentDueDate||o.dueDate||currentDateYMD())}"><div class="cell-sub">Dùng để cảnh báo công nợ quá hạn.</div></div>
       <div class="field"><label>Tỉnh / Thành phố *</label><select class="inp" id="crmDeliveryProvince"><option value="${esc(o.deliveryProvince||'')}">${esc(o.deliveryProvince||'-- Chọn Tỉnh/Thành phố --')}</option></select></div>
       <div class="field"><label>Quận / Huyện *</label><select class="inp" id="crmDeliveryDistrict"><option value="${esc(o.deliveryDistrict||'')}">${esc(o.deliveryDistrict||'-- Chọn Quận/Huyện --')}</option></select></div>
       <div class="field"><label>Phường / Xã</label><select class="inp" id="crmDeliveryWard"><option value="${esc(o.deliveryWard||'')}">${esc(o.deliveryWard||'-- Chọn Phường/Xã --')}</option></select></div>
@@ -554,10 +646,11 @@ function openOrderEditForm(id) {
     <div class="form-sec-title"><i class="fa-solid fa-box"></i>Thành phẩm bán</div>
     <div id="crmOrderLines" data-options="${encodeURIComponent(productOptions)}">${rows}</div>
     <button type="button" class="btn btn-sm" data-act="crm-order-add-line"><i class="fa-solid fa-plus"></i>Thêm thành phẩm</button>
-    <div class="grid g-2" style="margin-top:14px"><div class="field"><label>VAT (%)</label><input class="inp right num" type="number" id="crmOrderVat" min="0" max="20" value="${Number(o.vatRate||0)}"></div><div class="field"><label>Phí vận chuyển thu khách</label><input class="inp right num" type="number" id="crmShippingFee" min="0" step="1000" value="${Number(o.shippingFee||0)}"></div><div class="field"><label>Ghi chú đơn hàng</label><input class="inp" id="crmOrderNote" value="${esc(o.note||'')}"></div><div class="field"><label>Ghi chú giao hàng</label><input class="inp" id="crmDeliveryNote" value="${esc(o.deliveryNote||'')}"></div></div>
+    <div class="grid g-2" style="margin-top:14px"><div class="field"><label>Phí vận chuyển thu khách</label><input class="inp right num" type="text" inputmode="numeric" id="crmShippingFee" data-money="1" value="${Number(o.shippingFee||0)}"></div><div class="field" style="grid-column:1/-1"><label>Chi phí khác</label><div id="crmOtherCosts">${((o.otherCosts&&o.otherCosts.length)?o.otherCosts:[...(Number(o.otherCost||0)>0?[{name:'Chi phí khác',amount:Number(o.otherCost||0)}]:[{}])]).map((x,i)=>crmOtherCostLineHTML(x,i===0)).join('')}</div><button type="button" class="btn btn-sm" data-act="crm-order-add-cost"><i class="fa-solid fa-plus"></i>Thêm chi phí</button><div class="cell-sub">Mỗi khoản ghi rõ nội dung và số tiền.</div></div><div class="field"><label>Ghi chú đơn hàng</label><input class="inp" id="crmOrderNote" value="${esc(o.note||'')}"></div><div class="field"><label>Ghi chú giao hàng</label><input class="inp" id="crmDeliveryNote" value="${esc(o.deliveryNote||'')}"></div></div>
+    <div class="note-box" id="crmOrderTotals" style="margin-top:10px"><div style="display:grid;grid-template-columns:repeat(5,minmax(110px,1fr));gap:10px"><div><span class="cell-sub">Tạm tính</span><div class="strong" data-total="subtotal">0 ₫</div></div><div><span class="cell-sub">VAT</span><div class="strong" data-total="vat">0 ₫</div></div><div><span class="cell-sub">Phí vận chuyển</span><div class="strong" data-total="shipping">0 ₫</div></div><div><span class="cell-sub">Chi phí khác</span><div class="strong" data-total="other">0 ₫</div></div><div><span class="cell-sub">Tổng thanh toán</span><div class="strong" data-total="grand" style="font-size:16px">0 ₫</div></div></div></div>
   </form>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="crm-order-edit-save" data-id="${esc(o.id)}"><i class="fa-solid fa-floppy-disk"></i>Lưu thay đổi</button>`});
   if (typeof VNAddress !== 'undefined') VNAddress.init({provinceId:'crmDeliveryProvince',districtId:'crmDeliveryDistrict',wardId:'crmDeliveryWard',noteId:'crmDeliveryAddressNote',province:o.deliveryProvince||'',district:o.deliveryDistrict||'',ward:o.deliveryWard||''});
-  setTimeout(() => bindCrmOrderWeightEvents(document), 0);
+  setTimeout(() => { bindCrmOrderWeightEvents(document); bindCrmOtherCostEvents(document); document.getElementById('crmShippingFee')?.addEventListener('input',()=>updateCrmOrderTotals(document)); updateCrmOrderTotals(document); }, 0);
 }
 
 function crmReadDeliveryAddressForm(){
@@ -577,6 +670,8 @@ Views['order-detail'] = function (params) {
   const productionPlans = (DB.productionPlans || []).filter(p => p.source === 'SALES_ORDER' && p.sourceOrderId === o.id && p.status !== 'CANCELLED');
   const canIssue = !['dh_da_huy','dh_da_giao','dh_hoan_tat','dh_cho_xu_ly','dh_hoan_thanh'].includes(o.status) && stock.enough && !issued;
   const complaints = (DB.crmTickets || []).filter(t => t.type === 'COMPLAINT' && t.orderId === o.id);
+  const paidAmount = SalesCRM.paidOfOrder(o.id);
+  const receivableAmount = SalesCRM.receivableOfOrder(o);
 
   return `${pageHead(`Đơn hàng ${o.id}`, `${esc(Q.customerName(o.customerId))} · Giao dự kiến ${fmtDate(o.dueDate)}`, `
     <button class="btn" data-act="crm-go-orders"><i class="fa-solid fa-arrow-left"></i>Danh sách</button>
@@ -585,9 +680,12 @@ Views['order-detail'] = function (params) {
     ${o.status==='dh_cho_xu_ly' && !o.approvedAt ? `<button class="btn" data-act="crm-order-delete" data-id="${o.id}"><i class="fa-solid fa-trash"></i>Xóa</button>` : ''}
     ${o.status==='dh_cho_xu_ly' && typeof Auth!=='undefined' && Auth.hasPermission('SALES_APPROVE') ? `<button class="btn" data-act="crm-order-reject" data-id="${o.id}"><i class="fa-solid fa-xmark"></i>Từ chối</button><button class="btn btn-primary" data-act="crm-order-approve" data-id="${o.id}"><i class="fa-solid fa-check"></i>Duyệt đơn</button>` : ''}
     ${o.status==='dh_hoan_thanh' && o.pendingIssueId ? `<button class="btn btn-primary" data-act="crm-order-deliver" data-id="${o.id}"><i class="fa-solid fa-truck-fast"></i>Giao hàng</button>` : ''}
+    ${['dh_da_giao','dh_hoan_tat'].includes(o.status) && SalesCRM.receivableOfOrder(o)>0 ? `<button class="btn" data-act="crm-customer-pay-modal" data-id="${o.id}"><i class="fa-solid fa-hand-holding-dollar"></i>Thu tiền</button>` : ''}
     ${o.status==='dh_da_giao' ? `<button class="btn btn-primary" data-act="crm-order-complete-open" data-id="${o.id}"><i class="fa-solid fa-circle-check"></i>Xác nhận hoàn thành đơn hàng</button>` : ''}`)}
     <div class="grid g-auto-sm" style="margin-bottom:14px">
       ${mkpi('Giá trị đơn', fmtShort(o.total), 'fa-sack-dollar','blue')}
+      ${mkpi('Đã thanh toán', fmtShort(paidAmount), 'fa-circle-check','green')}
+      ${mkpi('Còn phải thu', fmtShort(receivableAmount), 'fa-hand-holding-dollar', receivableAmount>0?'red':'green')}
       ${mkpi('Phí vận chuyển thu khách', fmtShort(Number(o.shippingFee||0)), 'fa-truck','indigo')}
       ${mkpi('Khối lượng vận chuyển', `${Number(o.shippingWeightKg||0).toLocaleString('vi-VN',{maximumFractionDigits:3})} kg`, 'fa-weight-hanging','slate')}
       ${mkpi('Số dòng hàng', (o.items||[]).length, 'fa-boxes-stacked','indigo')}
@@ -597,16 +695,25 @@ Views['order-detail'] = function (params) {
     </div>
     <div class="grid g-2" style="margin-bottom:14px">
       <div class="card"><div class="card-head"><div><h3>Thành phẩm đặt mua</h3><p>Tồn chỉ đọc từ Kho thành phẩm đạt QC / còn hạn</p></div></div>
-        ${tableShell([{t:'Thành phẩm'},{t:'SL đặt',cls:'right'},{t:'Tồn khả dụng',cls:'right'},{t:'KL đóng gói',cls:'right'},{t:'Khối lượng',cls:'right'},{t:'Đơn giá',cls:'right'},{t:'Thành tiền',cls:'right'}], (o.items||[]).map(it=>{const av=SalesCRM.finishedAvailable(it.productId);const p=Q.product(it.productId);const per=Number(it.packedWeightKg || (Number(p?.packedWeightG||0)>0 ? Number(p.packedWeightG)/1000 : p?.packedWeightKg) || 0);const line=Number(it.shippingWeightKg||Number(it.qty||0)*per);return `<tr><td>${cell2(esc(it.name),`<span class="code">${esc(it.productId)}</span> · ${esc(it.unit||'')}`)}</td><td class="right num">${fmtN(it.qty)}</td><td class="right num" style="color:${av>=Number(it.qty)?'var(--green)':'var(--orange)'}">${fmtN(av)}</td><td class="right num">${per>0?(per*1000).toLocaleString('vi-VN',{maximumFractionDigits:2})+' g':'—'}</td><td class="right num">${line>0?line.toLocaleString('vi-VN',{maximumFractionDigits:3})+' kg':'—'}</td><td class="right num">${fmtVND(it.price)}</td><td class="right strong num">${fmtVND(it.amount)}</td></tr>`;}),{emptyTitle:'Đơn chưa có thành phẩm'})}
+        ${tableShell([{t:'Thành phẩm'},{t:'SL đặt',cls:'right'},{t:'Tồn khả dụng',cls:'right'},{t:'KL đóng gói',cls:'right'},{t:'Khối lượng',cls:'right'},{t:'Đơn giá',cls:'right'},{t:'VAT',cls:'right'},{t:'Tiền VAT',cls:'right'},{t:'Thành tiền',cls:'right'}], (o.items||[]).map(it=>{
+          const av=SalesCRM.finishedAvailable(it.productId);
+          const p=Q.product(it.productId);
+          const per=Number(it.packedWeightKg || (Number(p?.packedWeightG||0)>0 ? Number(p.packedWeightG)/1000 : p?.packedWeightKg) || 0);
+          const line=Number(it.shippingWeightKg||Number(it.qty||0)*per);
+          const vatRate=Number(it.vatRate ?? o.vatRate ?? 0);
+          const vatAmount=Number(it.vatAmount ?? Math.round(Number(it.amount||0)*vatRate/100));
+          const lineTotal=Number(it.lineTotal ?? (Number(it.amount||0)+vatAmount));
+          return `<tr><td>${cell2(esc(it.name),`<span class="code">${esc(it.productId)}</span> · ${esc(it.unit||'')}`)}</td><td class="right num">${fmtN(it.qty)}</td><td class="right num" style="color:${av>=Number(it.qty)?'var(--green)':'var(--orange)'}">${fmtN(av)}</td><td class="right num">${per>0?(per*1000).toLocaleString('vi-VN',{maximumFractionDigits:2})+' g':'—'}</td><td class="right num">${line>0?line.toLocaleString('vi-VN',{maximumFractionDigits:3})+' kg':'—'}</td><td class="right num">${fmtVND(it.price)}</td><td class="right num">${vatRate}%</td><td class="right num">${fmtVND(vatAmount)}</td><td class="right strong num">${fmtVND(lineTotal)}</td></tr>`;
+        }),{emptyTitle:'Đơn chưa có thành phẩm'})}
       </div>
       <div class="card"><div class="card-head"><div><h3>Thông tin bán hàng</h3></div></div><div class="card-body"><dl class="dl">
         <dt>Khách hàng</dt><dd>${esc(customer?.name||'—')}</dd><dt>Khu vực</dt><dd>${esc(customer?.province||'—')}</dd>
         <dt>Sale phụ trách</dt><dd>${esc(Q.employeeName(o.ownerId))}</dd><dt>Ngày đặt</dt><dd>${fmtDate(o.date)}</dd><dt>Ngày giao</dt><dd>${fmtDate(o.dueDate)}</dd>
         <dt>Địa chỉ giao</dt><dd>${esc(o.deliveryAddress||customer?.address||'—')}</dd><dt>Người nhận</dt><dd>${esc(o.deliveryRecipient||customer?.contact||'—')} ${o.deliveryPhone?`· ${esc(o.deliveryPhone)}`:''}</dd>
-        <dt>Phí vận chuyển thu khách</dt><dd><b>${fmtVND(Number(o.shippingFee||0))}</b></dd><dt>Chi phí vận chuyển thực tế</dt><dd>${o.actualTransportCost!=null?`<b>${fmtVND(Number(o.actualTransportCost||0))}</b>`:'<span class="muted">Chưa chốt chuyến</span>'}</dd>
+        <dt>VAT theo sản phẩm</dt><dd><b>${fmtVND(Number(o.vat||0))}</b></dd><dt>Phí vận chuyển thu khách</dt><dd><b>${fmtVND(Number(o.shippingFee||0))}</b></dd><dt>Chi phí khác</dt><dd><b>${fmtVND(Number(o.otherCost||0))}</b>${(o.otherCosts||[]).length?`<div class="cell-sub" style="margin-top:4px">${(o.otherCosts||[]).map(x=>`${esc(x.name||'Chi phí khác')}: ${fmtVND(Number(x.amount||0))}`).join('<br>')}</div>`:''}</dd><dt>Chi phí vận chuyển thực tế</dt><dd>${o.actualTransportCost!=null?`<b>${fmtVND(Number(o.actualTransportCost||0))}</b>`:'<span class="muted">Chưa chốt chuyến</span>'}</dd>
         <dt>Chính sách phí vận chuyển</dt><dd>${o.actualTransportCost!=null?(()=>{const diff=Number(o.shippingFee||0)-Number(o.actualTransportCost||0);if(Math.abs(diff)<0.5)return '<span class="badge green">Thu đúng chi phí</span>';if(diff<0)return `<span class="badge orange">Doanh nghiệp hỗ trợ ${fmtVND(Math.abs(diff))}</span>`;return `<span class="badge green">Thu cao hơn chi phí ${fmtVND(diff)}</span>`;})():'<span class="muted">Xác định sau khi chốt chuyến</span>'}</dd>
         <dt>Trạng thái vận chuyển</dt><dd>${esc(o.logisticsStatus||'Chưa chuyển Logistics')}</dd><dt>Đơn giao</dt><dd>${o.logisticsDeliveryId?`<span class="code">${esc(o.logisticsDeliveryId)}</span>`:'—'}</dd>
-        <dt>Nguồn đơn</dt><dd>${o.opportunityId?`Cơ hội ${esc(o.opportunityId)}`:'Tạo trực tiếp'}</dd><dt>Phiếu xuất bán</dt><dd>${issues.length?issues.map(x=>`<span class="code">${esc(x.id)}</span>`).join(', '):'<span class="muted">Chưa có</span>'}</dd>
+        <dt>Người tạo</dt><dd>${esc(o.createdByName || Q.employeeName(o.createdBy) || '—')}</dd><dt>Người duyệt</dt><dd>${esc(o.approvedByName || Q.employeeName(o.approvedBy) || '—')}</dd><dt>Nguồn đơn</dt><dd>${o.opportunityId?`Cơ hội ${esc(o.opportunityId)}`:'Tạo trực tiếp'}</dd><dt>Phiếu xuất bán</dt><dd>${issues.length?issues.map(x=>`<span class="code">${esc(x.id)}</span>`).join(', '):'<span class="muted">Chưa có</span>'}</dd>
         <dt>Hoàn thành đơn</dt><dd>${o.completedAt?fmtDate(String(o.completedAt).slice(0,10)):'—'}</dd><dt>Hàng trả về</dt><dd>${(o.returnedItems||[]).length?(o.returnedItems||[]).map(x=>`${esc(Q.product(x.productId)?.name||x.productId)}: <b>${fmtN(x.qty)}</b>`).join('<br>'):'Không có'}</dd>
       </dl><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
         ${!issued&&!stock.enough&&o.approvedAt&&!['dh_da_huy','dh_da_giao','dh_hoan_tat'].includes(o.status)?`<span class="badge orange"><i class="fa-solid fa-warehouse"></i> Chờ Kho lập kế hoạch SX</span>`:''}
@@ -683,7 +790,7 @@ function openOpportunityForm(id='') {
     <div class="field"><label>Người liên hệ</label><input class="inp" id="crmOppContact" value="${esc(o.contact||'')}"></div>
     <div class="field"><label>Sale phụ trách</label><select class="inp" id="crmOppOwner">${(DB.employees||[]).slice(0,30).map(e=>`<option value="${e.id}" ${o.ownerId===e.id?'selected':''}>${esc(e.id+' · '+e.name)}</option>`).join('')}</select></div>
     <div class="field"><label>Giai đoạn</label><select class="inp" id="crmOppStage">${Object.entries(SalesCRM.oppStage).map(([k,v])=>`<option value="${k}" ${o.stage===k?'selected':''}>${esc(v.label)}</option>`).join('')}</select></div>
-    <div class="field"><label>Giá trị dự kiến</label><input class="inp right num" type="number" id="crmOppValue" value="${Number(o.value||0)}"></div>
+    <div class="field"><label>Giá trị dự kiến</label><input class="inp right num" type="number" id="crmOppValue" data-money="1" value="${Number(o.value||0)}"></div>
     <div class="field"><label>Ngày dự kiến chốt</label><input class="inp" type="date" id="crmOppClose" value="${esc(o.expectedCloseDate||currentDateYMD())}" min="${currentDateYMD()}"></div>
     <div class="field"><label>Nguồn</label><input class="inp" id="crmOppSource" value="${esc(o.source||'')}"></div>
   </div><div class="field"><label>Ghi chú</label><textarea class="inp" id="crmOppNote" rows="3">${esc(o.note||'')}</textarea></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="crm-opportunity-save" data-id="${esc(id)}">Lưu</button>`});
@@ -866,6 +973,129 @@ Views.transactions = function () {
     </div>`;
 };
 
+
+/* -------------------------------------------------------------------------
+ * CÔNG NỢ KHÁCH HÀNG
+ * ---------------------------------------------------------------------- */
+Views['crm-debts'] = function () {
+  DB.customerPayments = DB.customerPayments || [];
+  const f = F('crmDebts', { q:'', status:'', customerId:'', from:'', to:'' });
+  const q = String(f.q || '').trim().toLowerCase();
+  const debtOrders = (DB.orders || []).filter(o => ['dh_da_giao','dh_hoan_tat'].includes(o.status));
+  const customers = (DB.customers || []).map(c => [c.id, `${c.id} · ${c.name}`]);
+  const statusOptions = [['UNPAID','Chưa thanh toán'],['PARTIALLY_PAID','Thanh toán một phần'],['PAID','Đã thanh toán'],['OVERDUE','Quá hạn']];
+
+  const list = debtOrders.filter(o => {
+    const status = SalesCRM.receivableStatus(o);
+    const d = String(o.date || '').slice(0,10);
+    if (f.status && status !== f.status) return false;
+    if (f.customerId && o.customerId !== f.customerId) return false;
+    if (f.from && d < f.from) return false;
+    if (f.to && d > f.to) return false;
+    if (q && ![o.id, Q.customerName(o.customerId)].some(v => String(v || '').toLowerCase().includes(q))) return false;
+    return true;
+  }).sort((a,b) => String(b.date||'').localeCompare(String(a.date||'')) || String(b.id||'').localeCompare(String(a.id||'')));
+
+  const total = list.reduce((s,o)=>s+Number(o.total||0),0);
+  const paid = list.reduce((s,o)=>s+SalesCRM.paidOfOrder(o.id),0);
+  const remain = list.reduce((s,o)=>s+SalesCRM.receivableOfOrder(o),0);
+  const overdue = list.reduce((s,o)=>s+(SalesCRM.receivableStatus(o)==='OVERDUE'?SalesCRM.receivableOfOrder(o):0),0);
+
+  const statusBadge = (st) => ({
+    UNPAID:'<span class="badge slate">Chưa thanh toán</span>',
+    PARTIALLY_PAID:'<span class="badge orange">Thanh toán một phần</span>',
+    PAID:'<span class="badge green">Đã thanh toán</span>',
+    OVERDUE:'<span class="badge red">Quá hạn</span>'
+  }[st] || `<span class="badge slate">${esc(st)}</span>`);
+
+  const rows = list.map(o => {
+    const paidAmt = SalesCRM.paidOfOrder(o.id);
+    const remainAmt = SalesCRM.receivableOfOrder(o);
+    const st = SalesCRM.receivableStatus(o);
+    const due = o.paymentDueDate || o.dueDate || '';
+    return `<tr>
+      <td><span class="code">${esc(o.id)}</span></td>
+      <td>${cell2(esc(Q.customerName(o.customerId)), `<span class="code">${esc(o.customerId)}</span>`)}</td>
+      <td class="num">${fmtDate(o.date)}</td>
+      <td class="num">${due ? fmtDate(due) : '—'}</td>
+      <td class="right strong num">${fmtVND(Number(o.total||0))}</td>
+      <td class="right num" style="color:var(--green)">${fmtVND(paidAmt)}</td>
+      <td class="right strong num" style="color:${remainAmt>0?'var(--red)':'var(--text-3)'}">${fmtVND(remainAmt)}</td>
+      <td>${statusBadge(st)}</td>
+      <td class="right">${remainAmt>0?`<button class="btn btn-xs btn-primary" data-act="crm-customer-pay-modal" data-id="${esc(o.id)}"><i class="fa-solid fa-hand-holding-dollar"></i>Thu tiền</button>`:'<span class="muted">Tất toán</span>'}</td>
+    </tr>`;
+  });
+
+  const paymentRows = [...(DB.customerPayments || [])]
+    .filter(p => {
+      const d=String(p.date||'').slice(0,10);
+      if (f.from && d<f.from) return false;
+      if (f.to && d>f.to) return false;
+      if (f.customerId && p.customerId!==f.customerId) return false;
+      return true;
+    })
+    .sort((a,b)=>String(b.createdAt||b.date||'').localeCompare(String(a.createdAt||a.date||'')))
+    .slice(0,100)
+    .map(p => `<tr>
+      <td><span class="code">${esc(p.id)}</span></td><td class="num">${fmtDate(p.date)}</td>
+      <td><span class="code">${esc(p.orderId||'—')}</span></td><td>${esc(Q.customerName(p.customerId))}</td>
+      <td class="right strong num">${fmtVND(Number(p.amount||0))}</td><td>${esc(p.method||'—')}</td>
+      <td>${esc(p.bankName||'—')}</td><td>${esc(p.payerName||p.collectedByName||'—')}</td><td class="muted">${esc(p.reference||p.bankRef||'')}</td>
+    </tr>`);
+
+  return `${pageHead('Công nợ khách hàng','Theo dõi phải thu theo từng đơn hàng; mặc định hiển thị chứng từ mới nhất trước','')}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">
+      ${mkpi('Tổng phải thu',fmtShort(total),'fa-file-invoice-dollar','blue')}
+      ${mkpi('Đã thu',fmtShort(paid),'fa-circle-check','green')}
+      ${mkpi('Còn phải thu',fmtShort(remain),'fa-hand-holding-dollar','red')}
+      ${mkpi('Quá hạn',fmtShort(overdue),'fa-triangle-exclamation','orange')}
+    </div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="toolbar">
+        ${searchBox('crmDebts','Tìm mã đơn hoặc khách hàng…')}
+        ${selectFilter('crmDebts','customerId',customers,'Tất cả khách hàng')}
+        ${selectFilter('crmDebts','status',statusOptions,'Tất cả trạng thái')}
+        <label class="field-inline">Từ <input class="inp" type="date" data-f="crmDebts.from" value="${esc(f.from||'')}"></label>
+        <label class="field-inline">Đến <input class="inp" type="date" data-f="crmDebts.to" value="${esc(f.to||'')}"></label>
+        ${(f.q||f.customerId||f.status||f.from||f.to)?'<button class="btn btn-sm" data-act="clear-filter" data-key="crmDebts"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>':''}
+        <span class="spacer"></span><span class="chip">${fmtN(list.length)} đơn có phát sinh phải thu</span>
+      </div>
+      ${tableShell([{t:'Đơn hàng'},{t:'Khách hàng'},{t:'Ngày đơn'},{t:'Hạn thanh toán'},{t:'Tổng phải thu',cls:'right'},{t:'Đã thu',cls:'right'},{t:'Còn phải thu',cls:'right'},{t:'Trạng thái'},{t:'',cls:'right'}], rows, {emptyTitle:'Chưa có công nợ khách hàng'})}
+    </div>
+    <div class="card">
+      <div class="card-head"><div><h3>Lịch sử thu tiền khách hàng</h3><p>Mỗi lần thu được lưu thành một giao dịch riêng; một đơn có thể thanh toán nhiều lần.</p></div></div>
+      ${tableShell([{t:'Mã thu'},{t:'Ngày'},{t:'Đơn hàng'},{t:'Khách hàng'},{t:'Số tiền',cls:'right'},{t:'Phương thức'},{t:'Ngân hàng'},{t:'Người thực hiện'},{t:'Tham chiếu'}], paymentRows, {emptyTitle:'Chưa có lịch sử thu tiền'})}
+    </div>`;
+};
+
+function openCustomerPaymentModal(orderId) {
+  const o = Q.order(orderId); if (!o) return;
+  const remain = SalesCRM.receivableOfOrder(o);
+  if (remain <= 0) { Toast.info('Đơn hàng đã tất toán', `${o.id} không còn công nợ.`); return; }
+  const actorId = DB.currentUser?.userId || DB.currentUser?.id || '';
+  const actorName = (String(DB.currentUser?.username||'').toLowerCase()==='admin' || DB.currentUser?.roleId==='ROLE_ADMIN') ? 'Admin' : (DB.currentUser?.name || Q.employeeName(DB.currentUser?.id));
+  const employeePeople = (DB.employees || []).map(e => `<option value="${esc(e.id)}" ${String(e.id)===String(DB.currentUser?.id)?'selected':''}>${esc(e.id+' · '+(e.name||e.fullName||''))}</option>`).join('');
+  const hasActor = (DB.employees || []).some(e => String(e.id)===String(DB.currentUser?.id) || String(e.id)===String(actorId));
+  const people = `${hasActor?'':`<option value="${esc(actorId)}" selected>${esc(actorName)}</option>`}${employeePeople}`;
+  const banks = (DB.bankAccounts || []).map(b => `<option value="${esc(b.id)}">${esc(b.name || ((b.bankName||'Ngân hàng')+' · '+(b.accountNumber||'')))}</option>`).join('');
+  Modal.open({
+    title:'Ghi nhận thu tiền khách hàng', sub:`${o.id} · ${esc(Q.customerName(o.customerId))} · Còn phải thu ${fmtVND(remain)}`, size:'md',
+    body:`<div class="form-grid">
+      <div class="field"><label>Số tiền thu (VND) <span class="req">*</span></label><input class="inp right num" type="text" inputmode="numeric" id="crmPayAmount" data-money="1" value="${remain}"></div>
+      <div class="field"><label>Ngày thanh toán</label><input class="inp" type="date" id="crmPayDate" value="${typeof currentDateYMD==='function'?currentDateYMD():new Date().toISOString().slice(0,10)}"></div>
+      <div class="field"><label>Phương thức</label><select class="inp" id="crmPayMethod"><option value="BANK_TRANSFER">Chuyển khoản ngân hàng</option><option value="CASH">Tiền mặt</option></select></div>
+      <div class="field"><label>Người thực hiện</label><select class="inp" id="crmPayPayer"><option value="">-- Chọn người thực hiện --</option>${people}</select></div>
+    </div>
+    <div id="crmPayBankWrap" class="form-grid">
+      <div class="field"><label>Ngân hàng nhận tiền</label><select class="inp" id="crmPayBank"><option value="">-- Chọn ngân hàng --</option>${banks}</select></div>
+      <div class="field"><label>Mã giao dịch / tham chiếu</label><input class="inp" id="crmPayRef" placeholder="VD: FT12345678"></div>
+    </div>
+    <div class="field"><label>Ghi chú</label><input class="inp" id="crmPayNote" value="Thu công nợ đơn ${esc(o.id)}"></div>`,
+    foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="crm-customer-pay-save" data-orderid="${esc(o.id)}"><i class="fa-solid fa-floppy-disk"></i>Lưu lần thanh toán</button>`,
+    onMount:()=>{ const method=$('#crmPayMethod'), wrap=$('#crmPayBankWrap'); const sync=()=>{if(wrap)wrap.style.display=method?.value==='BANK_TRANSFER'?'grid':'none';}; method?.addEventListener('change',sync); sync(); }
+  });
+}
+
 /* -------------------------------------------------------------------------
  * BÁO CÁO CRM
  * ---------------------------------------------------------------------- */
@@ -884,6 +1114,7 @@ Views.crm = function(params={}) {
     case 'complaints': return Views['crm-complaints']();
     case 'transactions': return Views.transactions();
     case 'orders': return Views.orders();
+    case 'debts': return Views['crm-debts']();
     case 'reports': return Views['crm-reports']();
     default: return Views['crm-dashboard']();
   }

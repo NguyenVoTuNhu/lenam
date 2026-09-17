@@ -58,7 +58,7 @@ const AccFin = {
   monthOf: (d) => String(d || '').slice(0, 7),
   fmtMonthShort: (m) => 'Th' + Number(m.slice(5, 7)) + '/' + m.slice(2, 4),
 
-  recognizedOrders: () => DB.orders.filter((o) => ['dh_da_giao', 'dh_hoan_thanh'].includes(o.status)),
+  recognizedOrders: () => DB.orders.filter((o) => ['dh_da_giao', 'dh_hoan_tat'].includes(o.status)),
   activePOs: () => (DB.purchaseOrders || []).filter((po) => po.status !== 'CANCELLED'),
 
   cogsOfOrder(o) {
@@ -97,8 +97,8 @@ const AccFin = {
   currentMonth: () => AccFin.monthOf(TODAY),
   prevMonth() { const [y, m] = AccFin.currentMonth().split('-').map(Number); const d = new Date(y, m - 2, 1); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); },
 
-  totalAR() { return DB.customers.reduce((s, c) => s + Number(c.debt || 0), 0); },
-  totalAP() { return AccFin.activePOs().reduce((s, po) => s + Math.max(0, (po.total || 0) - (po.paid || 0)), 0); },
+  totalAR() { return AccFin.recognizedOrders().reduce((s,o)=>s+(typeof SalesCRM!=='undefined'?SalesCRM.receivableOfOrder(o):Math.max(0,Number(o.total||0)-Number(o.paid||0))),0); },
+  totalAP() { return AccFin.activePOs().reduce((s, po) => s + (typeof purchasePayableRemaining==='function' ? purchasePayableRemaining(po) : Math.max(0, Number(po.total||0) - Number(po.paid||0))), 0); },
 
   bankBalance(bankId) {
     const acc = (DB.bankAccounts || []).find((b) => b.id === bankId);
@@ -291,7 +291,7 @@ function accDashboardView() {
     ${mkpi('Lợi nhuận gộp', fmtVND(gp), 'fa-chart-line', 'green', null, pctDelta(gp, prevGp))}
     ${mkpi('Tồn quỹ ngân hàng', fmtVND(cash), 'fa-building-columns', 'indigo')}
     ${mkpi('Công nợ phải thu', fmtVND(ar), 'fa-hand-holding-dollar', 'teal', 'nav', )}
-    ${mkpi('Công nợ phải trả', fmtVND(ap), 'fa-file-invoice-dollar', 'red')}
+    ${mkpi('Công nợ phải chi', fmtVND(ap), 'fa-file-invoice-dollar', 'red')}
     ${mkpi('Giá trị tồn kho', fmtVND(invValue), 'fa-boxes-stacked', 'slate')}
     ${mkpi('Tài sản cố định (còn lại)', fmtVND(assetNet), 'fa-warehouse', 'blue')}
   </div>
@@ -320,10 +320,10 @@ function accRecentCashRows() {
 }
 
 function accTopDebtRows() {
-  const arRows = DB.customers.filter((c) => c.debt > 0).sort((a, b) => b.debt - a.debt).slice(0, 4)
-    .map((c) => `<tr><td>${cell2(esc(c.name), 'Phải thu · ' + esc(c.id))}</td><td class="right num strong" style="color:var(--teal)">${fmtVND(c.debt)}</td></tr>`);
-  const apRows = AccFin.activePOs().filter((po) => (po.total - po.paid) > 0).sort((a, b) => (b.total - b.paid) - (a.total - a.paid)).slice(0, 4)
-    .map((po) => `<tr><td>${cell2(esc(Q.supplierName(po.supplierId)), 'Phải trả · ' + esc(po.id))}</td><td class="right num strong" style="color:var(--red)">${fmtVND(po.total - po.paid)}</td></tr>`);
+  const arRows = AccFin.recognizedOrders().map(o=>({o,remain:typeof SalesCRM!=='undefined'?SalesCRM.receivableOfOrder(o):Math.max(0,Number(o.total||0)-Number(o.paid||0))})).filter(x=>x.remain>0).sort((a,b)=>b.remain-a.remain).slice(0,4)
+    .map(({o,remain}) => `<tr><td>${cell2(esc(Q.customerName(o.customerId)), 'Phải thu · ' + esc(o.id))}</td><td class="right num strong" style="color:var(--teal)">${fmtVND(remain)}</td></tr>`);
+  const apRows = AccFin.activePOs().map(po=>{const remain=typeof purchasePayableRemaining==='function'?purchasePayableRemaining(po):Math.max(0,Number(po.total||0)-Number(po.paid||0));return {po,remain};}).filter(x=>x.remain>0).sort((a,b)=>b.remain-a.remain).slice(0,4)
+    .map(({po,remain}) => `<tr><td>${cell2(esc(Q.supplierName(po.supplierId)), 'Phải chi · ' + esc(po.id))}</td><td class="right num strong" style="color:var(--red)">${fmtVND(remain)}</td></tr>`);
   return tableShell([{ t: 'Đối tượng' }, { t: '', cls: 'right' }], [...arRows, ...apRows], { emptyTitle: 'Không có công nợ đáng chú ý' });
 }
 
@@ -332,6 +332,7 @@ function accAllCashRows() {
   const rows = [];
   DB.customerPayments.forEach((p) => rows.push({ date: p.date, type: 'THU', amount: p.amount, note: p.note || `Thu tiền ${Q.customerName(p.customerId)}`, source: 'Tự động · Hợp đồng/Đơn hàng', ref: p.contractId || '', editable: false, id: p.id, kind: 'customerPayment' }));
   DB.supplierPayments.forEach((p) => rows.push({ date: p.date, type: 'CHI', amount: p.amount, note: p.note || `Trả NCC ${Q.supplierName(p.supplierId)}`, source: 'Tự động · Mua hàng', ref: p.poId || '', editable: false, id: p.id, kind: 'supplierPayment' }));
+  (DB.supplierRefunds || []).forEach((r) => rows.push({ date: r.date, type: 'THU', amount: r.amount, note: r.note || `NCC hoàn tiền ${Q.supplierName(r.supplierId)}`, source: 'Tự động · Hoàn tiền NCC', ref: r.poId || '', editable: false, id: r.id, kind: 'supplierRefund' }));
   DB.cashTransactions.forEach((t) => rows.push({ date: t.date, type: t.type, amount: t.amount, note: t.note || t.category, source: 'Thủ công · ' + (t.category || ''), ref: '', editable: true, id: t.id, kind: 'manual' }));
   return rows.sort((a, b) => String(b.date).localeCompare(String(a.date)));
 }
@@ -392,7 +393,7 @@ function openCashTxForm(type) {
     sub: 'Dùng cho các khoản không tự sinh ra từ Bán hàng/Mua hàng, ví dụ lương, điện nước, thu khác…',
     body: `<div class="form-grid">
         <div class="field"><label>Ngày <span class="req">*</span></label><input class="inp" id="ctxDate" type="date" value="${currentDateYMD()}"></div>
-        <div class="field"><label>Số tiền <span class="req">*</span></label><input class="inp right num" id="ctxAmount" type="number" min="0" step="1000"></div>
+        <div class="field"><label>Số tiền <span class="req">*</span></label><input class="inp right num" id="ctxAmount" data-money="1" type="text" inputmode="numeric" min="0" step="1000"></div>
         <div class="field" style="grid-column:1/-1"><label>Khoản mục</label><select class="inp" id="ctxCategory">${DB.accountingSettings.opexCategories.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select></div>
         <div class="field" style="grid-column:1/-1"><label>Diễn giải</label><textarea class="inp" id="ctxNote" rows="2" placeholder="Nội dung khoản thu/chi"></textarea></div>
       </div>`,
@@ -429,7 +430,7 @@ function openBankAccountForm() {
         <div class="field" style="grid-column:1/-1"><label>Tên gợi nhớ <span class="req">*</span></label><input class="inp" id="bkName" placeholder="VD: Vietcombank – TK thanh toán"></div>
         <div class="field"><label>Ngân hàng</label><input class="inp" id="bkBankName" placeholder="Vietcombank, ACB…"></div>
         <div class="field"><label>Số tài khoản</label><input class="inp" id="bkNumber"></div>
-        <div class="field" style="grid-column:1/-1"><label>Số dư ban đầu</label><input class="inp right num" id="bkOpening" type="number" min="0" step="1000" value="0"></div>
+        <div class="field" style="grid-column:1/-1"><label>Số dư ban đầu</label><input class="inp right num" id="bkOpening" data-money="1" type="text" inputmode="numeric" min="0" step="1000" value="0"></div>
       </div>`,
     foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="acc-bank-save"><i class="fa-solid fa-floppy-disk"></i>Lưu tài khoản</button>`,
   });
@@ -443,74 +444,72 @@ function openBankTxForm(bankId) {
     body: `<div class="form-grid">
         <div class="field"><label>Loại</label><select class="inp" id="bkTxType"><option value="IN">Tiền vào</option><option value="OUT">Tiền ra</option></select></div>
         <div class="field"><label>Ngày</label><input class="inp" id="bkTxDate" type="date" value="${currentDateYMD()}"></div>
-        <div class="field" style="grid-column:1/-1"><label>Số tiền <span class="req">*</span></label><input class="inp right num" id="bkTxAmount" type="number" min="0" step="1000"></div>
+        <div class="field" style="grid-column:1/-1"><label>Số tiền <span class="req">*</span></label><input class="inp right num" id="bkTxAmount" data-money="1" type="text" inputmode="numeric" min="0" step="1000"></div>
         <div class="field" style="grid-column:1/-1"><label>Nội dung</label><input class="inp" id="bkTxNote" placeholder="Nội dung theo sao kê"></div>
       </div>`,
     foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="acc-bank-tx-save" data-id="${esc(bankId)}"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`,
   });
 }
 
-/* ---- 2.4 Phải thu ---- */
+/* ---- 2.4 Phải thu — dùng chung dữ liệu CRM, không tạo sổ công nợ song song ---- */
 function accArView() {
-  const rows = DB.customers.filter((c) => c.debt > 0).sort((a, b) => b.debt - a.debt);
-  const total = rows.reduce((s, c) => s + c.debt, 0);
-  return `${pageHead('Công nợ phải thu', 'Tổng hợp theo hồ sơ khách hàng — cập nhật tự động khi ghi nhận thanh toán', '')}
-    <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tổng phải thu', fmtVND(total), 'fa-hand-holding-dollar', 'teal')}${mkpi('Số khách hàng còn nợ', rows.length, 'fa-users', 'blue')}</div>
-    <div class="card">${tableShell([{ t: 'Khách hàng' }, { t: 'Nhóm' }, { t: 'Công nợ', cls: 'right' }, { t: '', cls: 'right' }],
-      rows.map((c) => `<tr><td>${cell2(esc(c.name), esc(c.id) + ' · ' + esc(c.phone))}</td><td>${esc(c.group)}</td><td class="right num strong" style="color:var(--teal)">${fmtVND(c.debt)}</td><td class="right"><button class="btn btn-sm btn-primary" data-act="acc-ar-collect" data-id="${esc(c.id)}"><i class="fa-solid fa-hand-holding-dollar"></i>Ghi nhận thu</button></td></tr>`),
-      { emptyTitle: 'Không có khách hàng nào còn công nợ' })}</div>`;
+  const f = F('acc-ar', {q:'',customerId:'',status:'',from:'',to:''});
+  const q = String(f.q||'').trim().toLowerCase();
+  const statusOpts=[['UNPAID','Chưa thanh toán'],['PARTIALLY_PAID','Thanh toán một phần'],['PAID','Đã thanh toán'],['OVERDUE','Quá hạn']];
+  const customerOpts=(DB.customers||[]).map(c=>[c.id,`${c.id} · ${c.name}`]);
+  let list=AccFin.recognizedOrders().filter(o=>{
+    const st=typeof SalesCRM!=='undefined'?SalesCRM.receivableStatus(o):'';
+    const d=String(o.date||'').slice(0,10);
+    if(f.customerId&&o.customerId!==f.customerId)return false;
+    if(f.status&&st!==f.status)return false;
+    if(f.from&&d<f.from)return false;
+    if(f.to&&d>f.to)return false;
+    if(q&&![o.id,Q.customerName(o.customerId)].some(v=>String(v||'').toLowerCase().includes(q)))return false;
+    return true;
+  }).sort((a,b)=>String(b.date||'').localeCompare(String(a.date||''))||String(b.id||'').localeCompare(String(a.id||'')));
+  const paidOf=o=>typeof SalesCRM!=='undefined'?SalesCRM.paidOfOrder(o.id):Number(o.paid||0);
+  const remainOf=o=>typeof SalesCRM!=='undefined'?SalesCRM.receivableOfOrder(o):Math.max(0,Number(o.total||0)-paidOf(o));
+  const statusOf=o=>typeof SalesCRM!=='undefined'?SalesCRM.receivableStatus(o):(remainOf(o)>0?'UNPAID':'PAID');
+  const total=list.reduce((s,o)=>s+remainOf(o),0);
+  const overdue=list.reduce((s,o)=>s+(statusOf(o)==='OVERDUE'?remainOf(o):0),0);
+  const customersInDebt=new Set(list.filter(o=>remainOf(o)>0).map(o=>o.customerId)).size;
+  const badgeAr=st=>({UNPAID:'<span class="badge slate">Chưa thanh toán</span>',PARTIALLY_PAID:'<span class="badge orange">Thanh toán một phần</span>',PAID:'<span class="badge green">Đã thanh toán</span>',OVERDUE:'<span class="badge red">Quá hạn</span>'}[st]||esc(st));
+  const rows=list.map(o=>{const paid=paidOf(o),remain=remainOf(o),st=statusOf(o);return `<tr>
+    <td><span class="code">${esc(o.id)}</span><div class="cell-sub">${fmtDate(o.date)}</div></td>
+    <td>${cell2(esc(Q.customerName(o.customerId)),esc(o.customerId||''))}</td>
+    <td>${fmtDate(o.paymentDueDate||o.dueDate)}</td>
+    <td class="right num">${fmtVND(Number(o.total||0))}</td><td class="right num" style="color:var(--green)">${fmtVND(paid)}</td>
+    <td class="right num strong" style="color:${remain>0?'var(--red)':'var(--text-3)'}">${fmtVND(remain)}</td><td>${badgeAr(st)}</td>
+    <td class="right">${remain>0?`<button class="btn btn-sm btn-primary" data-act="crm-customer-pay-modal" data-id="${esc(o.id)}"><i class="fa-solid fa-hand-holding-dollar"></i>Thu tiền</button>`:'<span class="muted">Tất toán</span>'}</td></tr>`;});
+  const paymentRows=[...(DB.customerPayments||[])].filter(p=>{const d=String(p.date||'').slice(0,10);if(f.customerId&&p.customerId!==f.customerId)return false;if(f.from&&d<f.from)return false;if(f.to&&d>f.to)return false;return true;}).sort((a,b)=>String(b.createdAt||b.date||'').localeCompare(String(a.createdAt||a.date||''))).slice(0,100).map(p=>`<tr><td><span class="code">${esc(p.id)}</span></td><td>${fmtDate(p.date)}</td><td><span class="code">${esc(p.orderId||'—')}</span></td><td>${esc(Q.customerName(p.customerId))}</td><td class="right num strong">${fmtVND(Number(p.amount||0))}</td><td>${esc(p.method||'—')}</td><td>${esc(p.bankName||'—')}</td><td>${esc(p.payerName||p.collectedByName||Q.employeeName(p.createdBy)||'—')}</td></tr>`);
+  return `${pageHead('Công nợ phải thu','Nguồn duy nhất từ Đơn hàng bán + lịch sử thu tiền CRM; không nhập công nợ trùng ở CRM','')}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tổng còn phải thu',fmtVND(total),'fa-hand-holding-dollar','teal')}${mkpi('Khách hàng còn nợ',customersInDebt,'fa-users','blue')}${mkpi('Quá hạn',fmtVND(overdue),'fa-triangle-exclamation','orange')}</div>
+    <div class="card" style="margin-bottom:14px"><div class="toolbar">${searchBox('acc-ar','Tìm đơn hàng, khách hàng…')}${selectFilter('acc-ar','customerId',customerOpts,'Tất cả khách hàng')}${selectFilter('acc-ar','status',statusOpts,'Tất cả trạng thái')}${(f.q||f.customerId||f.status||f.from||f.to)?'<button class="btn btn-sm" data-act="clear-filter" data-key="acc-ar"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>':''}<label class="field-inline">Từ <input class="inp" type="date" data-f="acc-ar.from" value="${esc(f.from||'')}"></label><label class="field-inline">Đến <input class="inp" type="date" data-f="acc-ar.to" value="${esc(f.to||'')}"></label><span class="spacer"></span><span class="chip">${fmtN(list.length)} đơn</span></div>${tableShell([{t:'Đơn bán'},{t:'Khách hàng'},{t:'Hạn thanh toán'},{t:'Tổng phải thu',cls:'right'},{t:'Đã thu',cls:'right'},{t:'Còn phải thu',cls:'right'},{t:'Trạng thái'},{t:'',cls:'right'}],rows,{emptyTitle:'Không có công nợ phải thu phù hợp'})}</div>
+    <div class="card"><div class="card-head"><div><h3>Lịch sử thu tiền</h3><p>Dùng chung dữ liệu với đơn hàng và chi tiết khách hàng.</p></div></div>${tableShell([{t:'Mã thu'},{t:'Ngày'},{t:'Đơn hàng'},{t:'Khách hàng'},{t:'Số tiền',cls:'right'},{t:'Phương thức'},{t:'Ngân hàng'},{t:'Người thực hiện'}],paymentRows,{emptyTitle:'Chưa có lịch sử thu tiền'})}</div>`;
 }
 
-function openArCollectForm(customerId) {
-  const c = Q.customer(customerId); if (!c) return;
-  Modal.open({
-    title: `Ghi nhận thu tiền · ${c.name}`,
-    sub: `Công nợ hiện tại: ${fmtVND(c.debt)}`,
-    body: `<div class="form-grid">
-        <div class="field"><label>Ngày thu</label><input class="inp" id="arDate" type="date" value="${currentDateYMD()}"></div>
-        <div class="field"><label>Số tiền <span class="req">*</span></label><input class="inp right num" id="arAmount" type="number" min="1" max="${c.debt}" step="1000" value="${c.debt}"></div>
-        <div class="field" style="grid-column:1/-1"><label>Hình thức</label><select class="inp" id="arMethod"><option>Chuyển khoản</option><option>Tiền mặt</option></select></div>
-        <div class="field" style="grid-column:1/-1"><label>Ghi chú</label><input class="inp" id="arNote" placeholder="VD: thu công nợ tháng 8"></div>
-      </div>`,
-    foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="acc-ar-collect-save" data-id="${esc(c.id)}"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`,
-  });
-}
-
-/* ---- 2.5 Phải trả (tái dùng modal thanh toán NCC đã có trong app.js) ---- */
+/* ---- 2.5 Phải chi — dùng chung dữ liệu Mua hàng ---- */
 function accApView() {
-  const rows = AccFin.activePOs().filter((po) => (po.total - po.paid) > 0).sort((a, b) => (b.total - b.paid) - (a.total - a.paid));
-  const total = rows.reduce((s, po) => s + (po.total - po.paid), 0);
-  return `${pageHead('Công nợ phải trả', 'Tổng hợp theo Đơn đặt hàng mua — thanh toán ghi nhận thẳng vào công nợ nhà cung cấp', '')}
-    <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tổng phải trả', fmtVND(total), 'fa-file-invoice-dollar', 'red')}${mkpi('Số đơn còn nợ', rows.length, 'fa-file-lines', 'orange')}</div>
-    <div class="card">${tableShell([{ t: 'Đơn mua' }, { t: 'Nhà cung cấp' }, { t: 'Giá trị', cls: 'right' }, { t: 'Đã trả', cls: 'right' }, { t: 'Còn nợ', cls: 'right' }, { t: '', cls: 'right' }],
-      rows.map((po) => `<tr><td><span class="code">${esc(po.id)}</span></td><td>${esc(Q.supplierName(po.supplierId))}</td><td class="right num">${fmtVND(po.total)}</td><td class="right num">${fmtVND(po.paid)}</td><td class="right num strong" style="color:var(--red)">${fmtVND(po.total - po.paid)}</td><td class="right"><button class="btn btn-sm btn-primary" data-act="supplier-pay-modal" data-id="${esc(po.id)}"><i class="fa-solid fa-money-bill-transfer"></i>Thanh toán</button></td></tr>`),
-      { emptyTitle: 'Không có đơn mua nào còn công nợ' })}</div>`;
-}
-
-function openSupplierPayForm(poId) {
-  const po = AccFin.activePOs().find((x) => String(x.id) === String(poId));
-  if (!po) {
-    alert('Không tìm thấy đơn mua.');
-    return;
-  }
-  const remain = Math.max(0, Number(po.total || 0) - Number(po.paid || 0));
-  if (remain <= 0) {
-    alert('Đơn mua này đã được thanh toán đủ.');
-    return;
-  }
-  const supplierName = Q.supplierName(po.supplierId);
-  Modal.open({
-    title: `Thanh toán công nợ · ${supplierName}`,
-    sub: `Đơn mua: ${po.id} · Còn nợ: ${fmtVND(remain)}`,
-    body: `
-      <div class="form-grid">
-        <div class="field"><label>Ngày thanh toán</label><input class="inp" id="supplierPayDate" type="date" value="${currentDateYMD()}"></div>
-        <div class="field"><label>Số tiền<span class="req">*</span></label><input class="inp right num" id="supplierPayAmount" type="number" min="1" max="${remain}" step="1000" value="${remain}"></div>
-        <div class="field" style="grid-column:1/-1"><label>Hình thức thanh toán</label><select class="inp" id="supplierPayMethod"><option>Chuyển khoản</option><option>Tiền mặt</option></select></div>
-        <div class="field" style="grid-column:1/-1"><label>Ghi chú</label><input class="inp" id="supplierPayNote" placeholder="VD: thanh toán công nợ tháng 8"></div>
-      </div>`,
-    foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="supplier-pay-save" data-poid="${esc(po.id)}"><i class="fa-solid fa-floppy-disk"></i>Lưu thanh toán</button>`
-  });
+  const f=F('acc-ap',{q:'',supplierId:'',status:'',from:'',to:''});
+  const q=String(f.q||'').trim().toLowerCase();
+  const supplierOpts=(DB.suppliers||[]).map(x=>[x.id,`${x.id} · ${x.name}`]);
+  const statusOpts=[['UNPAID','Chưa thanh toán'],['PARTIAL','Thanh toán một phần'],['PAID','Đã thanh toán'],['REFUND_DUE','NCC phải hoàn lại']];
+  const paidOf=po=>typeof purchasePaidAmount==='function'?purchasePaidAmount(po):Math.max(Number(po.paid||0),(DB.supplierPayments||[]).filter(p=>String(p.poId)===String(po.id)).reduce((s,p)=>s+Number(p.amount||0),0));
+  const remainOf=po=>typeof purchasePayableRemaining==='function'?purchasePayableRemaining(po):Math.max(0,Number(po.total||0)-paidOf(po));
+  const refundOf=po=>typeof purchaseSupplierRefundDue==='function'?purchaseSupplierRefundDue(po):0;
+  const statusOf=po=>{const paid=paidOf(po),remain=remainOf(po),refund=refundOf(po);return refund>0?'REFUND_DUE':remain<=0?'PAID':paid>0?'PARTIAL':'UNPAID';};
+  let list=AccFin.activePOs().filter(po=>{const d=String(po.date||'').slice(0,10);if(f.supplierId&&po.supplierId!==f.supplierId)return false;if(f.status&&statusOf(po)!==f.status)return false;if(f.from&&d<f.from)return false;if(f.to&&d>f.to)return false;if(q&&![po.id,Q.supplierName(po.supplierId)].some(v=>String(v||'').toLowerCase().includes(q)))return false;return true;}).sort((a,b)=>String(b.date||'').localeCompare(String(a.date||''))||String(b.id||'').localeCompare(String(a.id||'')));
+  const total=list.reduce((s,po)=>s+remainOf(po),0);
+  const refundTotal=list.reduce((s,po)=>s+refundOf(po),0);
+  const suppliersInDebt=new Set(list.filter(po=>remainOf(po)>0).map(po=>po.supplierId)).size;
+  const badgeAp=st=>({UNPAID:'<span class="badge slate">Chưa thanh toán</span>',PARTIAL:'<span class="badge orange">Thanh toán một phần</span>',PAID:'<span class="badge green">Đã thanh toán</span>',REFUND_DUE:'<span class="badge orange">NCC phải hoàn lại</span>'}[st]||esc(st));
+  const rows=list.map(po=>{const paid=paidOf(po),remain=remainOf(po),refund=refundOf(po),st=statusOf(po);return `<tr><td><span class="code">${esc(po.id)}</span><div class="cell-sub">${fmtDate(po.date)}</div></td><td>${esc(Q.supplierName(po.supplierId))}</td><td class="right num">${fmtVND(po.total)}</td><td class="right num" style="color:var(--green)">${fmtVND(paid)}</td><td class="right num strong" style="color:${remain>0?'var(--red)':'var(--text-3)'}">${fmtVND(remain)}</td><td class="right num strong" style="color:${refund>0?'var(--orange)':'var(--text-3)'}">${fmtVND(refund)}</td><td>${badgeAp(st)}</td><td class="right">${remain>0?`<button class="btn btn-sm btn-primary" data-act="supplier-pay-modal" data-id="${esc(po.id)}"><i class="fa-solid fa-money-bill-transfer"></i>Thanh toán</button>`:(refund>0?`<button class="btn btn-sm btn-primary" data-act="supplier-refund-modal" data-id="${esc(po.id)}"><i class="fa-solid fa-rotate-left"></i>Nhận hoàn tiền</button>`:'<span class="muted">Tất toán</span>')}</td></tr>`;});
+  const paymentRows=[...(DB.supplierPayments||[])].filter(p=>{const d=String(p.date||'').slice(0,10);if(f.supplierId&&p.supplierId!==f.supplierId)return false;if(f.from&&d<f.from)return false;if(f.to&&d>f.to)return false;return true;}).sort((a,b)=>String(b.createdAt||b.date||'').localeCompare(String(a.createdAt||a.date||''))).slice(0,100).map(p=>`<tr><td><span class="code">${esc(p.id)}</span></td><td>${fmtDate(p.date)}</td><td><span class="code">${esc(p.poId||'—')}</span></td><td>${esc(Q.supplierName(p.supplierId))}</td><td class="right num strong">${fmtVND(Number(p.amount||0))}</td><td>${esc(p.method||'—')}</td><td>${esc(p.bankName||'—')}</td><td>${esc(p.payerName||Q.employeeName(p.createdBy)||'—')}</td></tr>`);
+  const refundRows=[...(DB.supplierRefunds||[])].filter(r=>{const d=String(r.date||'').slice(0,10);if(f.supplierId&&r.supplierId!==f.supplierId)return false;if(f.from&&d<f.from)return false;if(f.to&&d>f.to)return false;return true;}).sort((a,b)=>String(b.createdAt||b.date||'').localeCompare(String(a.createdAt||a.date||''))).slice(0,100).map(r=>`<tr><td><span class="code">${esc(r.id)}</span></td><td>${fmtDate(r.date)}</td><td><span class="code">${esc(r.poId||'—')}</span></td><td>${esc(Q.supplierName(r.supplierId))}</td><td class="right num strong" style="color:var(--green)">${fmtVND(Number(r.amount||0))}</td><td>${esc(r.method==='BANK_TRANSFER'?'Chuyển khoản ngân hàng':r.method==='CASH'?'Tiền mặt':r.method||'—')}</td><td>${esc(r.bankName||'—')}</td><td>${esc(r.receivedByName||r.createdByName||'—')}</td></tr>`);
+  return `${pageHead('Công nợ phải chi','Nguồn duy nhất từ Đơn đặt hàng mua + lịch sử thanh toán nhà cung cấp','')}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tổng còn phải chi',fmtVND(total),'fa-file-invoice-dollar','red')}${mkpi('NCC phải hoàn lại',fmtVND(refundTotal),'fa-rotate-left','orange')}${mkpi('Nhà cung cấp còn nợ',suppliersInDebt,'fa-building','orange')}</div>
+    <div class="card" style="margin-bottom:14px"><div class="toolbar">${searchBox('acc-ap','Tìm PO, nhà cung cấp…')}${selectFilter('acc-ap','supplierId',supplierOpts,'Tất cả nhà cung cấp')}${selectFilter('acc-ap','status',statusOpts,'Tất cả trạng thái')}${(f.q||f.supplierId||f.status||f.from||f.to)?'<button class="btn btn-sm" data-act="clear-filter" data-key="acc-ap"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>':''}<label class="field-inline">Từ <input class="inp" type="date" data-f="acc-ap.from" value="${esc(f.from||'')}"></label><label class="field-inline">Đến <input class="inp" type="date" data-f="acc-ap.to" value="${esc(f.to||'')}"></label><span class="spacer"></span><span class="chip">${fmtN(list.length)} PO</span></div>${tableShell([{t:'Đơn mua'},{t:'Nhà cung cấp'},{t:'Giá trị',cls:'right'},{t:'Đã trả',cls:'right'},{t:'Còn phải chi',cls:'right'},{t:'NCC phải hoàn lại',cls:'right'},{t:'Trạng thái'},{t:'',cls:'right'}],rows,{emptyTitle:'Không có công nợ phải chi phù hợp'})}</div>
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><div><h3>Lịch sử thanh toán nhà cung cấp</h3><p>Dùng chung dữ liệu với Mua hàng.</p></div></div>${tableShell([{t:'Mã chi'},{t:'Ngày'},{t:'PO'},{t:'Nhà cung cấp'},{t:'Số tiền',cls:'right'},{t:'Phương thức'},{t:'Ngân hàng'},{t:'Người thực hiện'}],paymentRows,{emptyTitle:'Chưa có lịch sử thanh toán'})}</div><div class="card"><div class="card-head"><div><h3>Lịch sử NCC hoàn tiền</h3><p>Khoản doanh nghiệp đã nhận lại sau trả hàng hoặc thanh toán dư.</p></div></div>${tableShell([{t:'Mã nhận hoàn'},{t:'Ngày'},{t:'PO'},{t:'Nhà cung cấp'},{t:'Số tiền nhận',cls:'right'},{t:'Phương thức'},{t:'Ngân hàng nhận'},{t:'Người ghi nhận'}],refundRows,{emptyTitle:'Chưa có NCC hoàn tiền'})}</div>`;
 }
 
 /* ---- 2.6 Giá thành ---- */
@@ -572,7 +571,7 @@ function openFixedAssetForm(id = '') {
         <div class="field" style="grid-column:1/-1"><label>Tên tài sản <span class="req">*</span></label><input class="inp" id="faName" value="${esc(a?.name || '')}"></div>
         <div class="field"><label>Bộ phận sử dụng</label><select class="inp" id="faDept">${DB.departments.map((d) => `<option ${a?.dept === d ? 'selected' : ''}>${esc(d)}</option>`).join('')}</select></div>
         <div class="field"><label>Ngày mua</label><input class="inp" id="faDate" type="date" value="${esc(a?.purchaseDate || currentDateYMD())}"></div>
-        <div class="field"><label>Nguyên giá <span class="req">*</span></label><input class="inp right num" id="faCost" type="number" min="0" step="1000" value="${a?.cost || ''}"></div>
+        <div class="field"><label>Nguyên giá <span class="req">*</span></label><input class="inp right num" id="faCost" data-money="1" type="text" inputmode="numeric" min="0" step="1000" value="${a?.cost || ''}"></div>
         <div class="field"><label>Số năm khấu hao</label><input class="inp right num" id="faYears" type="number" min="1" max="30" value="${a?.usefulYears || 8}"></div>
       </div>`,
     foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="acc-asset-save" data-id="${esc(id)}"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`,
@@ -1327,7 +1326,7 @@ Object.assign(Actions, {
   'acc-cash-add': (d) => openCashTxForm(d.type),
   'acc-cash-save': (d) => {
     const date = $('#ctxDate')?.value || currentDateYMD();
-    const amount = Number($('#ctxAmount')?.value) || 0;
+    const amount = parseMoney($('#ctxAmount')?.value) || 0;
     if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
     const category = $('#ctxCategory')?.value || '';
     const note = $('#ctxNote')?.value.trim() || category;
@@ -1344,33 +1343,25 @@ Object.assign(Actions, {
   'acc-bank-save': () => {
     const name = $('#bkName')?.value.trim();
     if (!name) { Toast.err('Thiếu tên tài khoản', 'Vui lòng nhập tên gợi nhớ cho tài khoản.'); return; }
-    DB.bankAccounts.push({ id: nextCode('BANK-', DB.bankAccounts, 2), name, bankName: $('#bkBankName')?.value.trim() || '', accountNumber: $('#bkNumber')?.value.trim() || '', openingBalance: Number($('#bkOpening')?.value) || 0 });
+    DB.bankAccounts.push({ id: nextCode('BANK-', DB.bankAccounts, 2), name, bankName: $('#bkBankName')?.value.trim() || '', accountNumber: $('#bkNumber')?.value.trim() || '', openingBalance: parseMoney($('#bkOpening')?.value) || 0 });
     Modal.close(); render(); Toast.ok('Đã thêm tài khoản ngân hàng', name);
   },
   'acc-bank-tx-add': (d) => openBankTxForm(d.id),
   'acc-bank-tx-save': (d) => {
-    const amount = Number($('#bkTxAmount')?.value) || 0;
+    const amount = parseMoney($('#bkTxAmount')?.value) || 0;
     if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
     DB.bankTransactions.unshift({ id: nextCode('BTX-2026-', DB.bankTransactions), bankId: d.id, type: $('#bkTxType')?.value || 'IN', date: $('#bkTxDate')?.value || currentDateYMD(), amount, note: $('#bkTxNote')?.value.trim() || '' });
     Modal.close(); render(); Toast.ok('Đã ghi nhận giao dịch ngân hàng');
   },
 
-  'acc-ar-collect': (d) => openArCollectForm(d.id),
-  'acc-ar-collect-save': (d) => {
-    const c = Q.customer(d.id); if (!c) return;
-    const amount = Number($('#arAmount')?.value) || 0;
-    if (amount <= 0 || amount > c.debt) { Toast.err('Số tiền không hợp lệ', `Số tiền phải lớn hơn 0 và không vượt quá công nợ ${fmtVND(c.debt)}.`); return; }
-    c.debt = Math.round((c.debt - amount) * 100) / 100;
-    DB.customerPayments.unshift({ id: nextCode('TT-KH-2026-', DB.customerPayments), customerId: c.id, contractId: '', date: $('#arDate')?.value || currentDateYMD(), amount, method: $('#arMethod')?.value || 'Chuyển khoản', note: $('#arNote')?.value.trim() || `Thu công nợ ${c.name}` });
-    Modal.close(); render();
-    Toast.ok('Đã ghi nhận thu tiền', `${c.name} · ${fmtVND(amount)} · Còn nợ ${fmtVND(c.debt)}`);
-  },
+  'acc-ar-collect': (d) => { const o=AccFin.recognizedOrders().find(x=>x.customerId===d.id && (typeof SalesCRM==='undefined'||SalesCRM.receivableOfOrder(x)>0)); if(o) openCustomerPaymentModal(o.id); },
+  'acc-ar-collect-save': () => { Toast.warn('Đã chuyển chức năng','Vui lòng thu tiền trực tiếp theo từng đơn tại Công nợ phải thu.'); },
 
   'acc-asset-add': () => openFixedAssetForm(),
   'acc-asset-edit': (d) => openFixedAssetForm(d.id),
   'acc-asset-save': (d) => {
     const name = $('#faName')?.value.trim();
-    const cost = Number($('#faCost')?.value) || 0;
+    const cost = parseMoney($('#faCost')?.value) || 0;
     if (!name || cost <= 0) { Toast.err('Thiếu thông tin', 'Vui lòng nhập tên tài sản và nguyên giá lớn hơn 0.'); return; }
     const payload = { name, dept: $('#faDept')?.value || '', purchaseDate: $('#faDate')?.value || currentDateYMD(), cost, usefulYears: Number($('#faYears')?.value) || 8 };
     if (d.id) {

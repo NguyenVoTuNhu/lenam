@@ -228,6 +228,7 @@ const PurchaseAPI = (() => {
     'po-goods-receipt-save': () => ['goodsReceipts', 'purchaseOrders', 'purchasePriceHistory'],
     'goods-receipt-save': () => ['goodsReceipts', 'purchaseOrders', 'purchasePriceHistory'],
     'supplier-pay-save': () => ['supplierPayments', 'purchaseOrders'],
+    'supplier-refund-save': () => ['supplierRefunds', 'purchaseOrders'],
   };
 
   function wrapActions(actions) {

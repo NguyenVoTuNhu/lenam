@@ -772,7 +772,9 @@ const InventoryAPI = (() => {
     'inv-save-alert-config': () => ['settings'],
     // Nhà hàng/POS: khi thanh toán mới phát sinh trừ tồn và ledger kho cửa hàng.
     'restaurant-pos-save': () => ['inventory', 'inventoryTransactions'],
+    'restaurant-pos-checkout-confirm': () => ['inventory', 'inventoryTransactions'],
     'restaurant-order-pay': () => ['inventory', 'inventoryTransactions'],
+    'restaurant-replenishment-fulfill-save': () => ['stockTransfers', 'inventory', 'inventoryTransactions'],
   };
 
   function wrapActions(actions) {

@@ -17,6 +17,48 @@ function currentStage(po) {
   return pending || po.stages[po.stages.length - 1];
 }
 
+
+
+/** Dựng công đoạn LSX từ routing đã khai báo trong BOM.
+ * QC và Hoàn thành luôn bắt buộc, không phụ thuộc routing của BOM.
+ */
+function buildProductionStagesFromRouting(qty, routing, startDate) {
+  const rows = Array.isArray(routing) ? routing : [];
+  const stages = [];
+  rows.forEach((r, idx) => {
+    const operationId = Array.isArray(r) ? r[0] : r?.operationId;
+    if (!operationId) return;
+    const op = (DB.operations || []).find(x => x.id === operationId) || {};
+    const name = String(op.name || op.workshop || operationId).trim();
+    if (!name || /(^|\s)QC(\s|$)|hoàn thành/i.test(name)) return;
+    stages.push({
+      operationId,
+      name,
+      leadId: op.leadId || '',
+      machine: op.machine || '',
+      qtyPlan: Number(qty || 0), qtyDone: 0, hours: 0,
+      status: 'pending', start: '', end: '', note: '',
+      plannedHoursPerUnit: Number(Array.isArray(r) ? r[1] : r?.hoursPer || 0),
+      routingNote: String(Array.isArray(r) ? (r[2] || '') : (r?.note || ''))
+    });
+  });
+  const qcOp = (DB.operations || []).find(o => /(^|\s)QC(\s|$)|KCS|ATTP/i.test(String(o.name || o.workshop || '')));
+  stages.push({operationId:qcOp?.id||'QC', name:'QC — ATTP', leadId:qcOp?.leadId||'NV-015', machine:qcOp?.machine||'Phòng kiểm nghiệm / bàn QC', qtyPlan:Number(qty||0), qtyDone:0, hours:0, status:'pending', start:'', end:'', note:''});
+  stages.push({operationId:'COMPLETE', name:'Hoàn thành', leadId:'NV-018', machine:'Kho thành phẩm', qtyPlan:Number(qty||0), qtyDone:0, hours:0, status:'pending', start:'', end:'', note:''});
+  return stages;
+}
+
+function ensureProductionOrderStageSchema(po) {
+  if (!po || productionOrderStarted(po)) return po;
+  const product = Q.product(po.productId);
+  const routing = (po.routingOverride && po.routingOverride.length) ? po.routingOverride : (product?.routing || []);
+  const expected = buildProductionStagesFromRouting(po.qty, routing, po.startDate || currentDateYMD());
+  const currentSig = (po.stages || []).map(x => x.operationId || x.name).join('|');
+  const expectedSig = expected.map(x => x.operationId || x.name).join('|');
+  if (currentSig !== expectedSig) po.stages = expected;
+  return po;
+}
+
 function productionOrderStarted(po) {
   return (po?.stages || []).some((s) => s.status !== 'pending' || Number(s.qtyDone || 0) > 0);
 }
@@ -80,6 +122,7 @@ Views.production = function () {
   const q = (f.q || '').toLowerCase().trim();
   const onlyLate = State.params.filter === 'late';
 
+  (DB.productionOrders || []).forEach(ensureProductionOrderStageSchema);
   let list = DB.productionOrders.filter((p) => {
     if (f.status && p.status !== f.status) return false;
     if (f.stage && currentStage(p).name !== f.stage) return false;
@@ -145,7 +188,7 @@ Views.production = function () {
     <div class="toolbar">
       ${searchBox('production', 'Tìm mã LSX, đơn hàng, sản phẩm…')}
       ${selectFilter('production', 'status', statusOptions('lsx_'), 'Tất cả trạng thái')}
-      ${selectFilter('production', 'stage', DB.stageNames.map((s) => [s, s]), 'Tất cả công đoạn')}
+      ${selectFilter('production', 'stage', [...new Set([...(DB.stageNames||[]), ...(DB.productionOrders||[]).flatMap(po=>(po.stages||[]).map(st=>st.name)).filter(Boolean)])].map((s) => [s, s]), 'Tất cả công đoạn')}
       ${(f.q || f.status || f.stage || onlyLate) ? '<button class="btn btn-sm" data-act="clear-filter" data-key="production"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>' : ''}
       <span class="spacer"></span>
       <span class="chip"><i class="fa-solid fa-list"></i> ${fmtN(list.length)} lệnh</span>
@@ -172,6 +215,7 @@ Views['production-detail'] = function (params) {
       if (typeof ProductionAPI !== 'undefined') ProductionAPI.scheduleSync(250);
     }
   }
+  if (p) ensureProductionOrderStageSchema(p);
   if (!p) return `<div class="empty"><div class="empty-ico"><i class="fa-solid fa-file-circle-xmark"></i></div><h4>Không tìm thấy lệnh sản xuất</h4><button class="btn btn-primary btn-sm" data-act="go" data-id="production">Về danh sách</button></div>`;
 
   const prog = Q.progress(p);
@@ -292,8 +336,8 @@ Views['production-detail'] = function (params) {
   <!-- QUY TRÌNH SẢN XUẤT DẠNG KANBAN -->
   <div class="card">
     <div class="card-head">
-      <div><h3>Quy trình sản xuất — 8 công đoạn</h3><p>Mỗi công đoạn có người phụ trách, máy, thời gian và sản lượng thực tế</p></div>
-      <div class="right"><span class="chip"><i class="fa-solid fa-check"></i> ${p.stages.filter((s) => s.status === 'done').length}/8 công đoạn xong</span></div>
+      <div><h3>Quy trình sản xuất — ${p.stages.length} công đoạn</h3><p>Công đoạn lấy từ BOM / routing; QC và Hoàn thành luôn bắt buộc</p></div>
+      <div class="right"><span class="chip"><i class="fa-solid fa-check"></i> ${p.stages.filter((s) => s.status === 'done').length}/${p.stages.length} công đoạn xong</span></div>
     </div>
     <div class="card-body">
       <div class="kanban">
@@ -381,19 +425,19 @@ function openStageModal(poId, index) {
     sub: `${p.id} · ${esc(p.productName)} · Kế hoạch ${fmtN(s.qtyPlan)} ${esc(p.unit)}`,
     body: `
       <div class="form-grid">
-        <div class="field"><label>Sản lượng đã hoàn thành (${esc(p.unit)})</label>
+        <div class="field"><label>Sản lượng đã hoàn thành (${esc(p.unit)}) <span class="req">*</span></label>
           <input class="inp num" type="number" id="stQty" min="0" max="${s.qtyPlan}" value="${s.qtyDone}" /></div>
-        <div class="field"><label>Giờ máy phát sinh</label>
+        <div class="field"><label>Giờ máy phát sinh <span class="req">*</span></label>
           <input class="inp num" type="number" id="stHours" min="0" step="0.5" value="${s.hours}" /></div>
-        <div class="field"><label>Người phụ trách</label>
+        <div class="field"><label>Người phụ trách <span class="req">*</span></label>
           <select class="inp" id="stLead">
             ${DB.employees.filter((e) => ['Sản xuất', 'QC/KCS', 'Kho vận'].includes(e.dept) && e.status !== 'ns_nghi_viec').slice(0, 40)
               .map((e) => `<option value="${e.id}" ${s.leadId === e.id ? 'selected' : ''}>${esc(e.name)} — ${esc(e.position)}</option>`).join('')}
           </select></div>
-        <div class="field"><label>Máy / trạm</label>
+        <div class="field"><label>Máy / trạm <span class="req">*</span></label>
           <input class="inp" id="stMachine" value="${esc(s.machine)}" /></div>
       </div>
-      <div class="field"><label>Ghi chú</label>
+      <div class="field"><label>Ghi chú <span class="req">*</span></label>
         <textarea class="inp" id="stNote" rows="2" placeholder="Ví dụ: dừng 30 phút thay dao phay…">${esc(s.note)}</textarea></div>
       <div style="font-size:12.3px;color:var(--text-3);background:var(--surface-2);border-radius:var(--r);padding:10px 12px">
         <i class="fa-solid fa-circle-info" style="color:var(--primary)"></i>
@@ -670,7 +714,7 @@ function pfPlanStatus(status) {
   const x=map[status]||[status||'—','slate']; return `<span class="badge ${x[1]}">${x[0]}</span>`;
 }
 function pfRequestStatus(status) {
-  const map={WAITING_WAREHOUSE_APPROVAL:['Chờ kho duyệt','orange'],APPROVED:['Kho đã duyệt','blue'],ISSUED:['Đã xuất NVL','green'],REJECTED:['Từ chối','red']};
+  const map={WAITING_WAREHOUSE_APPROVAL:['Chờ kho duyệt','orange'],APPROVED:['Kho đã duyệt','blue'],ISSUED:['Đã xuất NVL','green'],COMPLETED:['Đã hoàn thành','green'],REJECTED:['Từ chối','red']};
   const x=map[status]||[status||'—','slate']; return `<span class="badge ${x[1]}">${x[0]}</span>`;
 }
 function pfBomRequiredQty(qtyPerUnit, productionQty, lossPct=0) {

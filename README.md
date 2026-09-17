@@ -822,3 +822,19 @@ Nếu chưa cấu hình Google Maps, ERP vẫn chạy bình thường; trường
 ### Dữ liệu vị trí
 
 Hệ thống ưu tiên `lat/lng` nếu master Kho hoặc Đơn hàng có khai báo. Nếu chưa có tọa độ, Routes API dùng chuỗi địa chỉ hiện tại. Vì vậy nên khai báo địa chỉ Kho và địa chỉ giao hàng càng chính xác càng tốt.
+
+## Nhà hàng/Cửa hàng & QC/QA - persistence thật trên KIO
+
+Bản này không seed dữ liệu demo cho Nhà hàng/Cửa hàng và QC/QA. Server là nguồn dữ liệu chính.
+
+Các bảng mới dùng prefix `lenam_`:
+- `lenam_restaurant_stores`
+- `lenam_restaurant_recipes`
+- `lenam_restaurant_pos_orders`
+- `lenam_restaurant_replenishment_requests`
+- `lenam_quality_inspection_records`
+- `lenam_quality_capa`
+- `lenam_quality_product_recalls`
+
+Tạo các bảng bằng file `docs/lenam_restaurant_quality_tables.sql` trước khi sử dụng chức năng.
+Master dùng chung như nguyên liệu, thành phẩm, kho, lô, nhân viên vẫn lấy từ các bảng hiện hữu; module không tạo bản sao master.
