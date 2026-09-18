@@ -165,9 +165,12 @@ function ensureFinishedQcPending(po, qty) {
   const safeQty = Math.max(0, Number(qty || po.qty || 0));
   const lotId = nextCode('LOT-', DB.inventoryLots || []);
   const lotNumber = `LOT-${po.id}`;
+  const productMaster = Q.product(po.productId) || {};
+  const mfgDate = currentDateYMD();
+  const shelfLifeDays = Math.max(0, Number(productMaster.shelfLifeDays || 0));
   const lot = {
     id: lotId, lotNumber, productId: po.productId, productionOrderId: po.id,
-    mfgDate: currentDateYMD(), expiryDate: addDays(currentDateYMD(), 7),
+    mfgDate, expiryDate: shelfLifeDays > 0 ? addDays(mfgDate, shelfLifeDays) : '',
     supplierLot:'', supplierId:'', qcStatus:'QC_PENDING', status:'active', createdAt:new Date().toISOString()
   };
   DB.inventoryLots.unshift(lot);
@@ -279,6 +282,65 @@ const Actions = {
   'crm-go-opportunities': () => go('crm', { tab: 'customers' }),
   'crm-go-transactions': () => go('crm', { tab: 'transactions' }),
   'crm-go-orders': () => go('crm', { tab: 'orders' }),
+  'crm-go-debts': () => go('crm', { tab: 'debts' }),
+  'crm-customer-pay-modal': (d) => openCustomerPaymentModal(d.id),
+  'crm-customer-pay-save': async (d, el) => {
+    DB.customerPayments = DB.customerPayments || [];
+    const o = Q.order(d.orderid); if (!o) return;
+    const amount = parseMoney($('#crmPayAmount')?.value || 0);
+    const remain = SalesCRM.receivableOfOrder(o);
+    const method = $('#crmPayMethod')?.value || 'BANK_TRANSFER';
+    const payerId = $('#crmPayPayer')?.value || '';
+    const payer = (DB.employees || []).find(e => String(e.id) === String(payerId));
+    const payerName = payer?.name || payer?.fullName || ((String(payerId)===String(DB.currentUser?.userId||DB.currentUser?.id)) ? ((String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||'')) : Q.employeeName(payerId));
+    const bankId = method === 'BANK_TRANSFER' ? ($('#crmPayBank')?.value || '') : '';
+    const bank = (DB.bankAccounts || []).find(b => String(b.id) === String(bankId));
+    const date = $('#crmPayDate')?.value || (typeof currentDateYMD==='function'?currentDateYMD():new Date().toISOString().slice(0,10));
+    if (amount <= 0) { Toast.err('Số tiền không hợp lệ','Vui lòng nhập số tiền lớn hơn 0.'); return; }
+    if (amount > remain) { Toast.err('Vượt quá công nợ',`Số tiền thu ${fmtVND(amount)} lớn hơn số còn phải thu ${fmtVND(remain)}.`); return; }
+    if (!payerId) { Toast.err('Chưa chọn người thực hiện','Vui lòng chọn người ghi nhận/thu khoản thanh toán này.'); return; }
+    if (method === 'BANK_TRANSFER' && !bankId) { Toast.err('Chưa chọn ngân hàng','Vui lòng chọn tài khoản ngân hàng nhận tiền.'); return; }
+
+    const id = SalesCRM.nextNumericCode('TT-KH-2026-', DB.customerPayments, 4);
+    const payment = {
+      id, orderId:o.id, customerId:o.customerId, date, amount,
+      method: method === 'BANK_TRANSFER' ? 'Chuyển khoản' : 'Tiền mặt',
+      bankId, bankName: bank?.name || bank?.bankName || '', bankAccount: bank?.accountNumber || '',
+      payerId, payerName,
+      reference: $('#crmPayRef')?.value.trim() || '', note: $('#crmPayNote')?.value.trim() || '',
+      createdBy: DB.currentUser?.id || '', createdByName: DB.currentUser?.name || '', createdAt: new Date().toISOString()
+    };
+
+    // Lưu snapshot để rollback nếu KIO không ghi được. Không được để UI hiện
+    // "Thanh toán một phần" khi persistence thật thất bại.
+    const oldPaid = o.paid;
+    const oldReceivable = o.receivable;
+    DB.customerPayments.unshift(payment);
+    o.paid = SalesCRM.paidOfOrder(o.id);
+    o.receivable = SalesCRM.receivableOfOrder(o);
+
+    if (el) el.disabled = true;
+    try {
+      if (typeof CRMAPI !== 'undefined') {
+        await CRMAPI.syncCollections(['customerPayments','orders']);
+      }
+      // KIO đã thành công: chỉ cập nhật cache local, không schedule ghi lần 2.
+      SalesCRM.saveLocal(['customerPayments','orders'], { sync:false });
+      Modal.close();
+      if(State.module==='accounting') go('accounting',{tab:'ar'}); else go('crm',{tab:'debts'});
+      Toast.ok('Đã ghi nhận thu tiền',`${id} · ${fmtVND(amount)} · Còn lại ${fmtVND(SalesCRM.receivableOfOrder(o))}`);
+    } catch (err) {
+      // Rollback state/cache giao diện nếu server không lưu được.
+      DB.customerPayments = (DB.customerPayments || []).filter(p => p !== payment && p.id !== id);
+      if (oldPaid === undefined) delete o.paid; else o.paid = oldPaid;
+      if (oldReceivable === undefined) delete o.receivable; else o.receivable = oldReceivable;
+      SalesCRM.saveLocal(['customerPayments','orders'], { sync:false });
+      console.error('[CRM] Ghi nhận thu tiền thất bại, đã rollback local state:', err);
+      Toast.err('Chưa ghi nhận được thu tiền', err?.message || 'Không thể lưu dữ liệu lên KIO.');
+    } finally {
+      if (el) el.disabled = false;
+    }
+  },
   'crm-customer-orders': (d) => {
     const f = F('orders', { q:'',status:'',statusGroup:'',owner:'',customerId:'',from:'',to:'' });
     f.q = ''; f.status = 'dh_da_giao'; f.statusGroup = ''; f.owner = ''; f.customerId = d.id || ''; f.from = ''; f.to = '';
@@ -297,6 +359,8 @@ const Actions = {
     const wrap=$('#crmOrderLines'); if(!wrap)return;
     const options=decodeURIComponent(wrap.dataset.options||'');
     wrap.insertAdjacentHTML('beforeend', crmOrderLineHTML(options,false));
+    if (typeof bindCrmOrderWeightEvents === 'function') bindCrmOrderWeightEvents(wrap);
+    if (typeof updateCrmOrderTotals === 'function') updateCrmOrderTotals(document);
     const rows=wrap.querySelectorAll('.crm-order-line');
     if(rows.length>1) rows[0].querySelector('[data-act="crm-order-remove-line"]')?.removeAttribute('disabled');
   },
@@ -304,41 +368,75 @@ const Actions = {
     const wrap=$('#crmOrderLines'); const row=el?.closest('.crm-order-line'); if(!wrap||!row)return;
     if(wrap.querySelectorAll('.crm-order-line').length<=1)return;
     row.remove();
+    if (typeof updateCrmOrderTotals === 'function') updateCrmOrderTotals(document);
     const remain=wrap.querySelectorAll('.crm-order-line');
     if(remain.length===1) remain[0].querySelector('[data-act="crm-order-remove-line"]')?.setAttribute('disabled','');
+  },
+  'crm-order-add-cost': () => {
+    const wrap=$('#crmOtherCosts'); if(!wrap||typeof crmOtherCostLineHTML!=='function')return;
+    wrap.insertAdjacentHTML('beforeend', crmOtherCostLineHTML({},false));
+    if(typeof bindCrmOtherCostEvents==='function') bindCrmOtherCostEvents(wrap);
+    const rows=wrap.querySelectorAll('.crm-other-cost-line');
+    if(rows.length>1) rows[0].querySelector('[data-act="crm-order-remove-cost"]')?.removeAttribute('disabled');
+    if(typeof updateCrmOrderTotals==='function') updateCrmOrderTotals(document);
+  },
+  'crm-order-remove-cost': (d,el) => {
+    const wrap=$('#crmOtherCosts'); const row=el?.closest('.crm-other-cost-line'); if(!wrap||!row)return;
+    if(wrap.querySelectorAll('.crm-other-cost-line').length<=1){
+      row.querySelector('input[name="otherCostName"]')?.setAttribute('value','');
+      const n=row.querySelector('input[name="otherCostName"]'); if(n)n.value='';
+      const a=row.querySelector('input[name="otherCostAmount"]'); if(a)a.value='';
+    } else row.remove();
+    const remain=wrap.querySelectorAll('.crm-other-cost-line');
+    if(remain.length===1) remain[0].querySelector('[data-act="crm-order-remove-cost"]')?.setAttribute('disabled','');
+    if(typeof updateCrmOrderTotals==='function') updateCrmOrderTotals(document);
   },
   'crm-order-save': () => {
     const customerId=$('#crmOrderCustomer')?.value||'';
     const actualToday=typeof currentDateYMD==='function'?currentDateYMD():new Date().toISOString().slice(0,10);
     const date=$('#crmOrderDate')?.value||'';
     const dueDate=$('#crmOrderDue')?.value||'';
+    const paymentDueDate=$('#crmPaymentDue')?.value||dueDate;
     const ownerId=$('#crmOrderOwner')?.value||DB.currentUser?.id||'';
     if(!customerId){Toast.err('Chưa chọn khách hàng','Vui lòng chọn khách hàng mua thành phẩm.');return;}
-    const deliveryAddress=$('#crmDeliveryAddress')?.value.trim()||'';
+    const deliveryParts=typeof crmReadDeliveryAddressForm==='function'?crmReadDeliveryAddressForm():{address:$('#crmDeliveryAddressDetail')?.value.trim()||'',province:'',district:'',ward:'',addressDetail:$('#crmDeliveryAddressDetail')?.value.trim()||''};
+    const deliveryAddress=deliveryParts.address;
+    const deliveryProvince=deliveryParts.province||'';
+    const deliveryDistrict=deliveryParts.district||'';
+    const deliveryWard=deliveryParts.ward||'';
+    const deliveryAddressDetail=deliveryParts.addressDetail||'';
     const deliveryRecipient=$('#crmDeliveryRecipient')?.value.trim()||'';
     const deliveryPhone=$('#crmDeliveryPhone')?.value.trim()||'';
     const deliveryNote=$('#crmDeliveryNote')?.value.trim()||'';
-    const shippingFee=Math.max(0,Number($('#crmShippingFee')?.value)||0);
+    const deliveryLat=Number($('#crmDeliveryLat')?.value||0)||null;
+    const deliveryLng=Number($('#crmDeliveryLng')?.value||0)||null;
+    const shippingFee=Math.max(0,parseMoney($('#crmShippingFee')?.value)||0);
     if(!deliveryAddress){Toast.err('Thiếu địa chỉ giao hàng','Vui lòng nhập địa chỉ nhận hàng của đơn bán.');return;}
     if(!date||!dueDate){Toast.err('Thiếu ngày','Vui lòng nhập ngày đặt và ngày giao dự kiến.');return;}
     if(date<actualToday){Toast.err('Ngày đặt không hợp lệ',`Ngày đặt hàng phải từ ${fmtDate(actualToday)} trở về sau.`);return;}
     if(dueDate<date){Toast.err('Ngày giao không hợp lệ','Ngày giao dự kiến không được trước ngày đặt.');return;}
+    if(paymentDueDate<date){Toast.err('Hạn thanh toán không hợp lệ','Hạn thanh toán không được trước ngày đặt hàng.');return;}
     const rows=$$('#crmOrderLines .crm-order-line').map((row,index)=>{
       const productId=row.querySelector('select[name="product"]')?.value||'';
       const qty=Number(row.querySelector('input[name="qty"]')?.value)||0;
       const p=Q.product(productId);
-      const price=Number(row.querySelector('input[name="price"]')?.value)||Number(p?.price||0);
-      return {index,productId,qty,price,p};
+      const price=parseMoney(row.querySelector('input[name="price"]')?.value)||Number(p?.price||0);
+      const vatRate=Math.max(0,Number(row.querySelector('select[name="vatRate"]')?.value ?? 0)||0);
+      const packedWeightKg=Math.max(0, Number(p?.packedWeightG||0)>0 ? Number(p.packedWeightG)/1000 : Number(p?.packedWeightKg||0));
+      return {index,productId,qty,price,vatRate,p,packedWeightKg};
     });
     if(!rows.length||rows.some(x=>!x.productId||x.qty<=0)){Toast.err('Dòng hàng chưa hợp lệ','Mỗi dòng phải chọn thành phẩm và nhập số lượng lớn hơn 0.');return;}
     if(new Set(rows.map(x=>x.productId)).size!==rows.length){Toast.err('Thành phẩm bị trùng','Vui lòng gộp cùng thành phẩm vào một dòng.');return;}
-    const items=rows.map((x,i)=>({no:i+1,productId:x.productId,name:x.p?.name||x.productId,spec:x.p?.spec||'',unit:x.p?.unit||'',qty:x.qty,price:x.price,amount:x.qty*x.price}));
-    const vatRate=Number($('#crmOrderVat')?.value)||0;
-    const subtotal=items.reduce((sum,it)=>sum+it.amount,0); const vat=Math.round(subtotal*vatRate/100); const total=subtotal+vat+shippingFee;
+    const items=rows.map((x,i)=>{const amount=x.qty*x.price;const vatAmount=Math.round(amount*x.vatRate/100);return {no:i+1,productId:x.productId,name:x.p?.name||x.productId,spec:x.p?.spec||'',unit:x.p?.unit||'',qty:x.qty,price:x.price,amount,vatRate:x.vatRate,vatAmount,lineTotal:amount+vatAmount,packedWeightKg:x.packedWeightKg,shippingWeightKg:Math.round(x.qty*x.packedWeightKg*1000)/1000};});
+    const shippingWeightKg=Math.round(items.reduce((sum,it)=>sum+Number(it.shippingWeightKg||0),0)*1000)/1000;
+    const otherCosts=typeof crmReadOtherCosts==='function'?crmReadOtherCosts(document):[];
+    if(otherCosts.some(x=>!x.name||Number(x.amount||0)<=0)){Toast.err('Chi phí khác chưa hợp lệ','Mỗi khoản chi phí phải có nội dung và số tiền lớn hơn 0.');return;}
+    const otherCost=otherCosts.reduce((sum,x)=>sum+Number(x.amount||0),0);
+    const subtotal=items.reduce((sum,it)=>sum+it.amount,0); const vat=items.reduce((sum,it)=>sum+Number(it.vatAmount||0),0); const total=subtotal+vat+shippingFee+otherCost;
     const id=SalesCRM.nextNumericCode('DH-2026-',DB.orders,4);
     const opportunityId=$('#crmOrderOpportunity')?.value||'';
     const nowIso=new Date().toISOString();
-    const order={id,customerId,date,dueDate,ownerId,status:'dh_cho_xu_ly',quoteId:null,opportunityId,items,subtotal,discountPct:0,discount:0,vatRate,vat,shippingFee,total,deliveryAddress,deliveryRecipient,deliveryPhone,deliveryNote,note:$('#crmOrderNote')?.value.trim()||'',createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:DB.currentUser?.name||DB.currentUser?.fullName||'',createdAt:nowIso};
+    const order={id,customerId,date,dueDate,paymentDueDate,ownerId,status:'dh_cho_xu_ly',quoteId:null,opportunityId,items,subtotal,discountPct:0,discount:0,vatRate:null,vat,shippingFee,otherCosts,otherCost,total,shippingWeightKg,deliveryAddress,deliveryProvince,deliveryDistrict,deliveryWard,deliveryAddressDetail,deliveryLat,deliveryLng,deliveryRecipient,deliveryPhone,deliveryNote,note:$('#crmOrderNote')?.value.trim()||'',createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||DB.currentUser?.fullName||''),createdAt:nowIso};
     DB.orders.unshift(order);
     if(opportunityId){const opp=(DB.crmOpportunities||[]).find(x=>x.id===opportunityId);if(opp){opp.customerId=opp.customerId||customerId;opp.stage='CLOSED_WON';opp.probability=100;opp.updatedAt=actualToday;opp.orderId=id;}}
     SalesCRM.saveLocal(['orders']); SEARCH_INDEX=null; Modal.close();
@@ -472,7 +570,7 @@ const Actions = {
   'crm-opportunity-save': (d) => {
     const customerId=$('#crmOppCustomer')?.value||''; const company=$('#crmOppCompany')?.value.trim()||''; const stage=$('#crmOppStage')?.value||'NEW';
     if(!customerId&&!company){Toast.err('Thiếu khách hàng','Chọn khách hàng hoặc nhập tên công ty/nhu cầu.');return;}
-    const obj={customerId:customerId||null,company:company||Q.customerName(customerId),contact:$('#crmOppContact')?.value.trim()||Q.customer(customerId)?.contact||'',ownerId:$('#crmOppOwner')?.value||'',stage,value:Number($('#crmOppValue')?.value)||0,probability:SalesCRM.oppStage[stage]?.probability??0,expectedCloseDate:$('#crmOppClose')?.value||DB.today,source:$('#crmOppSource')?.value.trim()||'',note:$('#crmOppNote')?.value.trim()||'',updatedAt:DB.today};
+    const obj={customerId:customerId||null,company:company||Q.customerName(customerId),contact:$('#crmOppContact')?.value.trim()||Q.customer(customerId)?.contact||'',ownerId:$('#crmOppOwner')?.value||'',stage,value:parseMoney($('#crmOppValue')?.value)||0,probability:SalesCRM.oppStage[stage]?.probability??0,expectedCloseDate:$('#crmOppClose')?.value||DB.today,source:$('#crmOppSource')?.value.trim()||'',note:$('#crmOppNote')?.value.trim()||'',updatedAt:DB.today};
     if(d.id){Object.assign((DB.crmOpportunities||[]).find(x=>x.id===d.id),obj);}else{(DB.crmOpportunities||(DB.crmOpportunities=[])).unshift({id:SalesCRM.nextNumericCode('OPP-2026-',DB.crmOpportunities,3),createdAt:DB.today,leadId:null,...obj});}
     SalesCRM.saveLocal(); Modal.close(); render(); Toast.ok('Đã lưu cơ hội bán hàng');
   },
@@ -523,30 +621,44 @@ const Actions = {
     const customerId = $('#crmOrderCustomer')?.value || '';
     const date = $('#crmOrderDate')?.value || '';
     const dueDate = $('#crmOrderDue')?.value || '';
+    const paymentDueDate = $('#crmPaymentDue')?.value || dueDate;
     const ownerId = $('#crmOrderOwner')?.value || o.ownerId || '';
-    const deliveryAddress = $('#crmDeliveryAddress')?.value.trim() || '';
+    const deliveryParts = typeof crmReadDeliveryAddressForm==='function' ? crmReadDeliveryAddressForm() : {address:$('#crmDeliveryAddressDetail')?.value.trim()||'',province:'',district:'',ward:'',addressDetail:$('#crmDeliveryAddressDetail')?.value.trim()||''};
+    const deliveryAddress = deliveryParts.address;
+    const deliveryProvince = deliveryParts.province||'';
+    const deliveryDistrict = deliveryParts.district||'';
+    const deliveryWard = deliveryParts.ward||'';
+    const deliveryAddressDetail = deliveryParts.addressDetail||'';
     const deliveryRecipient = $('#crmDeliveryRecipient')?.value.trim() || '';
     const deliveryPhone = $('#crmDeliveryPhone')?.value.trim() || '';
     const deliveryNote = $('#crmDeliveryNote')?.value.trim() || '';
-    const shippingFee = Math.max(0, Number($('#crmShippingFee')?.value) || 0);
+    const deliveryLat = Number($('#crmDeliveryLat')?.value||0)||null;
+    const deliveryLng = Number($('#crmDeliveryLng')?.value||0)||null;
+    const shippingFee = Math.max(0, parseMoney($('#crmShippingFee')?.value) || 0);
     if (!customerId) { Toast.err('Chưa chọn khách hàng', 'Vui lòng chọn khách hàng.'); return; }
     if (!deliveryAddress) { Toast.err('Thiếu địa chỉ giao hàng', 'Vui lòng nhập địa chỉ nhận hàng.'); return; }
     if (!date || !dueDate) { Toast.err('Thiếu ngày', 'Vui lòng nhập ngày đặt và ngày giao dự kiến.'); return; }
     if (dueDate < date) { Toast.err('Ngày giao không hợp lệ', 'Ngày giao dự kiến không được trước ngày đặt.'); return; }
+    if (paymentDueDate < date) { Toast.err('Hạn thanh toán không hợp lệ', 'Hạn thanh toán không được trước ngày đặt hàng.'); return; }
     const rows = $$('#crmOrderLines .crm-order-line').map((row, index) => {
       const productId = row.querySelector('select[name="product"]')?.value || '';
       const qty = Number(row.querySelector('input[name="qty"]')?.value) || 0;
       const product = Q.product(productId);
-      const price = Number(row.querySelector('input[name="price"]')?.value) || Number(product?.price || 0);
-      return { index, productId, qty, price, product };
+      const price = parseMoney(row.querySelector('input[name="price"]')?.value) || Number(product?.price || 0);
+      const vatRate = Math.max(0, Number(row.querySelector('select[name="vatRate"]')?.value ?? 0) || 0);
+      const packedWeightKg = Math.max(0, Number(product?.packedWeightG||0)>0 ? Number(product.packedWeightG)/1000 : Number(product?.packedWeightKg || 0));
+      return { index, productId, qty, price, vatRate, product, packedWeightKg };
     });
     if (!rows.length || rows.some(x => !x.productId || x.qty <= 0)) { Toast.err('Dòng hàng chưa hợp lệ', 'Mỗi dòng phải chọn thành phẩm và nhập số lượng lớn hơn 0.'); return; }
     if (new Set(rows.map(x => x.productId)).size !== rows.length) { Toast.err('Thành phẩm bị trùng', 'Vui lòng gộp cùng thành phẩm vào một dòng.'); return; }
-    const items = rows.map((x, i) => ({ no:i+1, productId:x.productId, name:x.product?.name||x.productId, spec:x.product?.spec||'', unit:x.product?.unit||'', qty:x.qty, price:x.price, amount:x.qty*x.price }));
-    const vatRate = Number($('#crmOrderVat')?.value) || 0;
+    const items = rows.map((x, i) => { const amount=x.qty*x.price; const vatAmount=Math.round(amount*x.vatRate/100); return { no:i+1, productId:x.productId, name:x.product?.name||x.productId, spec:x.product?.spec||'', unit:x.product?.unit||'', qty:x.qty, price:x.price, amount, vatRate:x.vatRate, vatAmount, lineTotal:amount+vatAmount, packedWeightKg:x.packedWeightKg, shippingWeightKg:Math.round(x.qty*x.packedWeightKg*1000)/1000 }; });
+    const shippingWeightKg = Math.round(items.reduce((sum,it)=>sum+Number(it.shippingWeightKg||0),0)*1000)/1000;
+    const otherCosts = typeof crmReadOtherCosts==='function'?crmReadOtherCosts(document):[];
+    if(otherCosts.some(x=>!x.name||Number(x.amount||0)<=0)){Toast.err('Chi phí khác chưa hợp lệ','Mỗi khoản chi phí phải có nội dung và số tiền lớn hơn 0.');return;}
+    const otherCost = otherCosts.reduce((sum,x)=>sum+Number(x.amount||0),0);
     const subtotal = items.reduce((sum, it) => sum + it.amount, 0);
-    const vat = Math.round(subtotal * vatRate / 100);
-    Object.assign(o, { customerId, ownerId, date, dueDate, items, subtotal, vatRate, vat, shippingFee, total:subtotal+vat+shippingFee, deliveryAddress, deliveryRecipient, deliveryPhone, deliveryNote, note:$('#crmOrderNote')?.value.trim()||'', updatedAt:new Date().toISOString(), updatedBy:DB.currentUser?.userId||DB.currentUser?.id||'' });
+    const vat = items.reduce((sum,it)=>sum+Number(it.vatAmount||0),0);
+    Object.assign(o, { customerId, ownerId, date, dueDate, paymentDueDate, items, subtotal, vatRate:null, vat, shippingFee, otherCosts, otherCost, shippingWeightKg, total:subtotal+vat+shippingFee+otherCost, deliveryAddress, deliveryProvince, deliveryDistrict, deliveryWard, deliveryAddressDetail, deliveryLat, deliveryLng, deliveryRecipient, deliveryPhone, deliveryNote, note:$('#crmOrderNote')?.value.trim()||'', updatedAt:new Date().toISOString(), updatedBy:DB.currentUser?.userId||DB.currentUser?.id||'', updatedByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||'') });
     SalesCRM.saveLocal(['orders']); SEARCH_INDEX = null;
     if (typeof SystemAPI !== 'undefined') SystemAPI.audit({module:'CRM',entityType:'SALES_ORDER',entityId:o.id,action:'UPDATE',description:`${DB.currentUser?.name||'Người dùng'} cập nhật đơn hàng ${o.id}`,newData:{status:o.status,total:o.total}});
     Modal.close(); render(); Toast.ok('Đã cập nhật đơn hàng', o.id);
@@ -805,7 +917,7 @@ const Actions = {
       deadline,
       managerId: 'NV-008',
       status: 'lsx_cho_duyet',
-      stages: buildStages(qty, 0, 0, startDate),
+      stages: buildProductionStagesFromRouting(qty, product.routing || [], startDate),
       qcPass: 0,
       qcFail: 0,
       note,
@@ -842,7 +954,7 @@ const Actions = {
     for(const row of document.querySelectorAll('.po-mr-line')){const materialId=row.dataset.material;const qty=Number(row.querySelector('[name="qty"]')?.value||0);if(!materialId||!(qty>0)){Toast.err('Số lượng không hợp lệ','Tất cả nguyên liệu phải có số lượng lớn hơn 0.');return;}items.push({productId:po.productId,materialId,qty});}
     if(!items.length){Toast.err('Chưa có nguyên liệu','Không thể lập phiếu yêu cầu NVL khi BOM rỗng.');return;}
     const id=nextCode('YCNVL-2026-',DB.productionMaterialRequests||[]);
-    DB.productionMaterialRequests.unshift({id,productionOrderId:po.id,planId:po.planId||'',date:currentDateYMD(),items,status:'WAITING_WAREHOUSE_APPROVAL',note:$('#poMrNote')?.value.trim()||`Yêu cầu NVL theo BOM của ${po.id}`,createdBy:DB.currentUser?.id||'',createdAt:new Date().toISOString(),source:'PRODUCTION_ORDER_BOM'});
+    DB.productionMaterialRequests.unshift({id,productionOrderId:po.id,planId:po.planId||'',date:currentDateYMD(),items,status:'WAITING_WAREHOUSE_APPROVAL',note:$('#poMrNote')?.value.trim()||`Yêu cầu NVL theo BOM của ${po.id}`,createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''),createdAt:new Date().toISOString(),source:'PRODUCTION_ORDER_BOM'});
     po.materialRequestId=id;
     po.materialPlan=items.map(i=>({materialId:i.materialId,qty:i.qty}));
     ProductionAPI?.scheduleSync(80);Modal.close();render();Toast.ok('Đã lập phiếu yêu cầu NVL',`${id} · BOM của ${po.productId} đã được đưa vào phiếu và gửi Kho nguyên liệu.`);
@@ -960,12 +1072,22 @@ const Actions = {
     const i = Number(d.i);
     const s = p.stages[i];
     const full = d.full === '1';
-    let qty = full ? s.qtyPlan : Math.max(0, Math.min(s.qtyPlan, Number($('#stQty').value) || 0));
+    const qtyInput = Number($('#stQty')?.value || 0);
+    const hoursInput = Number($('#stHours')?.value || 0);
+    const leadInput = String($('#stLead')?.value || '').trim();
+    const machineInput = String($('#stMachine')?.value || '').trim();
+    const noteInput = String($('#stNote')?.value || '').trim();
+    if (!(qtyInput > 0)) { Toast.err('Thiếu sản lượng', 'Sản lượng hoàn thành là bắt buộc và phải lớn hơn 0.'); return; }
+    if (!(hoursInput > 0)) { Toast.err('Thiếu giờ máy', 'Giờ máy phát sinh là bắt buộc và phải lớn hơn 0.'); return; }
+    if (!leadInput) { Toast.err('Thiếu người phụ trách', 'Vui lòng chọn người phụ trách công đoạn.'); return; }
+    if (!machineInput) { Toast.err('Thiếu máy / trạm', 'Máy hoặc trạm thực hiện là bắt buộc.'); return; }
+    if (!noteInput) { Toast.err('Thiếu ghi chú', 'Vui lòng nhập ghi chú kết quả công đoạn.'); return; }
+    let qty = full ? s.qtyPlan : Math.max(0, Math.min(s.qtyPlan, qtyInput));
     s.qtyDone = qty;
-    s.hours = Math.max(0, Number($('#stHours').value) || 0);
-    s.leadId = $('#stLead').value;
-    s.machine = $('#stMachine').value.trim() || s.machine;
-    s.note = $('#stNote').value.trim();
+    s.hours = hoursInput;
+    s.leadId = leadInput;
+    s.machine = machineInput;
+    s.note = noteInput;
 
     if (qty >= s.qtyPlan) {
       s.status = 'done';
@@ -1216,6 +1338,21 @@ const Actions = {
       item.spec=$('#invItemSpec')?.value.trim()||item.spec||'';
       if(isSemi) item.minStock=Number($('#invItemMinStock')?.value||0);
       else {
+        // [FINISHED GOODS MASTER] Khối lượng đóng gói lưu theo gram để dễ khai báo,
+        // đồng thời duy trì packedWeightKg tương thích với Sales/Logistics hiện hữu.
+        const packedWeightG = Number($('#invItemPackedWeightG')?.value || 0);
+        const shelfLifeDays = Number($('#invItemShelfLifeDays')?.value || 0);
+        if (!Number.isFinite(packedWeightG) || packedWeightG < 0) {
+          Toast.err('Khối lượng không hợp lệ', 'Khối lượng đóng gói phải lớn hơn hoặc bằng 0 gram.');
+          return;
+        }
+        if (!Number.isFinite(shelfLifeDays) || shelfLifeDays < 0 || !Number.isInteger(shelfLifeDays)) {
+          Toast.err('Hạn sử dụng không hợp lệ', 'Số ngày hạn sử dụng phải là số nguyên lớn hơn hoặc bằng 0.');
+          return;
+        }
+        item.packedWeightG = packedWeightG;
+        item.packedWeightKg = Math.round((packedWeightG / 1000) * 1000000) / 1000000;
+        item.shelfLifeDays = shelfLifeDays;
         DB.finishedMinStock=DB.finishedMinStock||{};
         DB.finishedMinStock[id]=Number($('#invItemMinStock')?.value||0);
         item.bom=item.bom||[];
@@ -1242,7 +1379,7 @@ const Actions = {
             productId: id,
             productionOrderId: '',
             mfgDate: actualToday,
-            expiryDate: '',
+            expiryDate: Number(item.shelfLifeDays||0) > 0 ? addDays(actualToday, Number(item.shelfLifeDays)) : '',
             supplierLot: 'TỒN-ĐẦU-KỲ',
             supplierId: '',
             qcStatus: 'PASSED',
@@ -1378,6 +1515,25 @@ const Actions = {
     Toast.ok(type === 'in' ? 'Đã nhập kho' : 'Đã xuất kho', `${m.name} · ${fmtN(qty)} ${m.unit} — tồn mới ${fmtDec(m.stock, 2)} ${m.unit}`);
   },
   'material-request': (d) => switchTo(() => openPRForm(d.id)),
+  'inv-warehouse-new': () => openWarehouseMasterForm(''),
+  'inv-warehouse-view': (d) => openWarehouseMasterDetail(d.id),
+  'inv-warehouse-edit': (d) => openWarehouseMasterForm(d.id),
+  'inv-warehouse-delete': (d) => deleteWarehouseMaster(d.id || ''),
+  'inv-warehouse-save': (d) => saveWarehouseMaster(d.id || ''),
+  'inv-warehouse-site-open': (d) => { const f=F('inv-warehouses'); Object.assign(f,{siteId:d.id||'',zoneId:'',rackId:'',itemType:'',q:'',tab:'overview'}); render(); },
+  'inv-warehouse-site-back': () => { const f=F('inv-warehouses'); Object.assign(f,{siteId:'',zoneId:'',rackId:'',itemType:'',q:'',tab:'overview'}); render(); },
+  'inv-warehouse-tab': (d) => { const f=F('inv-warehouses'); f.tab=d.tab||'overview'; if(f.tab!=='zones')f.rackId=''; render(); },
+  'inv-warehouse-zone-open': (d) => { const f=F('inv-warehouses'); f.siteId=d.site||f.siteId||''; f.zoneId=d.id||''; f.rackId=''; f.q=''; f.tab='zones'; render(); },
+  'inv-warehouse-zone-new': (d) => openWarehouseZoneForm(d.site||F('inv-warehouses').siteId||'', ''),
+  'inv-warehouse-zone-edit': (d) => openWarehouseZoneForm(d.site||F('inv-warehouses').siteId||'', d.id||''),
+  'inv-warehouse-zone-save': (d) => saveWarehouseZone(d.site||'', d.id||''),
+  'inv-warehouse-zone-filter-clear': () => { const f=F('inv-warehouses'); f.itemType=''; f.zoneId=''; f.rackId=''; f.q=''; render(); },
+  'inv-warehouse-rack-new': (d) => openWarehouseRackForm(d.site||F('inv-warehouses').siteId||'', d.zone||F('inv-warehouses').zoneId||'', ''),
+  'inv-warehouse-rack-edit': (d) => openWarehouseRackForm(d.site||F('inv-warehouses').siteId||'', d.zone||F('inv-warehouses').zoneId||'', d.id||''),
+  'inv-warehouse-rack-save': (d) => saveWarehouseRack(d.site||'', d.zone||'', d.id||''),
+  'inv-warehouse-rack-delete': (d) => deleteWarehouseRack(d.id||''),
+  'inv-warehouse-rack-open': (d) => { const f=F('inv-warehouses'); f.rackId=d.id||''; f.tab='zones'; render(); },
+  'inv-warehouse-rack-close': () => { const f=F('inv-warehouses'); f.rackId=''; render(); },
   'inv-new-receipt': (d) => switchTo(() => (d.tab && d.tab !== 'raw' ? openWarehouseReceiptModal(d.tab) : openNewReceiptModal(d.poid || ''))),
   'inv-new-issue': (d) => switchTo(() => openNewIssueModal(d.tab || F('inv-issues').issueTab || 'raw')),
   'inv-new-transfer': (d) => switchTo(() => openNewTransferModal(d.type || State.invTransferType || 'RAW_MATERIAL')),
@@ -1389,7 +1545,7 @@ const Actions = {
   'inv-count-save': () => {
     const id = nextCode('KK-2026-', DB.inventoryCounts);
     const warehouseId = $('#countWarehouse').value;
-    DB.inventoryCounts.unshift({ id, warehouseId, date: $('#countDate').value || DB.today, status: 'DRAFT', note: $('#countNote').value.trim(), items: DB.inventory.filter((row) => row.warehouseId === warehouseId).map((row) => ({ productId: row.productId, lotId: row.lotId, locationId: row.locationId, systemQty: row.qtyOnHand, actualQty: row.qtyOnHand, difference: 0, reason: '' })) });
+    DB.inventoryCounts.unshift({ id, warehouseId, date: $('#countDate').value || DB.today, status: 'DRAFT', createdBy:DB.currentUser?.userId||DB.currentUser?.id||'', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), note: $('#countNote').value.trim(), items: DB.inventory.filter((row) => row.warehouseId === warehouseId).map((row) => ({ productId: row.productId, lotId: row.lotId, locationId: row.locationId, systemQty: row.qtyOnHand, actualQty: row.qtyOnHand, difference: 0, reason: '' })) });
     Modal.close(); go('inv-counts'); Toast.ok('Đã tạo phiếu kiểm kê', `${id} · Chốt tồn hệ thống thành công.`);
   },
   'inv-receipt-save-new': () => {
@@ -1410,7 +1566,7 @@ const Actions = {
     const receiptId = nextCode('PN-2026-', DB.goodsReceipts);
     const posted = InventoryService.apply({ productId: materialId, warehouseId, locationId: location.id, lotId: lot.id, quantity, type: typeMap[$('#grNewType').value], refType: $('#grNewType').value, refId: $('#grNewRef').value.trim() || receiptId, note: $('#grNewNote').value.trim() || 'Nhập kho theo chứng từ' });
     if (!posted.ok) { Toast.err('Không thể nhập kho', posted.message); return; }
-    DB.goodsReceipts.unshift({ id: receiptId, poId: $('#grNewType').value === 'PURCHASE' ? $('#grNewRef').value.trim() : '', prId: '', date: $('#grNewDate').value || DB.today, receivedBy: DB.currentUser.id, warehouse: Q.warehouseName(warehouseId), warehouseId, status: 'RECEIVED', note: $('#grNewNote').value.trim(), items: [{ materialId, name: Q.material(materialId)?.name || Q.product(materialId)?.name || materialId, unit: posted.row.unit, qty: quantity, lotNumber, mfgDate: lot.mfgDate, expiryDate: lot.expiryDate, locationId: location.id }] });
+    DB.goodsReceipts.unshift({ id: receiptId, poId: $('#grNewType').value === 'PURCHASE' ? $('#grNewRef').value.trim() : '', prId: '', date: $('#grNewDate').value || DB.today, receivedBy: DB.currentUser.id, createdBy:DB.currentUser?.userId||DB.currentUser?.id||'', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), warehouse: Q.warehouseName(warehouseId), warehouseId, status: 'RECEIVED', note: $('#grNewNote').value.trim(), items: [{ materialId, name: Q.material(materialId)?.name || Q.product(materialId)?.name || materialId, unit: posted.row.unit, qty: quantity, lotNumber, mfgDate: lot.mfgDate, expiryDate: lot.expiryDate, locationId: location.id }] });
     Modal.close(); go('inv-receipts'); Toast.ok('Đã nhập kho thành công', `${receiptId} · ${fmtDec(quantity, 2)} ${posted.row.unit}`);
   },
   'inv-issue-add-line': () => {
@@ -1500,8 +1656,15 @@ const Actions = {
     if (fromWarehouseId === toWarehouseId) { Toast.err('Kho chuyển không hợp lệ', 'Kho nguồn và kho đích phải khác nhau.'); return; }
     const fromWh = Q.warehouse(fromWarehouseId);
     const toWh = Q.warehouse(toWarehouseId);
-    if (!fromWh || !toWh || fromWh.type !== transferType || toWh.type !== transferType) {
-      Toast.err('Sai loại kho', 'Chỉ được chuyển giữa các kho cùng loại trong tab hiện tại.'); return;
+    const storeSupply = transferType === 'STORE';
+    const validStoreSource = ['RAW_MATERIAL','SEMI_FINISHED','FINISHED_GOODS'].includes(fromWh?.type);
+    const validType = storeSupply
+      ? (validStoreSource && toWh?.type === 'STORE')
+      : (fromWh?.type === transferType && toWh?.type === transferType);
+    if (!fromWh || !toWh || !validType) {
+      Toast.err('Sai loại kho', storeSupply
+        ? 'Cấp hàng cửa hàng chỉ nhận từ Kho nguyên liệu / Bán thành phẩm / Thành phẩm và chuyển đến Kho cửa hàng.'
+        : 'Chỉ được chuyển giữa các kho cùng loại trong tab hiện tại.'); return;
     }
     const destination = Q.locationsOf(toWarehouseId)[0];
     if (!destination) { Toast.err('Kho đích chưa có vị trí', 'Vui lòng cấu hình vị trí lưu trữ cho kho đích.'); return; }
@@ -1539,7 +1702,7 @@ const Actions = {
       if (!incoming.ok) { Toast.err('Không thể nhận tại kho đích', incoming.message); return; }
       items.push({ productId: source.productId, lotId: source.lotId, qty: quantity, fromLocationId: source.locationId, toLocationId: destination.id, unit: source.unit });
     }
-    DB.stockTransfers.unshift({ id, transferType, fromWarehouseId, toWarehouseId, date: $('#ckDate').value || DB.today, status: 'RECEIVED', note: $('#ckNote').value.trim(), items });
+    DB.stockTransfers.unshift({ id, transferType, fromWarehouseId, toWarehouseId, date: $('#ckDate').value || DB.today, status: 'RECEIVED', createdBy:DB.currentUser?.userId||DB.currentUser?.id||'', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), note: $('#ckNote').value.trim(), items });
     Modal.close();
     State.invTransferType = transferType;
     go('inv-transfers');
@@ -1669,35 +1832,10 @@ const Actions = {
     DB.suppliers = DB.suppliers.filter((x) => x.id !== d.id);
     Modal.close(); render(); Toast.ok('Đã xóa nhà cung cấp', `${supplier.id} · ${supplier.name}`);
   },
-  'supplier-detail': (d) => {
-    const supplier = DB.suppliers.find((item) => item.id === d.id);
-    if (!supplier) return;
-    const purchases = DB.purchaseOrders.filter((po) => po.supplierId === supplier.id);
-    const history = DB.supplierEvaluationHistory?.filter((e) => e.supplierId === supplier.id) || [];
-    const current = Q.supplierEvaluation(supplier.id);
-    Modal.open({
-      title: esc(supplier.name),
-      sub: `${supplier.id} · ${esc(supplier.group || 'Chưa phân nhóm')}`,
-      size: 'lg',
-      body: `<div class="info-grid">
-        ${infoItem('Mã NCC', `<span class="code">${esc(supplier.id)}</span>`)}
-        ${infoItem('Người liên hệ', esc(supplier.contact || '—'))}
-        ${infoItem('Điện thoại', esc(supplier.phone || '—'))}
-        ${infoItem('Email', esc(supplier.email || '—'))}
-        ${infoItem('Địa chỉ', esc(supplier.address || '—'))}
-        ${infoItem('Mã số thuế', esc(supplier.taxCode || '—'))}
-        ${infoItem('Tài khoản ngân hàng', supplier.bankAccount ? `${esc(supplier.bankAccount)}${supplier.bankName ? ` · ${esc(supplier.bankName)}` : ''}` : '—')}
-        ${infoItem('Đánh giá hiện tại', supplier.rating ? `<b>${Number(supplier.rating).toFixed(1)} / 5</b>` : '<span class="muted">Chưa đánh giá</span>')}
-        ${infoItem('Điều khoản thanh toán', esc(supplier.paymentTerm || 'Theo hợp đồng'))}
-        ${infoItem('Nhận xét gần nhất', esc(current?.notes || '—'))}
-      </div>
-      <div class="form-sec-title"><i class="fa-solid fa-cart-shopping"></i>Lịch sử đơn hàng</div>
-      ${tableShell([{ t: 'Mã PO' }, { t: 'Ngày' }, { t: 'Giá trị', cls: 'right' }, { t: 'Trạng thái' }], purchases.map((po) => `<tr><td><span class="code">${po.id}</span></td><td class="num">${fmtDate(po.date)}</td><td class="right num">${fmtVND(po.total)}</td><td>${badge(po.status)}</td></tr>`), { emptyTitle: 'Chưa có đơn mua' })}
-      <div class="form-sec-title" style="margin-top:16px"><i class="fa-solid fa-star"></i>Lịch sử đánh giá sau mỗi đơn hàng</div>
-      ${tableShell([{ t: 'Mã PO' }, { t: 'Ngày đánh giá' }, { t: 'Điểm', cls: 'center' }, { t: 'Nhận xét' }], history.slice().sort((a,b)=>String(b.date||'').localeCompare(String(a.date||''))).map((e) => `<tr><td><span class="code">${esc(e.poId || '—')}</span></td><td class="num">${fmtDate(e.date)}</td><td class="center strong" style="${Number(e.score) < 4 ? 'color:var(--red)' : ''}">${Number(e.score).toFixed(1)} / 5</td><td>${esc(e.notes || '—')}</td></tr>`), { emptyTitle: 'Chưa có lịch sử đánh giá' })}`,
-      foot: '<button class="btn" data-act="modal-close">Đóng</button>',
-    });
-  },
+  'supplier-detail': (d) => { State.supplierTab='overview'; switchTo(() => openSupplierDrawer(d.id), { keepDrawer: true }); },
+  'supplier-tab': (d) => { State.supplierTab=d.tab; const supplier=Q.supplier(d.id); if(supplier) Drawer.setBody(supplierDrawerBody(supplier)); },
+  'supplier-refund-modal': (d) => switchTo(() => openSupplierRefundModal(d.id)),
+  'supplier-refund-save': (d) => saveSupplierRefund(d.id),
   'supplier-save': (d) => {
     const name = $('#supName')?.value.trim();
     const group = $('#supGroup')?.value.trim();
@@ -1754,6 +1892,126 @@ const Actions = {
   'subcontracting-partner-save': (d) => subcontractingSavePartner(d.id || ''),
   'subcontracting-partner-detail': (d) => openSubcontractingPartnerDetail(d.id || d.partner),
   'subcontracting-partner-delete': (d) => subcontractingDeletePartner(d.id),
+  'restaurant-replenishment-new': async (d) => {
+    // Luôn đọc lại master Chi nhánh từ bảng lenam_restaurant_stores trước khi mở form.
+    // Chỉ áp dụng Restaurant; không can thiệp các API/module cũ.
+    try {
+      if (typeof RestaurantQualityAPI !== 'undefined' && RestaurantQualityAPI.refreshRestaurant)
+        await RestaurantQualityAPI.refreshRestaurant(['stores']);
+    } catch (err) {
+      console.warn('[Restaurant] Không refresh được chi nhánh từ server, dùng dữ liệu đang có:', err);
+    }
+    openRestaurantReplenishmentForm({storeId:d.store||'',productId:d.product||'',quantity:Number(d.qty||0)||1});
+  },
+  'restaurant-replenishment-add-line': () => {
+    const wrap=document.getElementById('rrLines'); if(!wrap)return;
+    const storeId=document.getElementById('rrStore')?.value||'';
+    wrap.insertAdjacentHTML('beforeend',restaurantReplenishmentLineHtml(storeId,{quantity:1}));
+  },
+  'restaurant-replenishment-remove-line': (d,el) => {
+    const lines=document.querySelectorAll('#rrLines .restaurant-replenishment-line');
+    if(lines.length<=1){Toast.warn('Cần ít nhất một thành phẩm','Phiếu yêu cầu phải có ít nhất một dòng hàng.');return;}
+    el?.closest('.restaurant-replenishment-line')?.remove();
+  },
+  'restaurant-replenishment-save': () => {
+    DB.storeReplenishmentRequests=DB.storeReplenishmentRequests||[];
+    const storeId=$('#rrStore')?.value||'', store=restaurantStore(storeId);
+    if(!store){Toast.err('Dữ liệu chưa hợp lệ','Vui lòng chọn cửa hàng.');return;}
+    const sourceWarehouseId=store.sourceWarehouseId||'', sourceWh=Q.warehouse(sourceWarehouseId);
+    if(!sourceWh||sourceWh.type!=='FINISHED_GOODS'){Toast.err('Chi nhánh chưa liên kết Kho thành phẩm','Hãy cập nhật chi nhánh và chọn Kho Thành phẩm - Thủ Đức/Bình Dương/Đồng Nai.');return;}
+    const raw=[...document.querySelectorAll('#rrLines .restaurant-replenishment-line')].map(line=>({productId:line.querySelector('.rr-product-select')?.value||'',quantity:Number(line.querySelector('.rr-qty')?.value||0)})).filter(x=>x.productId&&x.quantity>0);
+    if(!raw.length){Toast.err('Chưa có thành phẩm','Hãy thêm ít nhất một thành phẩm và nhập số lượng lớn hơn 0.');return;}
+    const merged=new Map(); raw.forEach(x=>merged.set(x.productId,(merged.get(x.productId)||0)+x.quantity));
+    const items=[...merged.entries()].map(([productId,quantity])=>({productId,quantity}));
+    for(const it of items){
+      if(!Q.product(it.productId)){Toast.err('Thành phẩm không hợp lệ',it.productId);return;}
+      const exists=(DB.inventory||[]).some(r=>r.warehouseId===sourceWarehouseId&&r.productId===it.productId);
+      if(!exists){Toast.err('Thành phẩm không thuộc kho nguồn',`${Q.product(it.productId)?.name||it.productId} không có trong ${sourceWh.name}.`);return;}
+    }
+    const id=nextCode('YCBS-2026-',DB.storeReplenishmentRequests);
+    DB.storeReplenishmentRequests.unshift({id,storeId,sourceWarehouseId,items,date:restaurantToday(),status:'REQUESTED',note:$('#rrNote')?.value.trim()||'',createdBy:DB.currentUser?.id||'',createdAt:new Date().toISOString(),transferId:'',issuedLines:[]});
+    restaurantPersist(['replenishments']); Modal.close(); go('restaurant',{tab:'replenishment'}); Toast.ok('Đã gửi yêu cầu bổ sung',`${id} · ${items.length} thành phẩm`);
+  },
+  'restaurant-replenishment-view': (d) => {
+    const r=restaurantReplenishment(d.id); if(!r)return; const store=restaurantStore(r.storeId), sourceWh=Q.warehouse(r.sourceWarehouseId||store?.sourceWarehouseId), items=restaurantRequestItems(r);
+    const rows=items.map(it=>{const item=restaurantItem(it.productId);const issued=(r.issuedLines||[]).filter(x=>x.productId===it.productId).reduce((sum,x)=>sum+Number(x.qty||0),0);return `<tr><td><span class="code">${esc(it.productId)}</span><div class="cell-sub">${esc(item?.name||it.productId)}</div></td><td class="right num">${fmtDec(it.quantity,3)} ${esc(item?.unit||'')}</td><td class="right num">${issued?fmtDec(issued,3):'—'} ${esc(item?.unit||'')}</td></tr>`}).join('');
+    Modal.open({title:`Yêu cầu bổ sung · ${esc(r.id)}`,size:'lg',body:`<div class="detail-grid"><div><span>Cửa hàng</span><b>${esc(store?.name||r.storeId)}</b></div><div><span>Ngày yêu cầu</span><b>${fmtDate(r.date)}</b></div><div><span>Kho thành phẩm nguồn</span><b>${esc(sourceWh?.name||'—')}</b></div><div><span>Số mặt hàng</span><b>${items.length}</b></div><div><span>Trạng thái</span><b>${restaurantReplenishmentStatus(r.status)}</b></div><div><span>Phiếu xuất kho</span><b>${r.goodsIssueId?esc(r.goodsIssueId):'—'}</b></div><div><span>Mã điều phối</span><b>${r.transferId?esc(r.transferId):'—'}</b></div><div><span>Người tạo yêu cầu</span><b>${esc(Q.employeeName(r.createdBy)||r.createdBy||'—')}</b></div><div><span>Kho xuất bởi</span><b>${esc(Q.employeeName(r.issuedBy)||r.issuedBy||'—')}</b></div><div><span>Cửa hàng nhận bởi</span><b>${esc(Q.employeeName(r.receivedBy)||r.receivedBy||'—')}</b></div></div><div class="form-sec-title" style="margin-top:12px">Chi tiết hàng yêu cầu</div>${tableShell([{t:'Thành phẩm'},{t:'SL yêu cầu',cls:'right'},{t:'SL kho đã xuất',cls:'right'}],rows,{emptyTitle:'Phiếu chưa có dòng hàng'})}<div class="field" style="margin-top:12px"><label>Ghi chú</label><div class="inp" style="height:auto;min-height:42px">${esc(r.note||'—')}</div></div>`,foot:`<button class="btn" data-act="modal-close">Đóng</button>${r.status==='ISSUED'?`<button class="btn btn-primary" data-act="restaurant-replenishment-receive" data-id="${esc(r.id)}"><i class="fa-solid fa-box-open"></i>Cửa hàng nhập hàng</button>`:''}`});
+  },
+  'restaurant-replenishment-fulfill': (d) => {
+    if(State.module!=='warehouse'){ Toast.warn('Kho thực hiện duyệt xuất','Vui lòng xử lý yêu cầu này tại Kho → Duyệt bổ sung cửa hàng.'); go('warehouse',{tab:'store_replenishment'}); return; }
+    openRestaurantReplenishmentFulfill(d.id);
+  },
+  'restaurant-replenishment-fulfill-save': (d) => {
+    const req=restaurantReplenishment(d.id); if(!req||req.status!=='REQUESTED')return;
+    const store=restaurantStore(req.storeId), fromWarehouseId=store?.sourceWarehouseId||req.sourceWarehouseId||'', sourceWh=Q.warehouse(fromWarehouseId);
+    if(!store||!sourceWh||sourceWh.type!=='FINISHED_GOODS'){Toast.err('Dữ liệu chưa hợp lệ','Chi nhánh phải liên kết Kho thành phẩm.');return;}
+    const approved=[...document.querySelectorAll('.rr-approved-qty')].map(el=>({productId:el.dataset.product||'',quantity:Number(el.value||0)}));
+    if(!approved.length||approved.some(x=>!x.productId||x.quantity<=0)){Toast.err('Số lượng xuất chưa hợp lệ','Mỗi thành phẩm phải có số lượng xuất lớn hơn 0.');return;}
+    // Kiểm tra đủ tồn toàn bộ trước khi trừ bất kỳ dòng nào để tránh xuất dở phiếu.
+    for(const it of approved){const total=(DB.inventory||[]).filter(r=>r.warehouseId===fromWarehouseId&&r.productId===it.productId).reduce((sum,r)=>sum+Number(r.qtyAvailable??r.qtyOnHand??0),0);if(total+1e-9<it.quantity){Toast.err('Không đủ tồn Kho thành phẩm',`${Q.product(it.productId)?.name||it.productId}: khả dụng ${fmtDec(total,3)}, cần ${fmtDec(it.quantity,3)}.`);return;}}
+    const transferId=nextCode('XCH-2026-',DB.stockTransfers||[]), issuedLines=[];
+    for(const it of approved){
+      let remaining=it.quantity; const item=Q.product(it.productId);
+      const sourceRows=(DB.inventory||[]).filter(r=>r.warehouseId===fromWarehouseId&&r.productId===it.productId&&Number(r.qtyAvailable??r.qtyOnHand??0)>0).sort((x,y)=>String(Q.lot(x.lotId)?.expiryDate||x.expiryDate||'9999').localeCompare(String(Q.lot(y.lotId)?.expiryDate||y.expiryDate||'9999')));
+      for(const source of sourceRows){if(remaining<=0)break;const take=Math.min(remaining,Number(source.qtyAvailable??source.qtyOnHand??0));const out=InventoryService.apply({productId:it.productId,warehouseId:fromWarehouseId,locationId:source.locationId,lotId:source.lotId,quantity:take,type:'TRANSFER_OUT',refType:'STORE_REPLENISHMENT',refId:transferId,note:`Kho xuất cho cửa hàng theo ${req.id}`,updateMaterial:false});if(!out.ok){Toast.err('Không thể xuất Kho thành phẩm',out.message);return;}issuedLines.push({productId:it.productId,lotId:source.lotId||'',qty:take,unit:source.unit||item?.unit||'',sourceLocationId:source.locationId||''});remaining-=take;}
+    }
+    // Ghi phiếu xuất kho thật để lịch sử xuất/sử dụng của lô và màn Xuất kho có thể truy vết.
+    // Trước đây bước này chỉ trừ inventory nên số tồn đúng nhưng không có chứng từ goodsIssues.
+    DB.goodsIssues=DB.goodsIssues||[];
+    const goodsIssueId=nextCode('PX-2026-',DB.goodsIssues);
+    DB.goodsIssues.unshift({
+      id:goodsIssueId,
+      type:'TRANSFER_OUT',
+      warehouseId:fromWarehouseId,
+      refDoc:req.id,
+      replenishmentId:req.id,
+      transferId,
+      storeId:req.storeId,
+      date:restaurantToday(),
+      status:'COMPLETED',
+      createdBy:DB.currentUser?.id||'',
+      note:`Xuất hàng cho ${store.name||req.storeId} theo yêu cầu ${req.id}`,
+      items:issuedLines.map(line=>({productId:line.productId,lotId:line.lotId||'',qty:Number(line.qty||0),unit:line.unit||'',locationId:line.sourceLocationId||''}))
+    });
+    req.status='ISSUED'; req.approvedItems=approved; req.sourceWarehouseId=fromWarehouseId; req.transferId=transferId; req.goodsIssueId=goodsIssueId; req.issuedLines=issuedLines; req.issuedAt=new Date().toISOString(); req.issuedBy=DB.currentUser?.id||'';
+    if(typeof InventoryAPI!=='undefined'&&InventoryAPI.scheduleCollections) InventoryAPI.scheduleCollections(['inventory','inventoryTransactions','goodsIssues'],120);
+    restaurantPersist(['replenishments']); Modal.close(); go('restaurant',{tab:'replenishment'}); Toast.ok('Kho đã xuất hàng',`${goodsIssueId} · ${transferId} · ${approved.length} thành phẩm · chờ cửa hàng nhận`);
+  },
+  'restaurant-replenishment-receive': (d) => {
+    const req=restaurantReplenishment(d.id); if(!req||req.status!=='ISSUED')return; const store=restaurantStore(req.storeId);
+    const grouped={}; for(const line of req.issuedLines||[]){grouped[line.productId]=(grouped[line.productId]||0)+Number(line.qty||0);}
+    const rows=Object.entries(grouped).map(([productId,qty])=>{const item=restaurantItem(productId);return `<tr><td><span class="code">${esc(productId)}</span><div class="cell-sub">${esc(item?.name||productId)}</div></td><td class="right num">${fmtDec(qty,3)} ${esc(item?.unit||'')}</td></tr>`}).join('');
+    Modal.open({title:`Cửa hàng nhập hàng · ${esc(req.id)}`,sub:`${esc(store?.name||req.storeId)} · ${Object.keys(grouped).length} thành phẩm`,size:'lg',body:`<div class="detail-grid"><div><span>Phiếu xuất kho</span><b>${esc(req.transferId||'—')}</b></div><div><span>Kho nguồn</span><b>${esc(Q.warehouseName(req.sourceWarehouseId)||'—')}</b></div><div><span>Trạng thái</span><b>Chờ cửa hàng xác nhận nhập</b></div></div><div class="form-sec-title" style="margin-top:14px">Hàng cửa hàng sẽ nhận</div>${tableShell([{t:'Thành phẩm'},{t:'Số lượng nhận',cls:'right'}],rows,{emptyTitle:'Không có hàng đã xuất'})}<div class="note-box"><b>Sau khi xác nhận</b><div class="cell-sub">Các thành phẩm trên mới được ghi vào Tồn kho cửa hàng. Trước bước này cửa hàng chưa sở hữu số hàng này.</div></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="restaurant-replenishment-receive-confirm" data-id="${esc(req.id)}"><i class="fa-solid fa-box-open"></i>Xác nhận nhập cửa hàng</button>`});
+  },
+  'restaurant-replenishment-receive-confirm': (d) => {
+    const req=restaurantReplenishment(d.id); if(!req||req.status!=='ISSUED')return; const store=restaurantStore(req.storeId); if(!store)return;
+    DB.restaurantStoreStocks=DB.restaurantStoreStocks||[]; DB.restaurantStoreStockTransactions=DB.restaurantStoreStockTransactions||[];
+    for(const line of req.issuedLines||[]){
+      const productId=line.productId; const item=Q.product(productId)||restaurantItem(productId); const key=`${req.storeId}|${productId}|${line.lotId||''}`;
+      let stock=(DB.restaurantStoreStocks||[]).find(x=>`${x.storeId}|${x.productId}|${x.lotId||''}`===key);
+      if(!stock){stock={id:`RSS-${req.storeId}-${productId}-${line.lotId||'NOLOT'}`.replace(/[^A-Za-z0-9_-]/g,'-'),storeId:req.storeId,sourceWarehouseId:req.sourceWarehouseId,productId,lotId:line.lotId||'',unit:line.unit||item?.unit||'',qtyOnHand:0,qtyAvailable:0,createdAt:new Date().toISOString()};DB.restaurantStoreStocks.unshift(stock);}
+      const before=Number(stock.qtyOnHand||0), add=Number(line.qty||0); stock.qtyOnHand=before+add; stock.qtyAvailable=Number(stock.qtyAvailable||0)+add; stock.updatedAt=new Date().toISOString();
+      DB.restaurantStoreStockTransactions.unshift({id:`RSTX-${Date.now()}-${Math.random().toString(36).slice(2,7)}`,storeId:req.storeId,sourceWarehouseId:req.sourceWarehouseId,productId,lotId:line.lotId||'',type:'RECEIPT',qty:add,qtyBefore:before,qtyAfter:stock.qtyOnHand,refType:'STORE_REPLENISHMENT',refId:req.id,date:restaurantToday(),createdAt:new Date().toISOString()});
+    }
+    req.status='RECEIVED'; req.receivedAt=new Date().toISOString(); req.receivedBy=DB.currentUser?.id||'';
+    restaurantPersist(['replenishments','storeStocks','storeStockTransactions']); Modal.close(); go('restaurant',{tab:'store_stock'}); Toast.ok('Cửa hàng đã nhập hàng',`${req.id} · tồn điểm bán đã được cập nhật`);
+  },
+  'restaurant-pos-add': (d) => restaurantPosAdd(d.id),
+  'restaurant-pos-inc': (d) => restaurantPosChange(d.id, 1),
+  'restaurant-pos-dec': (d) => restaurantPosChange(d.id, -1),
+  'restaurant-pos-clear': () => { RestaurantPOSState.cart=[]; render(); },
+  'restaurant-pos-checkout': () => {
+    if(!(RestaurantPOSState.cart||[]).length){ Toast.warn('Đơn hàng đang trống','Hãy chọn ít nhất một món.'); return; }
+    const store=restaurantPosStore(); if(!store){ Toast.err('Chưa có chi nhánh','Hãy khai báo chi nhánh trước khi bán hàng.'); return; }
+    Modal.open({title:'Thanh toán đơn POS',sub:`${esc(store.name)} · ${fmtN(RestaurantPOSState.cart.length)} dòng món`,size:'md',body:`<div class="detail-grid"><div><span>Tổng thanh toán</span><b style="font-size:20px">${fmtVND(restaurantPosCartTotal())}</b></div><div><span>Ca bán hàng</span><b>${esc(RestaurantPOSState.shift)}</b></div></div><div class="field" style="margin-top:14px"><label>Phương thức thanh toán *</label><select class="inp" id="restaurantPosCheckoutPayment"><option>Tiền mặt</option><option>Chuyển khoản</option><option>Ví điện tử / QR</option><option>Thẻ</option></select></div><div class="note-box"><b>Xuất kho tự động</b><div class="cell-sub">Sau khi xác nhận, hệ thống kiểm tra Recipe/BOM và trừ nguyên liệu tại đúng kho cửa hàng.</div></div>`,foot:'<button class="btn" data-act="modal-close">Quay lại</button><button class="btn btn-primary" data-act="restaurant-pos-checkout-confirm"><i class="fa-solid fa-check"></i>Xác nhận thanh toán</button>'});
+  },
+  'restaurant-pos-checkout-confirm': () => {
+    const store=restaurantPosStore(); if(!store)return;
+    const invoiceId=nextCode('POS-2026-',DB.posOrders||[]);
+    const order={id:invoiceId,storeId:store.id,shift:RestaurantPOSState.shift||'Ca sáng',employeeId:DB.currentUser?.id||'',date:restaurantToday(),channel:RestaurantPOSState.channel||'POS',tableNo:'',items:(RestaurantPOSState.cart||[]).map(x=>({recipeId:x.recipeId,quantity:Number(x.qty||0),price:Number(x.price||0)})),payment:$('#restaurantPosCheckoutPayment')?.value||'Tiền mặt',status:'OPEN',createdAt:new Date().toISOString()};
+    const posted=restaurantPostOrder(order); if(!posted.ok){Toast.err('Không thể thanh toán',posted.message||'Không đủ nguyên liệu tại cửa hàng.');return;}
+    DB.posOrders.unshift(order); restaurantPersist(['orders','storeStocks','storeStockTransactions']); RestaurantPOSState.cart=[]; Modal.close(); render(); Toast.ok('Thanh toán thành công',`${invoiceId} · ${fmtVND(restaurantOrderTotal(order))}`);
+  },
   'restaurant-pos-open': () => openRestaurantPos('POS'),
   'restaurant-tablet-open': () => openRestaurantPos('TABLET'),
   'restaurant-qr-open': () => openRestaurantPos('QR'),
@@ -1770,7 +2028,7 @@ const Actions = {
       const posted = restaurantPostOrder(order);
       if (!posted.ok) { Toast.err('Không đủ nguyên liệu tại cửa hàng', posted.message || 'Không thể ghi kho.'); return; }
     }
-    DB.posOrders.unshift(order); restaurantPersist();
+    DB.posOrders.unshift(order); restaurantPersist(['orders','storeStocks','storeStockTransactions']);
     Modal.close(); go('restaurant',{tab: channel === 'POS' ? 'pos' : channel.toLowerCase()});
     Toast.ok(channel === 'POS' ? 'Thanh toán thành công' : 'Đã gửi đơn', `${invoiceId} · ${recipe.name} · ${quantity} ${recipe.unit}`);
   },
@@ -1778,50 +2036,70 @@ const Actions = {
   'restaurant-order-pay': (d) => {
     const order = (DB.posOrders || []).find(x => x.id === d.id); if (!order || order.status !== 'OPEN') return;
     const posted = restaurantPostOrder(order); if (!posted.ok) { Toast.err('Không thể thanh toán', posted.message || 'Không đủ nguyên liệu.'); return; }
-    order.payment = order.payment || 'Thanh toán tại quầy'; restaurantPersist(); Modal.close(); render(); Toast.ok('Đã thanh toán', order.id);
+    order.payment = order.payment || 'Thanh toán tại quầy'; restaurantPersist(['orders','storeStocks','storeStockTransactions']); Modal.close(); render(); Toast.ok('Đã thanh toán', order.id);
   },
   'restaurant-order-delete': (d) => {
     const order = (DB.posOrders || []).find(x => x.id === d.id); if (!order) return;
     if (order.status !== 'OPEN') { Toast.warn('Không thể xóa', 'Chỉ đơn chưa thanh toán mới được xóa để không làm sai lịch sử kho và doanh thu.'); return; }
-    confirmBox({ title:'Xóa đơn hàng', icon:'fa-trash', okText:'Xóa đơn', message:`Xóa đơn <b>${esc(order.id)}</b>?`, onOk:()=>{ DB.posOrders=(DB.posOrders||[]).filter(x=>x.id!==order.id); restaurantPersist(); render(); Toast.ok('Đã xóa đơn', order.id); } });
+    confirmBox({ title:'Xóa đơn hàng', icon:'fa-trash', okText:'Xóa đơn', message:`Xóa đơn <b>${esc(order.id)}</b>?`, onOk:()=>{ DB.posOrders=(DB.posOrders||[]).filter(x=>x.id!==order.id); if(typeof RestaurantQualityAPI!=='undefined') RestaurantQualityAPI.deleteRestaurant('orders',order.id).catch(err=>Toast.err('Không xóa được trên server',err?.message||'')); render(); Toast.ok('Đã xóa đơn', order.id); } });
   },
   'restaurant-recipe-new': () => openRestaurantRecipeForm(''),
   'restaurant-recipe-edit': (d) => openRestaurantRecipeForm(d.id),
   'restaurant-recipe-view': (d) => {
     const r=restaurantRecipe(d.id); if(!r)return;
-    const rows=(r.items||[]).map(i=>`<tr><td><span class="code">${esc(i.materialId)}</span></td><td>${esc(Q.material(i.materialId)?.name||i.materialId)}</td><td class="right num">${fmtDec(i.quantity,4)} ${esc(i.unit||Q.material(i.materialId)?.unit||'')}</td></tr>`).join('');
+    const rows=(r.items||[]).map(i=>`<tr><td><span class="code">${esc(i.materialId)}</span></td><td>${esc(Q.product(i.materialId)?.name||i.materialId)}</td><td class="right num">${fmtDec(i.quantity,4)} ${esc(i.unit||Q.product(i.materialId)?.unit||'')}</td></tr>`).join('');
     Modal.open({title:`Chi tiết món · ${r.id}`,sub:r.name,size:'lg',body:`<div class="detail-grid"><div><span>Nhóm</span><b>${esc(r.group||'—')}</b></div><div><span>Giá bán</span><b>${fmtVND(r.price||0)}</b></div><div><span>Đơn vị</span><b>${esc(r.unit||'—')}</b></div><div><span>Trạng thái</span><b>${r.active!==false?'Đang bán':'Ngừng bán'}</b></div></div><div class="form-sec-title" style="margin-top:14px">Recipe / BOM món</div>${tableShell([{t:'Mã NVL'},{t:'Nguyên liệu'},{t:'Định lượng',cls:'right'}],rows,{emptyTitle:'Chưa có nguyên liệu'})}`,foot:`<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="restaurant-recipe-edit" data-id="${esc(r.id)}"><i class="fa-solid fa-pen"></i>Sửa</button>`});
   },
   'restaurant-recipe-add-line': () => {
-    const host=$('#restaurantRecipeLines'); if(!host)return; const m=(DB.materials||[])[0]; if(!m)return;
+    const host=$('#restaurantRecipeLines'); if(!host)return; const m=(DB.products||[])[0]; if(!m)return;
     const row=document.createElement('div'); row.className='restaurant-recipe-line'; row.style.cssText='display:grid;grid-template-columns:1fr 130px 42px;gap:8px;margin-bottom:8px';
-    row.innerHTML=`<select class="inp" name="material">${(DB.materials||[]).map(x=>`<option value="${esc(x.id)}">${esc(x.id)} — ${esc(x.name)} (${esc(x.unit||'')})</option>`).join('')}</select><input class="inp right num" name="qty" type="number" min="0.0001" step="0.0001" value="1"><button class="btn btn-sm" type="button" data-act="restaurant-recipe-remove-line"><i class="fa-solid fa-trash"></i></button>`; host.appendChild(row);
+    row.innerHTML=`<select class="inp" name="material">${(DB.products||[]).map(x=>`<option value="${esc(x.id)}">${esc(x.id)} — ${esc(x.name)} (${esc(x.unit||'')})</option>`).join('')}</select><input class="inp right num" name="qty" type="number" min="0.0001" step="0.0001" value="1"><button class="btn btn-sm" type="button" data-act="restaurant-recipe-remove-line"><i class="fa-solid fa-trash"></i></button>`; host.appendChild(row);
   },
-  'restaurant-recipe-remove-line': (d,el) => { const rows=[...document.querySelectorAll('.restaurant-recipe-line')]; if(rows.length<=1){Toast.warn('Công thức cần nguyên liệu','Giữ ít nhất một dòng nguyên liệu.');return;} el.closest('.restaurant-recipe-line')?.remove(); },
+  'restaurant-recipe-remove-line': (d,el) => { const rows=[...document.querySelectorAll('.restaurant-recipe-line')]; if(rows.length<=1){Toast.warn('Công thức cần thành phẩm','Giữ ít nhất một dòng thành phẩm.');return;} el.closest('.restaurant-recipe-line')?.remove(); },
   'restaurant-recipe-save': () => {
-    const id=$('#restaurantRecipeId')?.value||''; const name=$('#restaurantRecipeName')?.value.trim()||''; const price=Number($('#restaurantRecipePrice')?.value||0); if(!name||price<0){Toast.err('Dữ liệu chưa hợp lệ','Tên món là bắt buộc và giá bán không được âm.');return;}
-    const items=[],seen=new Set(); for(const row of document.querySelectorAll('.restaurant-recipe-line')){ const materialId=row.querySelector('[name="material"]')?.value; const quantity=Number(row.querySelector('[name="qty"]')?.value||0); if(!materialId||quantity<=0){Toast.err('Định lượng chưa hợp lệ','Nguyên liệu và số lượng phải lớn hơn 0.');return;} if(seen.has(materialId)){Toast.err('Trùng nguyên liệu',materialId);return;} seen.add(materialId); items.push({materialId,quantity,unit:Q.material(materialId)?.unit||''}); }
+    const id=$('#restaurantRecipeId')?.value||''; const name=$('#restaurantRecipeName')?.value.trim()||''; const price=parseMoney($('#restaurantRecipePrice')?.value||0); if(!name||price<0){Toast.err('Dữ liệu chưa hợp lệ','Tên món là bắt buộc và giá bán không được âm.');return;}
+    const items=[],seen=new Set(); for(const row of document.querySelectorAll('.restaurant-recipe-line')){ const materialId=row.querySelector('[name="material"]')?.value; const quantity=Number(row.querySelector('[name="qty"]')?.value||0); if(!materialId||quantity<=0){Toast.err('Định lượng chưa hợp lệ','Thành phẩm và số lượng phải lớn hơn 0.');return;} if(seen.has(materialId)){Toast.err('Trùng thành phẩm',materialId);return;} seen.add(materialId); items.push({materialId,quantity,unit:Q.product(materialId)?.unit||''}); }
     let r=restaurantRecipe(id); if(!r){ const rid=nextCode('MON-',DB.restaurantRecipes||[]); r={id:rid}; DB.restaurantRecipes.unshift(r); }
     Object.assign(r,{name,group:$('#restaurantRecipeGroup')?.value.trim()||'',price,unit:$('#restaurantRecipeUnit')?.value.trim()||'Phần',active:!!$('#restaurantRecipeActive')?.checked,items}); restaurantPersist(); Modal.close(); render(); Toast.ok('Đã lưu món / công thức',r.id);
   },
   'restaurant-recipe-delete': (d) => {
     const r=restaurantRecipe(d.id); if(!r)return; const used=(DB.posOrders||[]).some(o=>(o.items||[]).some(i=>i.recipeId===r.id)); if(used){Toast.warn('Không thể xóa','Món đã phát sinh đơn hàng. Hãy chuyển sang Ngừng bán để giữ lịch sử.');return;}
-    confirmBox({title:'Xóa món',icon:'fa-trash',okText:'Xóa',message:`Xóa <b>${esc(r.name)}</b>?`,onOk:()=>{DB.restaurantRecipes=(DB.restaurantRecipes||[]).filter(x=>x.id!==r.id);restaurantPersist();render();Toast.ok('Đã xóa món',r.id);}});
+    confirmBox({title:'Xóa món',icon:'fa-trash',okText:'Xóa',message:`Xóa <b>${esc(r.name)}</b>?`,onOk:()=>{DB.restaurantRecipes=(DB.restaurantRecipes||[]).filter(x=>x.id!==r.id);if(typeof RestaurantQualityAPI!=='undefined') RestaurantQualityAPI.deleteRestaurant('recipes',r.id).catch(err=>Toast.err('Không xóa được trên server',err?.message||''));render();Toast.ok('Đã xóa món',r.id);}});
   },
   'restaurant-store-new': () => openRestaurantStoreForm(''),
   'restaurant-store-edit': (d) => openRestaurantStoreForm(d.id),
   'restaurant-store-view': (d) => {
-    const s=restaurantStore(d.id); if(!s)return; const wh=(DB.warehouses||[]).find(w=>w.id===s.warehouseId); const orderCount=(DB.posOrders||[]).filter(o=>o.storeId===s.id).length;
-    Modal.open({title:`Chi tiết chi nhánh · ${s.id}`,size:'md',body:`<div class="detail-grid"><div><span>Mã</span><b>${esc(s.code||s.id)}</b></div><div><span>Tên</span><b>${esc(s.name)}</b></div><div><span>Kho liên kết</span><b>${esc(wh?.name||s.warehouseId)}</b></div><div><span>Đơn hàng</span><b>${orderCount}</b></div><div><span>Địa chỉ</span><b>${esc(s.address||'—')}</b></div><div><span>Trạng thái</span><b>${s.status!=='inactive'?'Hoạt động':'Ngưng hoạt động'}</b></div></div>`,foot:`<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="restaurant-store-edit" data-id="${esc(s.id)}"><i class="fa-solid fa-pen"></i>Sửa</button>`});
+    const s=restaurantStore(d.id); if(!s)return; const wh=Q.warehouse(s.sourceWarehouseId); const orderCount=(DB.posOrders||[]).filter(o=>o.storeId===s.id).length;
+    Modal.open({title:`Chi tiết chi nhánh · ${s.id}`,size:'md',body:`<div class="detail-grid"><div><span>Mã</span><b>${esc(s.code||s.id)}</b></div><div><span>Tên</span><b>${esc(s.name)}</b></div><div><span>Kho thành phẩm nguồn</span><b>${esc(wh?.name||'Chưa liên kết')}</b></div><div><span>Đơn hàng</span><b>${orderCount}</b></div><div><span>Địa chỉ</span><b>${esc(s.address||'—')}</b></div><div><span>Trạng thái</span><b>${s.status!=='inactive'?'Hoạt động':'Ngưng hoạt động'}</b></div></div>`,foot:`<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="restaurant-store-edit" data-id="${esc(s.id)}"><i class="fa-solid fa-pen"></i>Sửa</button>`});
   },
   'restaurant-store-save': () => {
-    const id=$('#restaurantStoreId')?.value||''; const name=$('#restaurantStoreName')?.value.trim()||''; const warehouseId=$('#restaurantStoreWarehouse')?.value||''; if(!name||!warehouseId){Toast.err('Dữ liệu chưa hợp lệ','Tên chi nhánh và kho liên kết là bắt buộc.');return;}
-    let s=restaurantStore(id); if(!s){const sid=nextCode('STORE-',DB.stores||[]);s={id:sid};DB.stores.push(s);} Object.assign(s,{code:$('#restaurantStoreCode')?.value.trim()||s.id,name,warehouseId,address:$('#restaurantStoreAddress')?.value.trim()||'',status:$('#restaurantStoreStatus')?.value||'active'});restaurantPersist();Modal.close();render();Toast.ok('Đã lưu chi nhánh',s.id);
+    const id=$('#restaurantStoreId')?.value||''; const name=$('#restaurantStoreName')?.value.trim()||''; const sourceWarehouseId=$('#restaurantStoreWarehouse')?.value||''; const wh=Q.warehouse(sourceWarehouseId); if(!name||!wh||wh.type!=='FINISHED_GOODS'){Toast.err('Dữ liệu chưa hợp lệ','Tên chi nhánh và Kho thành phẩm nguồn là bắt buộc.');return;}
+    let s=restaurantStore(id); if(!s){const sid=nextCode('STORE-',DB.stores||[]);s={id:sid};DB.stores.push(s);} Object.assign(s,{code:$('#restaurantStoreCode')?.value.trim()||s.id,name,sourceWarehouseId,address:$('#restaurantStoreAddress')?.value.trim()||'',status:$('#restaurantStoreStatus')?.value||'active'}); delete s.warehouseId; restaurantPersist(['stores']);Modal.close();render();Toast.ok('Đã lưu chi nhánh',`${s.id} · ${wh.name}`);
   },
   'restaurant-store-delete': (d) => {
     const s=restaurantStore(d.id); if(!s)return; if((DB.posOrders||[]).some(o=>o.storeId===s.id)){Toast.warn('Không thể xóa','Chi nhánh đã có đơn hàng. Hãy chuyển trạng thái sang Ngưng hoạt động.');return;}
-    confirmBox({title:'Xóa chi nhánh',icon:'fa-trash',okText:'Xóa',message:`Xóa chi nhánh <b>${esc(s.name)}</b>?`,onOk:()=>{DB.stores=(DB.stores||[]).filter(x=>x.id!==s.id);restaurantPersist();render();Toast.ok('Đã xóa chi nhánh',s.id);}});
+    confirmBox({title:'Xóa chi nhánh',icon:'fa-trash',okText:'Xóa',message:`Xóa chi nhánh <b>${esc(s.name)}</b>?`,onOk:()=>{DB.stores=(DB.stores||[]).filter(x=>x.id!==s.id);if(typeof RestaurantQualityAPI!=='undefined') RestaurantQualityAPI.deleteRestaurant('stores',s.id).catch(err=>Toast.err('Không xóa được trên server',err?.message||''));render();Toast.ok('Đã xóa chi nhánh',s.id);}});
   },
+
+
+  /* --- QC/QA: Hồ sơ kiểm nghiệm / CAPA / Thu hồi --- */
+  'quality-coa-new': () => openQualityCoaForm(''),
+  'quality-coa-edit': (d) => openQualityCoaForm(d.id),
+  'quality-coa-save': () => {
+    qualityOpsHydrate(); const id=$('#qualityCoaId')?.value||''; const lotId=$('#qualityCoaLot')?.value||''; if(!lotId){Toast.err('Thiếu lô kiểm nghiệm','Hãy chọn lô cần kiểm nghiệm.');return;}
+    const lot=(DB.inventoryLots||[]).find(x=>x.id===lotId); let x=(DB.qualityCoa||[]).find(v=>v.id===id); if(!x){x={id:nextCode('COA-2026-',DB.qualityCoa||[])};DB.qualityCoa.unshift(x);}
+    const raw=($('#qualityCoaTests')?.value||'').split(';').map(v=>v.trim()).filter(Boolean).map(v=>{const [name,...rest]=v.split(':');return {name:(name||'Chỉ tiêu').trim(),result:rest.join(':').trim()||'—'};});
+    Object.assign(x,{lotId,productId:lot?.productId||'',testDate:$('#qualityCoaDate')?.value||restaurantToday(),inspector:$('#qualityCoaInspector')?.value?.trim()||'QC/QA',result:$('#qualityCoaResult')?.value||'PENDING',tests:raw,note:$('#qualityCoaNote')?.value?.trim()||''}); qualityOpsPersist(); Modal.close(); render(); Toast.ok('Đã lưu hồ sơ kiểm nghiệm',x.id);
+  },
+  'quality-coa-view': (d) => { qualityOpsHydrate(); const x=(DB.qualityCoa||[]).find(v=>v.id===d.id); if(!x)return; const tests=(x.tests||[]).map(t=>`<tr><td>${esc(t.name||'')}</td><td>${esc(t.spec||'—')}</td><td>${esc(t.result||'—')}</td></tr>`).join(''); Modal.open({title:`Hồ sơ kiểm nghiệm · ${esc(x.id)}`,sub:qualityLotLabel(x.lotId),size:'lg',body:`<div class="detail-grid"><div><span>Ngày kiểm</span><b>${fmtDate(x.testDate)}</b></div><div><span>Người kiểm</span><b>${esc(x.inspector||'—')}</b></div><div><span>Kết quả</span><b>${x.result==='PASSED'?'Đạt':x.result==='FAILED'?'Không đạt':'Chờ kết quả'}</b></div><div><span>Sản phẩm</span><b>${esc(x.productId||'—')}</b></div></div><div class="form-sec-title" style="margin-top:14px">Chỉ tiêu kiểm nghiệm</div>${tableShell([{t:'Chỉ tiêu'},{t:'Tiêu chuẩn'},{t:'Kết quả'}],tests,{emptyTitle:'Chưa có chỉ tiêu'})}<div class="note-box"><b>Ghi chú</b><div class="cell-sub">${esc(x.note||'Không có')}</div></div>`,foot:`<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="quality-coa-edit" data-id="${esc(x.id)}"><i class="fa-solid fa-pen"></i>Cập nhật</button>`}); },
+  'quality-capa-new': () => openQualityCapaForm(''),
+  'quality-capa-edit': (d) => openQualityCapaForm(d.id),
+  'quality-capa-save': () => { qualityOpsHydrate(); const id=$('#qualityCapaId')?.value||''; const issue=$('#qualityCapaIssue')?.value?.trim()||''; if(!issue){Toast.err('Thiếu nội dung CAPA','Hãy nhập vấn đề / sai lệch cần xử lý.');return;} let x=(DB.qualityCapa||[]).find(v=>v.id===id);if(!x){x={id:nextCode('CAPA-2026-',DB.qualityCapa||[])};DB.qualityCapa.unshift(x);} Object.assign(x,{source:$('#qualityCapaSource')?.value||'Kiểm tra chất lượng',issue,rootCause:$('#qualityCapaRoot')?.value?.trim()||'',correction:$('#qualityCapaCorrection')?.value?.trim()||'',preventive:$('#qualityCapaPreventive')?.value?.trim()||'',owner:$('#qualityCapaOwner')?.value?.trim()||'QC/QA',dueDate:$('#qualityCapaDue')?.value||'',status:$('#qualityCapaStatus')?.value||'OPEN'});qualityOpsPersist();Modal.close();render();Toast.ok('Đã lưu CAPA',x.id); },
+  'quality-capa-view': (d) => {qualityOpsHydrate();const x=(DB.qualityCapa||[]).find(v=>v.id===d.id);if(!x)return;Modal.open({title:`CAPA · ${esc(x.id)}`,size:'lg',body:`<div class="detail-grid"><div><span>Nguồn</span><b>${esc(x.source||'—')}</b></div><div><span>Phụ trách</span><b>${esc(x.owner||'—')}</b></div><div><span>Hạn xử lý</span><b>${fmtDate(x.dueDate)}</b></div><div><span>Trạng thái</span><b>${esc(x.status||'OPEN')}</b></div></div><div class="form-sec-title">Vấn đề / sai lệch</div><div class="note-box">${esc(x.issue||'')}</div><div class="form-sec-title">Nguyên nhân gốc</div><div class="note-box">${esc(x.rootCause||'Chưa xác định')}</div><div class="form-sec-title">Khắc phục</div><div class="note-box">${esc(x.correction||'Chưa cập nhật')}</div><div class="form-sec-title">Phòng ngừa</div><div class="note-box">${esc(x.preventive||'Chưa cập nhật')}</div>`,foot:`<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="quality-capa-edit" data-id="${esc(x.id)}"><i class="fa-solid fa-pen"></i>Cập nhật</button>`});},
+  'quality-recall-new': () => openQualityRecallForm(''),
+  'quality-recall-edit': (d) => openQualityRecallForm(d.id),
+  'quality-recall-save': () => {qualityOpsHydrate();const id=$('#qualityRecallId')?.value||'';const lotId=$('#qualityRecallLot')?.value||'';const reason=$('#qualityRecallReason')?.value?.trim()||'';if(!lotId||!reason){Toast.err('Dữ liệu chưa đủ','Lô thành phẩm và lý do thu hồi là bắt buộc.');return;}let x=(DB.qualityRecalls||[]).find(v=>v.id===id);if(!x){x={id:nextCode('TH-2026-',DB.qualityRecalls||[])};DB.qualityRecalls.unshift(x);}Object.assign(x,{lotId,date:$('#qualityRecallDate')?.value||restaurantToday(),qty:Number($('#qualityRecallQty')?.value||0),status:$('#qualityRecallStatus')?.value||'OPEN',reason,action:$('#qualityRecallAction')?.value?.trim()||''});qualityOpsPersist();Modal.close();render();Toast.ok('Đã lưu đợt thu hồi',x.id);},
+  'quality-recall-view': (d) => {qualityOpsHydrate();const x=(DB.qualityRecalls||[]).find(v=>v.id===d.id);if(!x)return;Modal.open({title:`Thu hồi sản phẩm · ${esc(x.id)}`,sub:qualityLotLabel(x.lotId),size:'lg',body:`<div class="detail-grid"><div><span>Ngày khởi tạo</span><b>${fmtDate(x.date)}</b></div><div><span>SL mục tiêu</span><b>${fmtDec(x.qty||0,2)}</b></div><div><span>Trạng thái</span><b>${esc(x.status||'OPEN')}</b></div><div><span>Lô</span><b>${esc(qualityLotLabel(x.lotId))}</b></div></div><div class="form-sec-title">Lý do thu hồi</div><div class="note-box">${esc(x.reason||'')}</div><div class="form-sec-title">Phạm vi / hướng xử lý</div><div class="note-box">${esc(x.action||'Chưa cập nhật')}</div>`,foot:`<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="quality-recall-edit" data-id="${esc(x.id)}"><i class="fa-solid fa-pen"></i>Cập nhật</button>`});},
 
   /* --- Mua sắm (Purchase Module Actions) --- */
   'purchase-tab-change': (d) => { F('purchases').tab = d.tab; render(); },
@@ -2040,7 +2318,7 @@ const Actions = {
         ) || 0;
 
       const expectedPrice =
-        Number(
+        parseMoney(
           $(`.pr-expected-price[data-id="${m.id}"]`)?.value
         ) || 0;
 
@@ -2731,14 +3009,14 @@ const Actions = {
       const quoteId = nextCode('BG-NCC-', DB.supplierQuotations);
       const total = items.reduce((sum, item) => sum + item.amount, 0);
       const selected = items.some((item) => item.selected);
-      DB.supplierQuotations.unshift({ id: quoteId, prId: pr.id, supplierId, date: DB.today, validUntil: addDays(DB.today, 15), leadTimeDays: 7, paymentTerm: 'Theo báo giá nhà cung cấp', selected, confirmed: true, confirmedAt: DB.today, note: 'Báo giá đã được xác nhận theo PR', items, total });
+      DB.supplierQuotations.unshift({ id: quoteId, prId: pr.id, supplierId, date: DB.today, createdBy:DB.currentUser?.userId||DB.currentUser?.id||'', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), validUntil: addDays(DB.today, 15), leadTimeDays: 7, paymentTerm: 'Theo báo giá nhà cung cấp', selected, confirmed: true, confirmedAt: DB.today, note: 'Báo giá đã được xác nhận theo PR', items, total });
       if (selected) {
         const poId = nextCode('PO-2026-', DB.purchaseOrders);
         const poItems = items.filter((item) => item.selected).map((item) => ({ ...item, receivedQty: 0 }));
         const subtotal = poItems.reduce((sum, item) => sum + Number(item.amount || 0), 0);
         const vatRate = 10;
         const vat = Math.round(subtotal * vatRate / 100);
-        DB.purchaseOrders.unshift({ id: poId, prId: pr.id, quoteId, supplierId, date: DB.today, expectedDate: addDays(DB.today, 7), status: 'APPROVED', paymentTerm: 'Theo báo giá nhà cung cấp', note: pr.reason || 'Tạo từ báo giá nhà cung cấp', createdBy: DB.currentUser.id, items: poItems, subtotal, vatRate, vat, total: subtotal + vat, paid: 0 });
+        DB.purchaseOrders.unshift({ id: poId, prId: pr.id, quoteId, supplierId, date: DB.today, expectedDate: addDays(DB.today, 7), status: 'APPROVED', paymentTerm: 'Theo báo giá nhà cung cấp', note: pr.reason || 'Tạo từ báo giá nhà cung cấp', createdBy:DB.currentUser?.userId||DB.currentUser?.id||'', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), items: poItems, subtotal, vatRate, vat, total: subtotal + vat, paid: 0 });
         createdPoIds.push(poId);
       }
     });
@@ -2817,7 +3095,7 @@ const Actions = {
       const m = Q.material(inp.dataset.id);
 
       const qty = Number(inp.dataset.qty) || 0;
-      const price = Number(inp.value) || 0;
+      const price = parseMoney(inp.value) || 0;
 
       return {
         materialId: m ? m.id : inp.dataset.id,
@@ -3169,7 +3447,7 @@ const Actions = {
     const allDone = (po.items || []).every(i => Number(i.receivedQty || 0) >= Number(i.qty || 0));
     po.status = allDone ? 'RECEIVED' : 'PARTIAL_RECEIVED';
     const grId = nextCode('PN-2026-', DB.goodsReceipts);
-    DB.goodsReceipts.unshift({ id: grId, poId: po.id, prId: po.prId, date, receivedBy: receiver, warehouse: Q.warehouseName(warehouseId), warehouseId, locationId: location.id, location: Q.locationName(location.id), status: po.status, inspectionStatus: 'PENDING', inspectedAt: '', inspectedBy: '', note, items: received });
+    DB.goodsReceipts.unshift({ id: grId, poId: po.id, prId: po.prId, date, receivedBy: receiver, createdBy:DB.currentUser?.userId||DB.currentUser?.id||'', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), warehouse: Q.warehouseName(warehouseId), warehouseId, locationId: location.id, location: Q.locationName(location.id), status: po.status, inspectionStatus: 'PENDING', inspectedAt: '', inspectedBy: '', note, items: received });
     Modal.close();
     go('warehouse', { tab: 'receipts' });
     Toast.ok('Đã lập phiếu nhập kho', `${grId} · ${po.id} · đang chờ kiểm tra đầu vào trước khi cộng tồn kho.`);
@@ -3202,7 +3480,7 @@ const Actions = {
     const posted = InventoryService.apply({ productId, warehouseId, locationId, lotId: lot.id, quantity: qty, type: 'PRODUCTION_RECEIPT', refType: receiptTab === 'finished' ? 'FINISHED_GOODS' : 'SEMI_FINISHED', refId: ref || systemLot, note, userId: receiver });
     if (!posted.ok) { Toast.err('Không thể nhập kho', posted.message); return; }
     const grId = nextCode('PN-2026-', DB.goodsReceipts);
-    DB.goodsReceipts.unshift({ id: grId, poId: '', prId: '', date, receivedBy: receiver, warehouse: Q.warehouseName(warehouseId), warehouseId, locationId, location: Q.locationName(locationId), status: 'RECEIVED', inspectionStatus: 'PASSED', note, items: [{ materialId: productId, name: product.name, unit: product.unit, qty, lotId: lot.id, lotNumber: systemLot, supplierLot: '', mfgDate, expiryDate, locationId }] });
+    DB.goodsReceipts.unshift({ id: grId, poId: '', prId: '', date, receivedBy: receiver, createdBy:DB.currentUser?.userId||DB.currentUser?.id||'', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), warehouse: Q.warehouseName(warehouseId), warehouseId, locationId, location: Q.locationName(locationId), status: 'RECEIVED', inspectionStatus: 'PASSED', note, items: [{ materialId: productId, name: product.name, unit: product.unit, qty, lotId: lot.id, lotNumber: systemLot, supplierLot: '', mfgDate, expiryDate, locationId }] });
     Modal.close();
     F('inv-receipts').receiptTab = receiptTab;
     go('warehouse', { tab: 'receipts' });
@@ -3308,7 +3586,7 @@ const Actions = {
     receipt.inspectedAt = DB.today;
     receipt.inspectedBy = inspector;
     receipt.inspectionNote = note;
-    (DB.materialInspections || (DB.materialInspections=[])).unshift({ id: nextCode('KNNL-2026-', DB.materialInspections || []), receiptId: receipt.id, poId: receipt.poId, date: DB.today, inspectorId: inspector, status: receipt.inspectionStatus, note, items: results });
+    (DB.materialInspections || (DB.materialInspections=[])).unshift({ id: nextCode('KNNL-2026-', DB.materialInspections || []), receiptId: receipt.id, poId: receipt.poId, date: DB.today, inspectorId: inspector, createdBy:DB.currentUser?.userId||DB.currentUser?.id||'', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), status: receipt.inspectionStatus, note, items: results });
     Modal.close(); go('quality', { tab: 'iqc' });
     Toast.ok('Đã lưu kiểm tra nguyên liệu', failedLines
       ? `${receipt.id} · đã cộng ${fmtN(totalAcceptedQty)} hàng đạt vào tồn kho và tạo yêu cầu trả cho phần không đạt.`
@@ -3342,7 +3620,7 @@ const Actions = {
     }
     DB.goodsIssues.unshift({ id: issueId, type: 'RETURN_OUT', warehouseId: req.warehouseId, refDoc: req.poId, poId: req.poId, returnRequestId: req.id, receiptId: req.receiptId, date: DB.today, status: 'COMPLETED', createdBy: DB.currentUser.id, note: req.reason || `Xuất trả NCC theo ${req.id}`, items: [{ productId: req.materialId, lotId: req.lotId, qty: req.qty, locationId: req.locationId, unit: req.unit }] });
     req.status = 'COMPLETED'; req.issueId = issueId; req.completedAt = DB.today; req.completedBy = DB.currentUser.id;
-    (DB.materialReturnHistory || (DB.materialReturnHistory=[])).unshift({ id: req.id, issueId, receiptId: req.receiptId, poId: req.poId, materialId: req.materialId, lotId: req.lotId, supplierLot: req.supplierLot, qty: req.qty, unit: req.unit, date: DB.today, reason: req.reason, status: 'RETURNED' });
+    (DB.materialReturnHistory || (DB.materialReturnHistory=[])).unshift({ id: req.id, issueId, receiptId: req.receiptId, poId: req.poId, createdBy:DB.currentUser?.userId||DB.currentUser?.id||'', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), materialId: req.materialId, lotId: req.lotId, supplierLot: req.supplierLot, qty: req.qty, unit: req.unit, date: DB.today, reason: req.reason, status: 'RETURNED' });
     const po = Q.purchaseOrder(req.poId);
     if (po) {
       const receipt = (DB.goodsReceipts || []).find(r=>r.id===req.receiptId);
@@ -3448,21 +3726,35 @@ const Actions = {
     Modal.close(); F('purchases').tab = 'receipts'; render();
     Toast.ok('Nhập kho thành công', `${grId} — Đã cộng tồn kho ${totalCount} vật tư`);
   },
+  'purchase-clear-debt-filters': () => {
+    const f = F('purchases');
+    f.debtQ = ''; f.debtSupplier = ''; f.debtStatus = ''; f.debtDateFrom = ''; f.debtDateTo = '';
+    State.page.purchases = 1; render();
+  },
   'supplier-pay-modal': (d) => openPaymentModal(d.id),
   'supplier-pay-save': (d) => {
     const po = Q.purchaseOrder(d.poid);
     if (!po) return;
-    const amount = Number($('#payAmount').value) || 0;
-    const remain = po.total - po.paid;
+    const amount = parseMoney($('#payAmount').value) || 0;
+    const remain = typeof purchasePayableRemaining==='function' ? purchasePayableRemaining(po) : Math.max(0, Number(po.total || 0) - Number(po.paid || 0));
     if (amount <= 0) { Toast.err('Số tiền không hợp lệ', 'Vui lòng nhập số tiền lớn hơn 0.'); return; }
     if (amount > remain) { Toast.err('Vượt quá dư nợ', `Số tiền nhập (${fmtVND(amount)}) vượt quá nợ còn lại (${fmtVND(remain)}).`); return; }
-    po.paid = Math.round(po.paid + amount);
     const id = nextCode('TT-2026-', DB.supplierPayments);
+    const payerId = $('#payPayer')?.value || '';
+    const payer = (DB.employees || []).find(e => String(e.id) === String(payerId));
+    const payerName = payer?.name || payer?.fullName || ((String(payerId)===String(DB.currentUser?.userId||DB.currentUser?.id)) ? ((String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||'')) : Q.employeeName(payerId));
+    const method = $('#payMethod')?.value || 'BANK_TRANSFER';
+    const bankId = method === 'BANK_TRANSFER' ? ($('#payBank')?.value || '') : '';
+    const bank = (DB.bankAccounts || []).find(b => String(b.id) === String(bankId));
+    if (!payerId) { Toast.err('Chưa chọn người thực hiện', 'Vui lòng chọn người thực hiện thanh toán.'); return; }
+    if (method === 'BANK_TRANSFER' && !bankId) { Toast.err('Chưa chọn ngân hàng', 'Vui lòng chọn tài khoản ngân hàng dùng để thanh toán.'); return; }
+    po.paid = Math.round(Number(po.paid || 0) + amount);
     DB.supplierPayments.unshift({
-      id, poId: po.id, supplierId: po.supplierId, date: DB.today, amount,
-      method: $('#payMethod').value, bankRef: $('#payRef').value, note: $('#payNote').value, createdBy: DB.currentUser.id,
+      id, poId: po.id, supplierId: po.supplierId, date: $('#payDate')?.value || (typeof currentDateYMD==='function'?currentDateYMD():DB.today), amount,
+      method: method === 'BANK_TRANSFER' ? 'Chuyển khoản' : 'Tiền mặt', bankId, bankName: bank?.name || bank?.bankName || '', bankAccount: bank?.accountNumber || '',
+      payerId, payerName, bankRef: $('#payRef')?.value || '', note: $('#payNote')?.value || '', createdBy: DB.currentUser?.userId || DB.currentUser?.id || '', createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''), createdAt: new Date().toISOString(),
     });
-    Modal.close(); F('purchases').tab = 'debts'; render();
+    Modal.close(); if(State.module==='accounting') go('accounting',{tab:'ap'}); else go('purchases',{tab:'debts'}); render();
     Toast.ok('Ghi nhận thanh toán thành công', `${id} — ${fmtVND(amount)}`);
   },
   'export-pr': (d) => Exporter.pdf('Yeu-cau-mua-hang-' + d.id),
@@ -3722,7 +4014,7 @@ function pfPlanDetailHtml(plan) {
   }
   let requestBlock='';
   if(request){
-    const reqRows=(request.items||[]).map(i=>`<tr><td><span class="code">${esc(i.materialId)}</span></td><td>${esc(Q.material(i.materialId)?.name||i.materialId)}</td><td class="right num">${fmtDec(Number(i.qty||0),3)} ${esc(Q.material(i.materialId)?.unit||'')}</td><td>${esc(Q.product(i.productId)?.name||i.productId||'—')}</td></tr>`).join('');
+    const reqRows=(request.items||[]).map(i=>`<tr><td><span class="code">${esc(i.materialId)}</span></td><td>${esc(Q.product(i.materialId)?.name||i.materialId)}</td><td class="right num">${fmtDec(Number(i.qty||0),3)} ${esc(Q.material(i.materialId)?.unit||'')}</td><td>${esc(Q.product(i.productId)?.name||i.productId||'—')}</td></tr>`).join('');
     const issues=(request.goodsIssueIds||[]).map(id=>`<button class="btn btn-sm" data-act="inv-issue-view" data-id="${esc(id)}"><i class="fa-solid fa-eye"></i>${esc(id)}</button>`).join(' ')||'<span class="muted">Chưa có phiếu xuất</span>';
     requestBlock=`<div class="card" style="margin-top:14px"><div class="card-head"><div><h3>Yêu cầu NVL của kế hoạch</h3><p>Thông tin phiếu yêu cầu và trạng thái Kho cấp nguyên liệu được theo dõi ngay tại đây.</p></div><div>${pfRequestStatus(request.status)}</div></div><div class="card-body">
       ${pfDetailRows([['Mã phiếu',`<span class="code">${esc(request.id)}</span>`],['Ngày yêu cầu',fmtDate(request.date)],['Người lập',esc(Q.employeeName(request.createdBy)||request.createdBy||'—')],['Phiếu xuất NVL',issues],['Ghi chú',esc(request.note||'—')]])}
@@ -3750,7 +4042,7 @@ Actions['pf-plan-edit-save'] = (d) => {const p=(DB.productionPlans||[]).find(x=>
 Actions['pf-bom-view'] = (d) => {const p=Q.product(d.id);if(!p)return;const bom=(p.bom||[]).map(([mid,qty,lossPct=0])=>{const mat=Q.material(mid),effective=pfBomRequiredQty(qty,1,lossPct);return `<tr><td><span class="code">${esc(mid)}</span></td><td>${esc(mat?.name||mid)}</td><td class="right num">${fmtDec(qty,4)} ${esc(mat?.unit||'')}</td><td class="right num">${fmtDec(Number(lossPct||0),2)}%</td><td class="right num"><b>${fmtDec(effective,4)}</b> ${esc(mat?.unit||'')}</td></tr>`;}).join('');const routing=(p.routing||[]).map(([oid])=>`<tr><td><span class="code">${esc(oid)}</span></td><td>${esc(Q.operation(oid)?.name||oid)}</td><td>${esc(Q.operation(oid)?.workshop||'')}</td></tr>`).join('');Modal.open({title:`BOM / Định mức · ${p.id}`,sub:`${p.name} · Định mức cho 1 ${p.unit||'đơn vị'} thành phẩm`,size:'xl',body:`<div class="grid g-2"><div><div class="form-sec-title">Nguyên liệu định mức</div>${tableShell([{t:'Mã NVL'},{t:'Nguyên liệu'},{t:'Định mức / 1 ĐVT',cls:'right'},{t:'Hao hụt',cls:'right'},{t:'Cần cấp / 1 ĐVT',cls:'right'}],bom,{emptyTitle:'Chưa khai báo nguyên liệu'})}</div><div><div class="form-sec-title">Công đoạn / Routing</div>${tableShell([{t:'Mã'},{t:'Công đoạn'},{t:'Xưởng'}],routing,{emptyTitle:'Chưa khai báo công đoạn'})}</div></div>`,foot:`<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="pf-bom-edit" data-id="${esc(p.id)}"><i class="fa-solid fa-pen"></i>Sửa</button>`});};
 
 function pfMrDetailHtml(r){
-  const rows=(r.items||[]).map(i=>`<tr><td><span class="code">${esc(i.materialId)}</span></td><td>${esc(Q.material(i.materialId)?.name||i.materialId)}</td><td class="right num">${fmtDec(i.qty,3)} ${esc(Q.material(i.materialId)?.unit||'')}</td><td>${esc(Q.product(i.productId)?.name||i.productId||'—')}</td></tr>`).join('');
+  const rows=(r.items||[]).map(i=>`<tr><td><span class="code">${esc(i.materialId)}</span></td><td>${esc(Q.product(i.materialId)?.name||i.materialId)}</td><td class="right num">${fmtDec(i.qty,3)} ${esc(Q.material(i.materialId)?.unit||'')}</td><td>${esc(Q.product(i.productId)?.name||i.productId||'—')}</td></tr>`).join('');
   const source = r.productionOrderId
     ? `Lệnh sản xuất <span class="code">${esc(r.productionOrderId)}</span>`
     : `Kế hoạch <span class="code">${esc(r.planId||'—')}</span>`;
@@ -3758,7 +4050,7 @@ function pfMrDetailHtml(r){
   return `${pfDetailRows([['Mã phiếu',`<span class="code">${esc(r.id)}</span>`],['Nguồn',source],['Ngày',fmtDate(r.date)],['Trạng thái',pfRequestStatus(r.status)],['Phiếu xuất kho',issues],['Người lập',esc(Q.employeeName(r.createdBy)||r.createdBy||'—')],['Ghi chú',esc(r.note||'—')]])}<div class="form-sec-title" style="margin-top:16px">Nguyên liệu yêu cầu</div>${tableShell([{t:'Mã NVL'},{t:'Nguyên liệu'},{t:'Số lượng',cls:'right'},{t:'Thành phẩm'}],rows,{emptyTitle:'Không có nguyên liệu'})}`;
 }
 Actions['pf-mr-view']=(d)=>{const r=(DB.productionMaterialRequests||[]).find(x=>x.id===d.id);if(!r)return;Modal.open({title:`Chi tiết yêu cầu NVL · ${r.id}`,size:'lg',body:pfMrDetailHtml(r),foot:`<button class="btn" data-act="modal-close">Đóng</button>${r.status==='WAITING_WAREHOUSE_APPROVAL'?`<button class="btn btn-primary" data-act="pf-mr-edit" data-id="${esc(r.id)}"><i class="fa-solid fa-pen"></i>Sửa</button>`:''}`});};
-Actions['pf-mr-edit']=(d)=>{const r=(DB.productionMaterialRequests||[]).find(x=>x.id===d.id);if(!r||r.status!=='WAITING_WAREHOUSE_APPROVAL'){Toast.warn('Không thể sửa','Chỉ phiếu chưa được Kho duyệt mới được sửa.');return;}const rows=(r.items||[]).map((i,idx)=>`<div class="pf-mr-edit-line" data-index="${idx}" style="display:grid;grid-template-columns:1fr 180px;gap:8px;margin-bottom:8px"><div><b>${esc(Q.material(i.materialId)?.name||i.materialId)}</b><div class="cell-sub">${esc(i.materialId)} · ${esc(Q.product(i.productId)?.name||i.productId||'')}</div></div><input class="inp right num" name="qty" type="number" min="0.0001" step="0.0001" value="${Number(i.qty||0)}"></div>`).join('');Modal.open({title:`Sửa yêu cầu NVL · ${r.id}`,size:'lg',body:`${rows}<div class="field"><label>Ghi chú</label><textarea class="inp" id="pfMrEditNote" rows="2">${esc(r.note||'')}</textarea></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="pf-mr-edit-save" data-id="${esc(r.id)}"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`});};
+Actions['pf-mr-edit']=(d)=>{const r=(DB.productionMaterialRequests||[]).find(x=>x.id===d.id);if(!r||r.status!=='WAITING_WAREHOUSE_APPROVAL'){Toast.warn('Không thể sửa','Chỉ phiếu chưa được Kho duyệt mới được sửa.');return;}const rows=(r.items||[]).map((i,idx)=>`<div class="pf-mr-edit-line" data-index="${idx}" style="display:grid;grid-template-columns:1fr 180px;gap:8px;margin-bottom:8px"><div><b>${esc(Q.product(i.materialId)?.name||i.materialId)}</b><div class="cell-sub">${esc(i.materialId)} · ${esc(Q.product(i.productId)?.name||i.productId||'')}</div></div><input class="inp right num" name="qty" type="number" min="0.0001" step="0.0001" value="${Number(i.qty||0)}"></div>`).join('');Modal.open({title:`Sửa yêu cầu NVL · ${r.id}`,size:'lg',body:`${rows}<div class="field"><label>Ghi chú</label><textarea class="inp" id="pfMrEditNote" rows="2">${esc(r.note||'')}</textarea></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="pf-mr-edit-save" data-id="${esc(r.id)}"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`});};
 Actions['pf-mr-edit-save']=(d)=>{const r=(DB.productionMaterialRequests||[]).find(x=>x.id===d.id);if(!r||r.status!=='WAITING_WAREHOUSE_APPROVAL')return;for(const el of document.querySelectorAll('.pf-mr-edit-line')){const idx=Number(el.dataset.index),qty=Number(el.querySelector('[name="qty"]')?.value||0);if(!(qty>0)){Toast.err('Số lượng không hợp lệ','Số lượng nguyên liệu phải lớn hơn 0.');return;}if(r.items[idx])r.items[idx].qty=qty;}r.note=$('#pfMrEditNote')?.value.trim()||'';r.updatedAt=new Date().toISOString();ProductionAPI?.scheduleSync(80);Modal.close();render();Toast.ok('Đã cập nhật yêu cầu NVL',r.id);};
 Actions['pf-mr-delete']=(d)=>{const r=(DB.productionMaterialRequests||[]).find(x=>x.id===d.id);if(!r||r.status!=='WAITING_WAREHOUSE_APPROVAL'){Toast.warn('Không thể xóa','Chỉ phiếu chưa được Kho duyệt mới được xóa.');return;}confirmBox({title:'Xóa yêu cầu NVL',icon:'fa-trash',okText:'Xóa phiếu',message:`Xóa phiếu <b>${esc(r.id)}</b>?`,onOk:()=>{DB.productionMaterialRequests=(DB.productionMaterialRequests||[]).filter(x=>x.id!==r.id);const p=(DB.productionPlans||[]).find(x=>x.id===r.planId);if(p&&p.materialRequestId===r.id){p.materialRequestId='';p.status='APPROVED';}const po=(DB.productionOrders||[]).find(x=>x.id===r.productionOrderId);if(po&&po.materialRequestId===r.id)po.materialRequestId='';ProductionAPI?.scheduleSync(80);render();Toast.ok('Đã xóa yêu cầu NVL',r.id);}});};
 
@@ -3783,7 +4075,7 @@ Actions['pf-bom-remove-op'] = (d,el) => { el.closest('.pf-bom-op-line')?.remove(
 Actions['pf-bom-save'] = () => {
   const product=Q.product($('#pfBomProduct')?.value); if(!product){Toast.err('Chưa chọn thành phẩm','Vui lòng chọn thành phẩm.');return;}
   const rows=[...document.querySelectorAll('.pf-bom-line')]; const seen=new Set(); const bom=[];
-  for(const row of rows){const mid=row.querySelector('[name="material"]')?.value; const qty=Number(row.querySelector('[name="qty"]')?.value||0); const lossPct=Number(row.querySelector('[name="lossPct"]')?.value||0); if(!mid||qty<=0){Toast.err('Định mức chưa hợp lệ','Nguyên liệu và số lượng phải hợp lệ.');return;} if(lossPct<0||lossPct>=100){Toast.err('Hao hụt chưa hợp lệ','% hao hụt phải từ 0 đến nhỏ hơn 100%.');return;} if(seen.has(mid)){Toast.err('Trùng nguyên liệu',`Nguyên liệu ${mid} đang được khai báo nhiều lần.`);return;} seen.add(mid); bom.push([mid,qty,lossPct]);}
+  for(const row of rows){const mid=row.querySelector('[name="material"]')?.value; const qty=Number(row.querySelector('[name="qty"]')?.value||0); const lossPct=Number(row.querySelector('[name="lossPct"]')?.value||0); if(!mid||qty<=0){Toast.err('Định mức chưa hợp lệ','Nguyên liệu và số lượng phải hợp lệ.');return;} if(lossPct<0||lossPct>=100){Toast.err('Hao hụt chưa hợp lệ','% hao hụt phải từ 0 đến nhỏ hơn 100%.');return;} if(seen.has(mid)){Toast.err('Trùng thành phẩm',`Nguyên liệu ${mid} đang được khai báo nhiều lần.`);return;} seen.add(mid); bom.push([mid,qty,lossPct]);}
   const opRows=[...document.querySelectorAll('.pf-bom-op-line')]; const opSeen=new Set(); const routing=[];
   for(const row of opRows){const oid=row.querySelector('[name="operation"]')?.value; const hours=Number(row.dataset.hours||0.01); if(!oid){Toast.err('Công đoạn chưa hợp lệ','Vui lòng chọn công đoạn.');return;} if(opSeen.has(oid)){Toast.err('Trùng công đoạn',`Công đoạn ${oid} đang được khai báo nhiều lần.`);return;} opSeen.add(oid); routing.push([oid,hours>0?hours:0.01]);}
   product.bom=bom; product.routing=routing; InventoryAPI?.scheduleCollections?.(['products'],80); Modal.close(); render(); Toast.ok('Đã lưu BOM / Routing',`${product.id} · ${product.name}`);
@@ -3798,7 +4090,7 @@ Actions['pf-plan-from-sales-order'] = (d) => {
   if(!items.length){Toast.warn('Đã đủ kế hoạch','Phần thiếu của đơn hàng đã được tồn kho hoặc các kế hoạch hiện tại bao phủ.');return;}
   const id=nextCode('KHSX-2026-',DB.productionPlans||[]);
   const today=currentDateYMD();
-  DB.productionPlans.unshift({id,date:today,dueDate:o.dueDate||addDays(today,7),items,status:'WAITING_APPROVAL',source:'SALES_ORDER',sourceOrderId:o.id,customerId:o.customerId||'',note:`Kế hoạch phần thiếu của đơn bán ${o.id}`,createdBy:DB.currentUser?.id||DB.currentUser?.userId||'',createdAt:new Date().toISOString()});
+  DB.productionPlans.unshift({id,date:today,dueDate:o.dueDate||addDays(today,7),items,status:'WAITING_APPROVAL',source:'SALES_ORDER',sourceOrderId:o.id,customerId:o.customerId||'',note:`Kế hoạch phần thiếu của đơn bán ${o.id}`,createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''),createdAt:new Date().toISOString()});
   o.productionPlanId=id;
   o.status='dh_cho_san_xuat';
   if(typeof SalesCRM!=='undefined')SalesCRM.saveLocal(['orders']);
@@ -3816,7 +4108,7 @@ Actions['pf-plan-save'] = () => {
   const date=$('#pfPlanDate')?.value||currentDateYMD(), due=$('#pfPlanDue')?.value||date; if(date<currentDateYMD()||due<currentDateYMD()||due<date){Toast.err('Ngày chưa hợp lệ','Ngày kế hoạch và ngày hoàn thành không được ở quá khứ; deadline phải từ ngày lập trở đi.');return;}
   const items=[]; document.querySelectorAll('.pf-plan-line').forEach(row=>{const pick=row.querySelector('[name="pick"]'); const qty=Number(row.querySelector('[name="qty"]')?.value||0); if(pick?.checked&&qty>0)items.push({productId:pick.dataset.product,qty});});
   if(!items.length){Toast.err('Chưa chọn thành phẩm','Chọn ít nhất một thành phẩm và nhập số lượng lớn hơn 0.');return;}
-  const id=nextCode('KHSX-2026-',DB.productionPlans||[]); DB.productionPlans.unshift({id,date,dueDate:due,items,status:'WAITING_APPROVAL',note:$('#pfPlanNote')?.value.trim()||'',createdBy:DB.currentUser?.id||DB.currentUser?.userId||'',createdAt:new Date().toISOString()});
+  const id=nextCode('KHSX-2026-',DB.productionPlans||[]); DB.productionPlans.unshift({id,date,dueDate:due,items,status:'WAITING_APPROVAL',note:$('#pfPlanNote')?.value.trim()||'',createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''),createdAt:new Date().toISOString()});
   ProductionAPI?.scheduleSync(80); Modal.close(); render(); Toast.ok('Đã lập kế hoạch',`${id} · Chờ duyệt tại Kho`);
 };
 Actions['pf-plan-approve'] = (d) => {const p=(DB.productionPlans||[]).find(x=>x.id===d.id); if(!p||p.status!=='WAITING_APPROVAL')return; p.status='APPROVED';p.approvedBy=DB.currentUser?.id||'';p.approvedAt=new Date().toISOString();if(p.source==='SALES_ORDER'&&p.sourceOrderId){const o=Q.order(p.sourceOrderId);if(o){o.status='dh_cho_san_xuat';o.productionPlanId=p.id;SalesCRM?.saveLocal(['orders']);}}ProductionAPI?.scheduleSync(80);render();Toast.ok('Đã duyệt kế hoạch',`${p.id} đã chuyển sang Sản xuất → Kế hoạch sản xuất.`);};
@@ -3826,7 +4118,7 @@ Actions['pf-plan-add-material'] = (d,el) => {
   const host=el.closest('.pf-mat-product')?.querySelector('.pf-plan-material-lines'); if(!host)return;
   const first=(DB.materials||[])[0]; if(!first){Toast.warn('Chưa có nguyên liệu','Danh mục nguyên liệu đang trống.');return;}
   const row=document.createElement('div'); row.className='pf-mat-line'; row.style.cssText='display:grid;grid-template-columns:1fr 170px 42px;gap:8px;margin-bottom:8px';
-  row.innerHTML=`<select class="inp" name="material">${(DB.materials||[]).map(x=>`<option value="${esc(x.id)}">${esc(x.id)} — ${esc(x.name)} (${esc(x.unit||'')})</option>`).join('')}</select><input class="inp right num" name="qty" type="number" min="0.0001" step="0.0001" value="1"><button class="btn btn-sm" type="button" data-act="pf-plan-remove-material" title="Xóa dòng"><i class="fa-solid fa-trash"></i></button>`;
+  row.innerHTML=`<select class="inp" name="material">${(DB.products||[]).map(x=>`<option value="${esc(x.id)}">${esc(x.id)} — ${esc(x.name)} (${esc(x.unit||'')})</option>`).join('')}</select><input class="inp right num" name="qty" type="number" min="0.0001" step="0.0001" value="1"><button class="btn btn-sm" type="button" data-act="pf-plan-remove-material" title="Xóa dòng"><i class="fa-solid fa-trash"></i></button>`;
   host.appendChild(row);
 };
 Actions['pf-plan-remove-material'] = (d,el) => { el.closest('.pf-mat-line')?.remove(); };
@@ -3860,7 +4152,7 @@ Actions['pf-mr-create'] = (d) => {
   const items=[];
   for(const group of document.querySelectorAll('.pf-mat-product')){
     const productId=group.dataset.product; const planItem=(plan.items||[]).find(x=>x.productId===productId); const preparedMaterials=[]; const preparedOperations=[]; const seenMat=new Set(); const seenOp=new Set();
-    for(const row of group.querySelectorAll('.pf-mat-line')){const mid=row.querySelector('[name="material"]')?.value, qty=Number(row.querySelector('[name="qty"]')?.value||0);if(!mid||qty<=0){Toast.err('Yêu cầu chưa hợp lệ','Tất cả dòng nguyên liệu phải có số lượng lớn hơn 0.');return;}if(seenMat.has(mid)){Toast.err('Trùng nguyên liệu',`${Q.material(mid)?.name||mid} đang xuất hiện nhiều lần trong cùng thành phẩm.`);return;}seenMat.add(mid);const bomDef=(Q.product(productId)?.bom||[]).find(([x])=>x===mid);const baseQtyPerUnit=Number(bomDef?.[1]||0),lossPct=Number(bomDef?.[2]||0);preparedMaterials.push({materialId:mid,qty,baseQtyPerUnit,lossPct});items.push({productId,materialId:mid,qty,baseQtyPerUnit,lossPct});}
+    for(const row of group.querySelectorAll('.pf-mat-line')){const mid=row.querySelector('[name="material"]')?.value, qty=Number(row.querySelector('[name="qty"]')?.value||0);if(!mid||qty<=0){Toast.err('Yêu cầu chưa hợp lệ','Tất cả dòng nguyên liệu phải có số lượng lớn hơn 0.');return;}if(seenMat.has(mid)){Toast.err('Trùng thành phẩm',`${Q.material(mid)?.name||mid} đang xuất hiện nhiều lần trong cùng thành phẩm.`);return;}seenMat.add(mid);const bomDef=(Q.product(productId)?.bom||[]).find(([x])=>x===mid);const baseQtyPerUnit=Number(bomDef?.[1]||0),lossPct=Number(bomDef?.[2]||0);preparedMaterials.push({materialId:mid,qty,baseQtyPerUnit,lossPct});items.push({productId,materialId:mid,qty,baseQtyPerUnit,lossPct});}
     for(const row of group.querySelectorAll('.pf-plan-op-line')){const oid=row.querySelector('[name="operation"]')?.value, hoursPer=Number(row.dataset.hours||0), note=row.querySelector('[name="note"]')?.value.trim()||'';if(!oid){Toast.err('Công đoạn chưa hợp lệ','Vui lòng chọn công đoạn.');return;}if(seenOp.has(oid)){Toast.err('Trùng công đoạn',`${Q.operation(oid)?.name||oid} đang xuất hiện nhiều lần trong cùng thành phẩm.`);return;}seenOp.add(oid);preparedOperations.push({operationId:oid,hoursPer,note});}
     if(planItem){planItem.preparedMaterials=preparedMaterials;planItem.preparedOperations=preparedOperations;}
   }
@@ -3905,7 +4197,7 @@ Actions['pf-mr-issue'] = (d) => {
 
 Actions['pf-plan-release'] = (d) => {
   const plan=(DB.productionPlans||[]).find(x=>x.id===d.id);if(!plan||plan.status!=='MATERIAL_ISSUED')return;
-  const created=[];(plan.items||[]).forEach(it=>{const product=Q.product(it.productId); if(!product)return; const po={id:nextCode('LSX-2026-',DB.productionOrders),orderId:plan.source==='SALES_ORDER'?(plan.sourceOrderId||''):'',customerId:plan.source==='SALES_ORDER'?(plan.customerId||Q.order(plan.sourceOrderId)?.customerId||''):'',productId:product.id,productName:product.name,spec:product.spec||'',qty:Number(it.qty||0),unit:product.unit||'',startDate:currentDateYMD(),deadline:(plan.dueDate&&plan.dueDate>=currentDateYMD()?plan.dueDate:addDays(currentDateYMD(),7)),managerId:DB.currentUser?.empId||'NV-018',status:'lsx_cho_duyet',stages:buildStages(Number(it.qty||0),0,0,currentDateYMD()),routingOverride:(it.preparedOperations||[]).map(o=>[o.operationId,Number(o.hoursPer||0),o.note||'']),materialPlan:(it.preparedMaterials||[]).map(m=>({materialId:m.materialId,qty:Number(m.qty||0)})),qcPass:0,qcFail:0,planId:plan.id,materialRequestId:plan.materialRequestId||'',note:`Tạo từ kế hoạch ${plan.id}`};DB.productionOrders.unshift(po);created.push(po);});
+  const created=[];(plan.items||[]).forEach(it=>{const product=Q.product(it.productId); if(!product)return; const routingOverride=(it.preparedOperations||[]).map(o=>[o.operationId,Number(o.hoursPer||0),o.note||'']); const routingForMo=routingOverride.length?routingOverride:(product.routing||[]); const po={id:nextCode('LSX-2026-',DB.productionOrders),orderId:plan.source==='SALES_ORDER'?(plan.sourceOrderId||''):'',customerId:plan.source==='SALES_ORDER'?(plan.customerId||Q.order(plan.sourceOrderId)?.customerId||''):'',productId:product.id,productName:product.name,spec:product.spec||'',qty:Number(it.qty||0),unit:product.unit||'',startDate:currentDateYMD(),deadline:(plan.dueDate&&plan.dueDate>=currentDateYMD()?plan.dueDate:addDays(currentDateYMD(),7)),managerId:DB.currentUser?.empId||'NV-018',status:'lsx_cho_duyet',stages:buildProductionStagesFromRouting(Number(it.qty||0),routingForMo,currentDateYMD()),routingOverride,materialPlan:(it.preparedMaterials||[]).map(m=>({materialId:m.materialId,qty:Number(m.qty||0)})),qcPass:0,qcFail:0,planId:plan.id,materialRequestId:plan.materialRequestId||'',note:`Tạo từ kế hoạch ${plan.id}`,createdBy:DB.currentUser?.userId||DB.currentUser?.id||'',createdByName:(String(DB.currentUser?.username||'').toLowerCase()==='admin'||DB.currentUser?.roleId==='ROLE_ADMIN')?'Admin':(DB.currentUser?.name||''),createdAt:new Date().toISOString()};DB.productionOrders.unshift(po);created.push(po);});
   if(!created.length){Toast.err('Không tạo được LSX','Không tìm thấy thành phẩm trong kế hoạch.');return;} plan.status='RELEASED';plan.productionOrderIds=created.map(x=>x.id);if(plan.source==='SALES_ORDER'&&plan.sourceOrderId){const so=Q.order(plan.sourceOrderId);if(so){so.status='dh_dang_san_xuat';if(typeof SalesCRM!=='undefined')SalesCRM.saveLocal(['orders']);}}ProductionAPI?.scheduleSync(80);render();Toast.ok('Đã tạo lệnh sản xuất',created.map(x=>x.id).join(', '));
 };
 
@@ -3936,14 +4228,14 @@ function updateBestSupplierPrice(materialId) {
   if (!inputs.length) return;
 
   const validPrices = inputs
-    .map((input) => ({ input, price: Number(input.value) || 0 }))
+    .map((input) => ({ input, price: parseMoney(input.value) || 0 }))
     .filter((entry) => entry.price > 0);
   const lowestPrice = validPrices.length ? Math.min(...validPrices.map((entry) => entry.price)) : 0;
 
   inputs.forEach((input) => {
     const line = input.closest('.quote-supplier-line');
     if (!line) return;
-    const price = Number(input.value) || 0;
+    const price = parseMoney(input.value) || 0;
     const isLowest = lowestPrice > 0 && price === lowestPrice;
 
     line.style.borderColor = isLowest ? 'var(--green)' : 'var(--border)';
@@ -3966,9 +4258,33 @@ function updateBestSupplierPrice(materialId) {
   });
 }
 
+
+/* Định dạng tiền trong form: 1200000 -> 1.200.000. */
+function setupMoneyInput(el) {
+  if (!el || el.dataset.moneyReady === '1') return;
+  el.dataset.moneyReady = '1';
+  el.type = 'text';
+  el.inputMode = 'numeric';
+  el.autocomplete = 'off';
+  el.value = fmtMoneyInput(el.value);
+}
+function setupMoneyInputs(root = document) {
+  root.querySelectorAll?.('[data-money="1"]').forEach(setupMoneyInput);
+}
+const moneyObserver = new MutationObserver((mutations) => {
+  mutations.forEach(m => m.addedNodes.forEach(n => { if (n.nodeType === 1) { if (n.matches?.('[data-money="1"]')) setupMoneyInput(n); setupMoneyInputs(n); } }));
+});
+moneyObserver.observe(document.documentElement, { childList:true, subtree:true });
+document.addEventListener('focusin', e => { if (e.target?.matches?.('[data-money="1"]')) setupMoneyInput(e.target); });
+
 /* Ô nhập liệu: bộ lọc module, form báo giá, tìm kiếm toàn cục */
 document.addEventListener('input', (e) => {
   const el = e.target;
+
+  if (el?.matches?.('[data-money="1"]')) {
+    const digits = String(el.value || '').replace(/[^0-9]/g, '').replace(/^0+(?=\d)/, '');
+    el.value = digits ? Number(digits).toLocaleString('vi-VN') : '';
+  }
 
   // Tiền master hàng hóa: không để số 0 mặc định dính thành 012000;
   // người dùng gõ 12000 sẽ nhìn thấy 12.000 theo định dạng vi-VN.
@@ -4027,8 +4343,12 @@ document.addEventListener('change', (e) => {
   // CRM bán hàng: chọn thành phẩm thì lấy đơn giá bán hiện hành làm mặc định.
   if (el.matches('.crm-order-line select[name="product"]')) {
     const product = typeof Q !== 'undefined' ? Q.product(el.value) : null;
-    const priceInput = el.closest('.crm-order-line')?.querySelector('input[name="price"]');
-    if (priceInput && product) priceInput.value = Number(product.price || 0);
+    const row = el.closest('.crm-order-line');
+    const priceInput = row?.querySelector('input[name="price"]');
+    const vatInput = row?.querySelector('select[name="vatRate"]');
+    if (priceInput && product) priceInput.value = priceInput.matches('[data-money="1"]') ? fmtMoneyInput(product.price || 0) : Number(product.price || 0);
+    if (vatInput && product && product.vatRate != null && [...vatInput.options].some(o=>Number(o.value)===Number(product.vatRate))) vatInput.value = String(Number(product.vatRate));
+    if (typeof updateCrmOrderTotals === 'function') updateCrmOrderTotals(document);
   }
   if (el.dataset.f) {
     const [key, field] = el.dataset.f.split('.');
@@ -4472,7 +4792,7 @@ function routeRefreshPlan(module, tab) {
   if (module === 'warehouse') {
     const map = {
       dashboard: ['inventory', 'inventoryLots', 'warehouses', 'materials', 'semiFinishedProducts', 'products'],
-      inventory: ['inventory', 'inventoryLots', 'warehouses', 'warehouseLocations', 'materials', 'semiFinishedProducts', 'products', 'itemCategories'],
+      inventory: ['inventory', 'goodsIssues', 'inventoryLots', 'warehouses', 'warehouseLocations', 'materials', 'semiFinishedProducts', 'products', 'itemCategories'],
       receipts: ['goodsReceipts', 'warehouses', 'inventoryLots'],
       issues: ['goodsIssues', 'warehouses', 'inventoryLots'],
       transfers: ['stockTransfers', 'warehouses'],
@@ -4626,6 +4946,7 @@ if (
     typeof InventoryAPI !== 'undefined' ? InventoryAPI.bootstrap() : Promise.resolve(),
     (typeof SalesCRM !== 'undefined' && typeof SalesCRM.bootstrap === 'function') ? SalesCRM.bootstrap() : Promise.resolve(),
     typeof ProductionAPI !== 'undefined' ? ProductionAPI.bootstrap() : Promise.resolve(),
+    typeof RestaurantQualityAPI !== 'undefined' ? RestaurantQualityAPI.bootstrap() : Promise.resolve(),
   ]);
 
   // Route đang mở được lấy server trước render đầu tiên để tránh hiển thị số liệu

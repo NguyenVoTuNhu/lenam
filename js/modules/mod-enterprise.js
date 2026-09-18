@@ -111,21 +111,66 @@ let __restaurantHydrated = false;
 function restaurantHydrate() {
   if (__restaurantHydrated) return;
   __restaurantHydrated = true;
-  try {
-    const raw = localStorage.getItem('lenam_restaurant_v1');
-    if (!raw) return;
-    const saved = JSON.parse(raw);
-    if (Array.isArray(saved.stores)) DB.stores = saved.stores;
-    if (Array.isArray(saved.recipes)) DB.restaurantRecipes = saved.recipes;
-    if (Array.isArray(saved.orders)) DB.posOrders = saved.orders;
-  } catch (err) { console.warn('[Restaurant] Không đọc được cache local:', err); }
+  DB.stores = Array.isArray(DB.stores) ? DB.stores : [];
+  DB.restaurantRecipes = Array.isArray(DB.restaurantRecipes) ? DB.restaurantRecipes : [];
+  DB.posOrders = Array.isArray(DB.posOrders) ? DB.posOrders : [];
+  DB.storeReplenishmentRequests = Array.isArray(DB.storeReplenishmentRequests) ? DB.storeReplenishmentRequests : [];
+  DB.restaurantStoreStocks = Array.isArray(DB.restaurantStoreStocks) ? DB.restaurantStoreStocks : [];
+  DB.restaurantStoreStockTransactions = Array.isArray(DB.restaurantStoreStockTransactions) ? DB.restaurantStoreStockTransactions : [];
+  // Backfill chứng từ xuất cho các yêu cầu cửa hàng đã xuất trước khi hệ thống lưu goodsIssues.
+  // Chỉ dựng chứng từ lịch sử từ issuedLines, tuyệt đối không trừ tồn lần nữa.
+  DB.goodsIssues = Array.isArray(DB.goodsIssues) ? DB.goodsIssues : [];
+  let issueChanged=false, replenishmentChanged=false;
+  for(const req of (DB.storeReplenishmentRequests||[])){
+    if(!['ISSUED','RECEIVED'].includes(req.status)||!(req.issuedLines||[]).length) continue;
+    let gi=req.goodsIssueId ? DB.goodsIssues.find(x=>x.id===req.goodsIssueId) : DB.goodsIssues.find(x=>x.replenishmentId===req.id);
+    if(!gi){
+      const store=restaurantStore(req.storeId);
+      const id=nextCode('PX-2026-',DB.goodsIssues);
+      gi={id,type:'TRANSFER_OUT',warehouseId:req.sourceWarehouseId||store?.sourceWarehouseId||'',refDoc:req.id,replenishmentId:req.id,transferId:req.transferId||'',storeId:req.storeId,date:String(req.issuedAt||req.date||restaurantToday()).slice(0,10),status:'COMPLETED',createdBy:req.issuedBy||req.createdBy||'',note:`Xuất hàng cho ${store?.name||req.storeId} theo yêu cầu ${req.id}`,items:(req.issuedLines||[]).map(line=>({productId:line.productId,lotId:line.lotId||'',qty:Number(line.qty||0),unit:line.unit||'',locationId:line.sourceLocationId||''}))};
+      DB.goodsIssues.unshift(gi); issueChanged=true;
+    }
+    if(req.goodsIssueId!==gi.id){req.goodsIssueId=gi.id;replenishmentChanged=true;}
+  }
+  if(issueChanged&&typeof InventoryAPI!=='undefined'&&InventoryAPI.scheduleCollections) InventoryAPI.scheduleCollections(['goodsIssues'],250);
+  if(replenishmentChanged&&typeof RestaurantQualityAPI!=='undefined') RestaurantQualityAPI.syncRestaurant(['replenishments']).catch(err=>console.warn('[Restaurant] Không backfill được mã phiếu xuất:',err));
 }
-function restaurantPersist() {
-  try { localStorage.setItem('lenam_restaurant_v1', JSON.stringify({ stores:DB.stores||[], recipes:DB.restaurantRecipes||[], orders:DB.posOrders||[] })); }
-  catch (err) { console.warn('[Restaurant] Không lưu được cache local:', err); }
+function restaurantPersist(keys) {
+  if (typeof RestaurantQualityAPI === 'undefined') return Promise.resolve(false);
+  return RestaurantQualityAPI.syncRestaurant(keys).catch(err => {
+    console.error('[RestaurantAPI] Không đồng bộ được dữ liệu server:', err);
+    if (typeof Toast !== 'undefined') Toast.err('Không lưu được lên server', err?.message || 'Kiểm tra bảng lenam_restaurant_* trên KIO.');
+    throw err;
+  });
 }
 function restaurantToday(){ return typeof currentDateYMD==='function' ? currentDateYMD() : (DB.today || new Date().toISOString().slice(0,10)); }
 function restaurantStore(id){ return (DB.stores||[]).find(x=>x.id===id); }
+function restaurantReplenishment(id){ return (DB.storeReplenishmentRequests||[]).find(x=>x.id===id); }
+function restaurantItem(id){ return Q.product(id)||Q.material(id); }
+function restaurantFinishedWarehouses(){ return (DB.warehouses||[]).filter(w=>w.type==='FINISHED_GOODS'&&w.status!=='inactive'); }
+function restaurantStoreQty(storeId, productId){ return (DB.restaurantStoreStocks||[]).filter(r=>r.storeId===storeId&&r.productId===productId).reduce((sum,r)=>sum+Number(r.qtyAvailable??r.qtyOnHand??0),0); }
+function restaurantMinStock(productId){ return Number(DB.finishedMinStock?.[productId]||0); }
+function restaurantReplenishmentStatus(status){ const m={REQUESTED:['Chờ kho xử lý','orange'],ISSUED:['Kho đã xuất · chờ cửa hàng nhận','blue'],RECEIVED:['Cửa hàng đã nhập','green'],CANCELLED:['Đã hủy','gray']}; const x=m[status]||[status||'—','gray']; return `<span class="badge ${x[1]}">${esc(x[0])}</span>`; }
+function restaurantRequestItems(req){
+  if(Array.isArray(req?.items)&&req.items.length) return req.items.map(x=>({productId:x.productId,quantity:Number(x.quantity||0)})).filter(x=>x.productId&&x.quantity>0);
+  if(req?.productId&&Number(req?.quantity||0)>0) return [{productId:req.productId,quantity:Number(req.quantity||0)}];
+  return [];
+}
+
+function restaurantReplenishmentSuggestions(){
+  const rows=[];
+  for(const store of (DB.stores||[]).filter(s=>s.status!=='inactive')){
+    const sourceWarehouseId=store.sourceWarehouseId||'';
+    if(!sourceWarehouseId) continue;
+    const productIds=[...new Set((DB.restaurantStoreStocks||[]).filter(x=>x.storeId===store.id).map(x=>x.productId))];
+    for(const productId of productIds){
+      const min=restaurantMinStock(productId); if(min<=0) continue;
+      const qty=restaurantStoreQty(store.id,productId);
+      if(qty<=min){ const target=Math.max(min*2,min); rows.push({store,productId,qty,min,suggested:Math.max(0,target-qty)}); }
+    }
+  }
+  return rows;
+}
 function restaurantRecipe(id){ return (DB.restaurantRecipes||[]).find(x=>x.id===id); }
 function restaurantOrderTotal(order){ return (order?.items||[]).reduce((s,i)=>s+Number(i.quantity||0)*Number(i.price||0),0); }
 function restaurantChannelLabel(channel){ return ({POS:'POS tại quầy',TABLET:'Tablet Ordering',QR:'QR Ordering'})[channel||'POS'] || channel || 'POS tại quầy'; }
@@ -143,6 +188,7 @@ function restaurantTabs(active){
     {id:'recipe',label:'Recipe / BOM món',route:'restaurant',tab:'recipe'},
     {id:'orders',label:'Đơn hàng',route:'restaurant',tab:'orders'},
     {id:'branches',label:'Chi nhánh',route:'restaurant',tab:'branches'},
+    {id:'replenishment',label:'Yêu cầu bổ sung',route:'restaurant',tab:'replenishment'},
     {id:'issue',label:'Xuất kho nguyên liệu',route:'restaurant',tab:'issue'},
     {id:'revenue',label:'Doanh thu',route:'restaurant',tab:'revenue'},
     {id:'reports',label:'Báo cáo cửa hàng',route:'restaurant',tab:'reports'}
@@ -159,36 +205,94 @@ function restaurantOrderRows(list){
 }
 function restaurantRecipeRows(mode='menu'){
   return (DB.restaurantRecipes||[]).map(r=>{
-    const foodCost=(r.items||[]).reduce((s,i)=>{const m=Q.material(i.materialId);return s+Number(i.quantity||0)*Number(m?.price||0);},0);
-    const detail=mode==='recipe' ? (r.items||[]).map(i=>`${esc(Q.material(i.materialId)?.name||i.materialId)}: ${fmtDec(i.quantity,3)} ${esc(i.unit||Q.material(i.materialId)?.unit||'')}`).join('<br>') : esc(r.unit||'');
+    const foodCost=(r.items||[]).reduce((s,i)=>{const m=Q.product(i.materialId);return s+Number(i.quantity||0)*Number(m?.price||0);},0);
+    const detail=mode==='recipe' ? (r.items||[]).map(i=>`${esc(Q.product(i.materialId)?.name||i.materialId)}: ${fmtDec(i.quantity,3)} ${esc(i.unit||Q.product(i.materialId)?.unit||'')}`).join('<br>') : esc(r.unit||'');
     return `<tr><td><span class="code">${esc(r.id)}</span></td><td>${cell2(esc(r.name),esc(r.group||''))}</td><td class="right num">${fmtVND(r.price||0)}</td>${mode==='recipe'?`<td>${detail||'—'}</td><td class="right num">${fmtVND(foodCost)}</td>`:`<td>${detail}</td>`}<td>${r.active!==false?'<span class="badge green">Đang bán</span>':'<span class="badge gray">Ngừng bán</span>'}</td><td>${rowActions([{act:'restaurant-recipe-view',data:`data-id="${esc(r.id)}"`,icon:'fa-eye',title:'Xem chi tiết'},{act:'restaurant-recipe-edit',data:`data-id="${esc(r.id)}"`,icon:'fa-pen',title:'Sửa'},{act:'restaurant-recipe-delete',data:`data-id="${esc(r.id)}"`,icon:'fa-trash',title:'Xóa'}])}</td></tr>`;
   }).join('');
 }
 function restaurantStoreStockRows(){
-  const storeWarehouseIds=new Set((DB.stores||[]).map(s=>s.warehouseId));
-  return (DB.inventory||[]).filter(x=>storeWarehouseIds.has(x.warehouseId)).map(x=>{
-    const st=(DB.stores||[]).find(s=>s.warehouseId===x.warehouseId); const m=Q.material(x.productId)||Q.product(x.productId);
-    return `<tr><td>${esc(st?.name||x.warehouseId)}</td><td><span class="code">${esc(x.productId)}</span></td><td>${esc(m?.name||x.productId)}</td><td class="right num">${fmtDec(x.qtyAvailable||0,3)} ${esc(m?.unit||'')}</td><td>${esc(x.lotId||'—')}</td><td>${rowActions([{act:'inventory-transaction-detail',data:`data-id="${esc((DB.inventoryTransactions||[]).find(t=>t.productId===x.productId&&t.warehouseId===x.warehouseId)?.id||'')}"`,icon:'fa-eye',title:'Xem chi tiết giao dịch gần nhất'}])}</td></tr>`;
+  return (DB.restaurantStoreStocks||[]).map(x=>{
+    const st=restaurantStore(x.storeId); const p=Q.product(x.productId)||restaurantItem(x.productId);
+    return `<tr><td>${esc(st?.name||x.storeId)}</td><td><span class="code">${esc(x.productId)}</span></td><td>${esc(p?.name||x.productId)}</td><td class="right num">${fmtDec(x.qtyAvailable??x.qtyOnHand??0,3)} ${esc(p?.unit||x.unit||'')}</td><td>${esc(x.lotId||'—')}</td></tr>`;
   }).join('');
 }
+
+
+function restaurantSourceProducts(storeId){
+  const store=restaurantStore(storeId); const sourceWarehouseId=store?.sourceWarehouseId||'';
+  return [...new Set((DB.inventory||[]).filter(r=>r.warehouseId===sourceWarehouseId).map(r=>r.productId))].filter(id=>!!Q.product(id));
+}
+function restaurantReplenishmentLineHtml(storeId,item={}){
+  const ids=restaurantSourceProducts(storeId);
+  const selected=item.productId||ids[0]||'';
+  return `<div class="restaurant-replenishment-line" style="display:grid;grid-template-columns:minmax(260px,1fr) 150px 42px;gap:8px;align-items:end;margin-bottom:8px">
+    <div class="field" style="margin:0"><label>Thành phẩm *</label><select class="inp rr-product-select">${ids.map(id=>{const x=Q.product(id);return `<option value="${esc(id)}" ${id===selected?'selected':''}>${esc(id)} — ${esc(x?.name||id)} (${esc(x?.unit||'')})</option>`}).join('')}</select></div>
+    <div class="field" style="margin:0"><label>Số lượng *</label><input class="inp right num rr-qty" type="number" min="0.001" step="0.001" value="${Number(item.quantity||1)}"></div>
+    <button class="btn btn-sm" type="button" data-act="restaurant-replenishment-remove-line" title="Xóa dòng"><i class="fa-solid fa-trash"></i></button>
+  </div>`;
+}
+function restaurantRefreshReplenishmentProducts(){
+  const storeId=document.getElementById('rrStore')?.value||''; const store=restaurantStore(storeId);
+  const sourceLabel=document.getElementById('rrSourceWarehouseLabel');
+  if(sourceLabel) sourceLabel.value=Q.warehouseName(store?.sourceWarehouseId)||'Chưa liên kết';
+  const ids=restaurantSourceProducts(storeId);
+  document.querySelectorAll('#rrLines .rr-product-select').forEach(select=>{
+    const prev=select.value;
+    select.innerHTML=ids.map(id=>{const x=Q.product(id);return `<option value="${esc(id)}">${esc(id)} — ${esc(x?.name||id)} (${esc(x?.unit||'')})</option>`}).join('');
+    if(ids.includes(prev)) select.value=prev;
+  });
+}
+function openRestaurantReplenishmentForm(prefill={}){
+  DB.storeReplenishmentRequests=DB.storeReplenishmentRequests||[];
+  const stores=(DB.stores||[]).filter(s=>s.status!=='inactive');
+  const selectedStore=(prefill.storeId?restaurantStore(prefill.storeId):null)||stores[0];
+  const sourceWarehouseId=selectedStore?.sourceWarehouseId||'';
+  const initItems=Array.isArray(prefill.items)&&prefill.items.length?prefill.items:[{productId:prefill.productId||'',quantity:Number(prefill.quantity||1)}];
+  Modal.open({title:'Yêu cầu bổ sung thành phẩm',sub:'Một phiếu có thể yêu cầu nhiều thành phẩm từ đúng Kho thành phẩm đã liên kết với cửa hàng.',size:'lg',body:`
+    <div class="form-grid cols-2">
+      <div class="field"><label>Cửa hàng *</label><select class="inp" id="rrStore" onchange="restaurantRefreshReplenishmentProducts()" ${stores.length?'':'disabled'}>${stores.length?stores.map(s=>`<option value="${esc(s.id)}" ${s.id===selectedStore?.id?'selected':''}>${esc(s.name)}${s.sourceWarehouseId?'':' · chưa liên kết kho'}</option>`).join(''):'<option value="">Chưa có chi nhánh hoạt động</option>'}</select>${stores.length?'':'<div class="cell-sub" style="color:var(--red)">Chưa đọc được chi nhánh từ server. Hãy tạo/kiểm tra Chi nhánh trước.</div>'}</div>
+      <div class="field"><label>Kho thành phẩm nguồn</label><input class="inp" id="rrSourceWarehouseLabel" value="${esc(Q.warehouseName(sourceWarehouseId)||'Chưa liên kết')}" disabled></div>
+    </div>
+    <div class="form-sec-title"><i class="fa-solid fa-boxes-stacked"></i>Danh sách thành phẩm cần bổ sung</div>
+    <div id="rrLines">${initItems.map(it=>restaurantReplenishmentLineHtml(selectedStore?.id||'',it)).join('')}</div>
+    <button class="btn btn-sm" type="button" data-act="restaurant-replenishment-add-line"><i class="fa-solid fa-plus"></i>Thêm thành phẩm</button>
+    <div class="field" style="margin-top:12px"><label>Ghi chú</label><input class="inp" id="rrNote" placeholder="Ví dụ: bổ sung cho ca bán cuối tuần"></div>
+    <div class="alert-item" style="margin-top:12px"><i class="fa-solid fa-circle-info"></i><div><b>Luồng nhập hàng cửa hàng</b><div class="muted">Cửa hàng gửi 1 phiếu nhiều thành phẩm → Kho thành phẩm nguồn xuất → Cửa hàng xác nhận nhập → lúc đó Tồn kho cửa hàng mới phát sinh.</div></div></div>`,
+    foot:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="restaurant-replenishment-save"><i class="fa-solid fa-paper-plane"></i>Gửi yêu cầu</button>'});
+}
+function openRestaurantReplenishmentFulfill(id){
+  const req=restaurantReplenishment(id); if(!req||req.status!=='REQUESTED')return;
+  const store=restaurantStore(req.storeId); const sourceWarehouseId=store?.sourceWarehouseId||req.sourceWarehouseId||'';
+  const sourceWarehouse=Q.warehouse(sourceWarehouseId); const items=restaurantRequestItems(req);
+  const rows=items.map(it=>{
+    const item=Q.product(it.productId)||restaurantItem(it.productId);
+    const available=(DB.inventory||[]).filter(r=>r.warehouseId===sourceWarehouseId&&r.productId===it.productId).reduce((sum,r)=>sum+Number(r.qtyAvailable??r.qtyOnHand??0),0);
+    return `<tr><td><span class="code">${esc(it.productId)}</span><div class="cell-sub">${esc(item?.name||it.productId)}</div></td><td class="right num">${fmtDec(it.quantity,3)} ${esc(item?.unit||'')}</td><td class="right num">${fmtDec(available,3)} ${esc(item?.unit||'')}</td><td style="width:160px"><input class="inp right num rr-approved-qty" data-product="${esc(it.productId)}" type="number" min="0.001" step="0.001" value="${Number(it.quantity||0)}"></td></tr>`;
+  }).join('');
+  const canIssue=!!sourceWarehouse&&sourceWarehouse.type==='FINISHED_GOODS'&&items.length>0;
+  Modal.open({title:`Kho xuất hàng · ${esc(req.id)}`,sub:`${esc(store?.name||req.storeId)} · ${items.length} thành phẩm`,size:'lg',body:`<div class="detail-grid"><div><span>Kho thành phẩm nguồn</span><b>${esc(sourceWarehouse?.name||'Chưa liên kết')}</b></div><div><span>Số mặt hàng</span><b>${items.length}</b></div></div><div class="form-sec-title" style="margin-top:14px">Chi tiết xuất</div>${tableShell([{t:'Thành phẩm'},{t:'SL đề nghị',cls:'right'},{t:'Tồn khả dụng',cls:'right'},{t:'SL kho xuất'}],rows,{emptyTitle:'Phiếu chưa có thành phẩm'})}${canIssue?'':'<div class="alert-item"><i class="fa-solid fa-triangle-exclamation"></i><div><b>Kho nguồn không đủ điều kiện xuất</b><div class="muted">Kiểm tra liên kết Kho thành phẩm và dữ liệu yêu cầu.</div></div></div>'}`,foot:`<button class="btn" data-act="modal-close">Đóng</button>${canIssue?`<button class="btn btn-primary" data-act="restaurant-replenishment-fulfill-save" data-id="${esc(req.id)}"><i class="fa-solid fa-truck-ramp-box"></i>Xác nhận kho xuất</button>`:''}`});
+}
+
 function openRestaurantPos(channel='POS') {
   restaurantHydrate();
   const isRemote=channel==='TABLET'||channel==='QR';
   Modal.open({
     title: channel==='POS'?'POS bán hàng tại quầy':channel==='TABLET'?'Tạo đơn Tablet':'Tạo đơn QR',
-    sub: isRemote?'Đơn được ghi nhận ở trạng thái Chờ xử lý; chỉ trừ kho khi thanh toán.':'Chọn món và số lượng; hệ thống tự lấy công thức để tính nguyên liệu tiêu thụ.', size:'md',
+    sub: isRemote?'Đơn được ghi nhận ở trạng thái Chờ xử lý; chỉ trừ tồn điểm bán khi thanh toán.':'Chọn món và số lượng; hệ thống tự lấy Recipe để tính thành phẩm sử dụng tại cửa hàng.', size:'md',
     body: `<input type="hidden" id="posChannel" value="${esc(channel)}"><div class="form-grid"><div class="field"><label>Cửa hàng</label><select class="inp" id="posStore">${(DB.stores||[]).filter(s=>s.status!=='inactive').map(store=>`<option value="${store.id}">${esc(store.name)}</option>`).join('')}</select></div><div class="field"><label>Ca bán hàng</label><select class="inp" id="posShift"><option>Ca sáng</option><option>Ca trưa</option><option>Ca tối</option></select></div></div>${isRemote?`<div class="field"><label>Bàn / Mã nhận đơn</label><input class="inp" id="posTable" placeholder="Ví dụ: Bàn 05"></div>`:''}<div class="field"><label>Món bán</label><select class="inp" id="posRecipe">${(DB.restaurantRecipes||[]).filter(recipe=>recipe.active!==false).map(recipe=>`<option value="${recipe.id}">${esc(recipe.name)} · ${fmtVND(recipe.price)}/${esc(recipe.unit)}</option>`).join('')}</select></div><div class="form-grid"><div class="field"><label>Số lượng</label><input class="inp num" id="posQty" type="number" min="1" value="1" /></div><div class="field"><label>Thanh toán</label><select class="inp" id="posPayment" ${isRemote?'disabled':''}><option>Tiền mặt</option><option>Chuyển khoản</option><option>Ví điện tử</option></select></div></div>`,
     foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="restaurant-pos-save"><i class="fa-solid ${isRemote?'fa-paper-plane':'fa-check'}"></i>${isRemote?'Gửi đơn':'Thanh toán và ghi kho'}</button>`
   });
 }
 function openRestaurantRecipeForm(id=''){
   const r=restaurantRecipe(id)||{id:'',name:'',group:'Món chính',price:0,unit:'Phần',active:true,items:[]};
-  const line=(it={})=>`<div class="restaurant-recipe-line" style="display:grid;grid-template-columns:1fr 130px 42px;gap:8px;margin-bottom:8px"><select class="inp" name="material">${(DB.materials||[]).map(m=>`<option value="${esc(m.id)}" ${m.id===it.materialId?'selected':''}>${esc(m.id)} — ${esc(m.name)} (${esc(m.unit||'')})</option>`).join('')}</select><input class="inp right num" name="qty" type="number" min="0.0001" step="0.0001" value="${Number(it.quantity||1)}"><button class="btn btn-sm" type="button" data-act="restaurant-recipe-remove-line"><i class="fa-solid fa-trash"></i></button></div>`;
-  Modal.open({title:id?`Sửa món · ${id}`:'Thêm món / công thức',size:'lg',body:`<input type="hidden" id="restaurantRecipeId" value="${esc(id)}"><div class="form-grid cols-2"><div class="field"><label>Tên món *</label><input class="inp" id="restaurantRecipeName" value="${esc(r.name)}"></div><div class="field"><label>Nhóm</label><input class="inp" id="restaurantRecipeGroup" value="${esc(r.group||'')}"></div><div class="field"><label>Đơn vị</label><input class="inp" id="restaurantRecipeUnit" value="${esc(r.unit||'Phần')}"></div><div class="field"><label>Giá bán *</label><input class="inp right num" id="restaurantRecipePrice" type="number" min="0" value="${Number(r.price||0)}"></div></div><div class="form-sec-title"><i class="fa-solid fa-list"></i>Định lượng nguyên liệu</div><div id="restaurantRecipeLines">${(r.items||[]).length?r.items.map(line).join(''):line()}</div><button class="btn btn-sm" type="button" data-act="restaurant-recipe-add-line"><i class="fa-solid fa-plus"></i>Thêm nguyên liệu</button><div class="field" style="margin-top:12px"><label><input type="checkbox" id="restaurantRecipeActive" ${r.active!==false?'checked':''}> Đang kinh doanh</label></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="restaurant-recipe-save"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`});
+  const line=(it={})=>`<div class="restaurant-recipe-line" style="display:grid;grid-template-columns:1fr 130px 42px;gap:8px;margin-bottom:8px"><select class="inp" name="material">${(DB.products||[]).map(m=>`<option value="${esc(m.id)}" ${m.id===it.materialId?'selected':''}>${esc(m.id)} — ${esc(m.name)} (${esc(m.unit||'')})</option>`).join('')}</select><input class="inp right num" name="qty" type="number" min="0.0001" step="0.0001" value="${Number(it.quantity||1)}"><button class="btn btn-sm" type="button" data-act="restaurant-recipe-remove-line"><i class="fa-solid fa-trash"></i></button></div>`;
+  Modal.open({title:id?`Sửa món · ${id}`:'Thêm món / công thức',size:'lg',body:`<input type="hidden" id="restaurantRecipeId" value="${esc(id)}"><div class="form-grid cols-2"><div class="field"><label>Tên món *</label><input class="inp" id="restaurantRecipeName" value="${esc(r.name)}"></div><div class="field"><label>Nhóm</label><input class="inp" id="restaurantRecipeGroup" value="${esc(r.group||'')}"></div><div class="field"><label>Đơn vị</label><input class="inp" id="restaurantRecipeUnit" value="${esc(r.unit||'Phần')}"></div><div class="field"><label>Giá bán *</label><input class="inp right num" id="restaurantRecipePrice" data-money="1" type="text" inputmode="numeric" min="0" value="${Number(r.price||0)}"></div></div><div class="form-sec-title"><i class="fa-solid fa-list"></i>Định lượng thành phẩm dùng chế biến món</div><div id="restaurantRecipeLines">${(r.items||[]).length?r.items.map(line).join(''):line()}</div><button class="btn btn-sm" type="button" data-act="restaurant-recipe-add-line"><i class="fa-solid fa-plus"></i>Thêm thành phẩm</button><div class="field" style="margin-top:12px"><label><input type="checkbox" id="restaurantRecipeActive" ${r.active!==false?'checked':''}> Đang kinh doanh</label></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="restaurant-recipe-save"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`});
 }
 function openRestaurantStoreForm(id=''){
-  const s=restaurantStore(id)||{name:'',code:'',warehouseId:'WH-005',address:'',status:'active'};
-  Modal.open({title:id?`Sửa chi nhánh · ${id}`:'Thêm chi nhánh',size:'md',body:`<input type="hidden" id="restaurantStoreId" value="${esc(id)}"><div class="form-grid cols-2"><div class="field"><label>Mã chi nhánh</label><input class="inp" id="restaurantStoreCode" value="${esc(s.code||'')}"></div><div class="field"><label>Tên chi nhánh *</label><input class="inp" id="restaurantStoreName" value="${esc(s.name||'')}"></div><div class="field"><label>Kho liên kết *</label><select class="inp" id="restaurantStoreWarehouse">${(DB.warehouses||[]).filter(w=>w.type==='STORE'||w.id===s.warehouseId).map(w=>`<option value="${esc(w.id)}" ${w.id===s.warehouseId?'selected':''}>${esc(w.name)}</option>`).join('')}</select></div><div class="field"><label>Trạng thái</label><select class="inp" id="restaurantStoreStatus"><option value="active" ${s.status!=='inactive'?'selected':''}>Hoạt động</option><option value="inactive" ${s.status==='inactive'?'selected':''}>Ngưng hoạt động</option></select></div></div><div class="field"><label>Địa chỉ</label><input class="inp" id="restaurantStoreAddress" value="${esc(s.address||'')}"></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="restaurant-store-save"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`});
+  const finishedWarehouses=restaurantFinishedWarehouses();
+  const s=restaurantStore(id)||{name:'',code:'',sourceWarehouseId:finishedWarehouses[0]?.id||'',address:'',status:'active'};
+  const selected=s.sourceWarehouseId || (Q.warehouse(s.warehouseId)?.type==='FINISHED_GOODS'?s.warehouseId:'') || finishedWarehouses[0]?.id || '';
+  Modal.open({title:id?`Sửa chi nhánh · ${id}`:'Thêm chi nhánh',size:'md',body:`<input type="hidden" id="restaurantStoreId" value="${esc(id)}"><div class="form-grid cols-2"><div class="field"><label>Mã chi nhánh</label><input class="inp" id="restaurantStoreCode" value="${esc(s.code||'')}"></div><div class="field"><label>Tên chi nhánh *</label><input class="inp" id="restaurantStoreName" value="${esc(s.name||'')}"></div><div class="field"><label>Kho thành phẩm nguồn *</label><select class="inp" id="restaurantStoreWarehouse">${finishedWarehouses.map(w=>`<option value="${esc(w.id)}" ${w.id===selected?'selected':''}>${esc(w.name)}</option>`).join('')}</select><div class="cell-sub">Chỉ chọn Kho Thành phẩm - Thủ Đức / Bình Dương / Đồng Nai.</div></div><div class="field"><label>Trạng thái</label><select class="inp" id="restaurantStoreStatus"><option value="active" ${s.status!=='inactive'?'selected':''}>Hoạt động</option><option value="inactive" ${s.status==='inactive'?'selected':''}>Ngưng hoạt động</option></select></div></div><div class="field"><label>Địa chỉ</label><input class="inp" id="restaurantStoreAddress" value="${esc(s.address||'')}"></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="restaurant-store-save"><i class="fa-solid fa-floppy-disk"></i>Lưu</button>`});
 }
 function openRestaurantOrderDetail(id){
   const o=(DB.posOrders||[]).find(x=>x.id===id); if(!o)return; const store=restaurantStore(o.storeId);
@@ -199,36 +303,144 @@ function restaurantCanFulfill(order){
   const store=restaurantStore(order.storeId); if(!store)return {ok:false,message:'Không tìm thấy cửa hàng.'};
   const needs={};
   for(const item of order.items||[]){ const recipe=restaurantRecipe(item.recipeId); if(!recipe)continue; for(const b of recipe.items||[]) needs[b.materialId]=(needs[b.materialId]||0)+Number(b.quantity||0)*Number(item.quantity||0); }
-  for(const [materialId,qty] of Object.entries(needs)){
-    const stocks=(DB.inventory||[]).filter(r=>r.productId===materialId&&r.warehouseId===store.warehouseId&&Number(r.qtyAvailable||0)>0);
-    const total=stocks.reduce((s,r)=>s+Number(r.qtyAvailable||0),0); if(total+1e-9<qty) return {ok:false,message:`${Q.material(materialId)?.name||materialId}: cần ${fmtDec(qty,3)}, tồn ${fmtDec(total,3)}.`};
+  for(const [productId,qty] of Object.entries(needs)){
+    const total=restaurantStoreQty(store.id,productId); if(total+1e-9<qty) return {ok:false,message:`${Q.product(productId)?.name||productId}: cần ${fmtDec(qty,3)}, tồn tại cửa hàng ${fmtDec(total,3)}.`};
   }
   return {ok:true,store,needs};
 }
 function restaurantPostOrder(order){
   if(order.status==='PAID') return {ok:true}; const check=restaurantCanFulfill(order); if(!check.ok)return check;
-  for(const [materialId,need] of Object.entries(check.needs)){ let remaining=need; const stocks=(DB.inventory||[]).filter(r=>r.productId===materialId&&r.warehouseId===check.store.warehouseId&&Number(r.qtyAvailable||0)>0).sort((a,b)=>String(a.expiryDate||'9999').localeCompare(String(b.expiryDate||'9999'))); for(const stock of stocks){ if(remaining<=0)break; const qty=Math.min(remaining,Number(stock.qtyAvailable||0)); const posted=InventoryService.apply({productId:materialId,warehouseId:stock.warehouseId,locationId:stock.locationId,lotId:stock.lotId,quantity:qty,type:'SALES_ISSUE',refType:'POS',refId:order.id,note:`Trừ nguyên liệu đơn ${order.id}`,updateMaterial:false}); if(!posted.ok)return posted; remaining-=qty; }}
+  DB.restaurantStoreStockTransactions=DB.restaurantStoreStockTransactions||[];
+  for(const [productId,need] of Object.entries(check.needs)){
+    let remaining=need;
+    const stocks=(DB.restaurantStoreStocks||[]).filter(r=>r.storeId===check.store.id&&r.productId===productId&&Number(r.qtyAvailable??r.qtyOnHand??0)>0).sort((a,b)=>String(Q.lot(a.lotId)?.expiryDate||a.expiryDate||'9999').localeCompare(String(Q.lot(b.lotId)?.expiryDate||b.expiryDate||'9999')));
+    for(const stock of stocks){ if(remaining<=0)break; const take=Math.min(remaining,Number(stock.qtyAvailable??stock.qtyOnHand??0)); const before=Number(stock.qtyOnHand??stock.qtyAvailable??0); stock.qtyOnHand=Math.max(0,before-take); stock.qtyAvailable=Math.max(0,Number(stock.qtyAvailable??before)-take); stock.updatedAt=new Date().toISOString(); DB.restaurantStoreStockTransactions.unshift({id:`RSTX-${Date.now()}-${Math.random().toString(36).slice(2,7)}`,storeId:check.store.id,productId,lotId:stock.lotId||'',type:'POS_ISSUE',qty:-take,qtyBefore:before,qtyAfter:stock.qtyOnHand,refType:'POS',refId:order.id,date:restaurantToday(),createdAt:new Date().toISOString()}); remaining-=take; }
+  }
   order.status='PAID'; order.paidAt=new Date().toISOString(); return {ok:true};
 }
+
+/* POS bán hàng kiểu quầy: danh sách món bên trái, đơn hiện tại bên phải. */
+const RestaurantPOSState = window.RestaurantPOSState || (window.RestaurantPOSState = { storeId:'', channel:'POS', shift:'Ca sáng', q:'', cart:[] });
+function restaurantPosStore(){
+  const stores=(DB.stores||[]).filter(x=>x.status!=='inactive');
+  if(!RestaurantPOSState.storeId || !stores.some(x=>x.id===RestaurantPOSState.storeId)) RestaurantPOSState.storeId=stores[0]?.id||'';
+  return restaurantStore(RestaurantPOSState.storeId);
+}
+function restaurantPosCartTotal(){ return (RestaurantPOSState.cart||[]).reduce((s,x)=>s+Number(x.qty||0)*Number(x.price||0),0); }
+function restaurantPosQty(recipeId){ return Number((RestaurantPOSState.cart||[]).find(x=>x.recipeId===recipeId)?.qty||0); }
+function restaurantPosAdd(recipeId){
+  const r=restaurantRecipe(recipeId); if(!r||r.active===false)return;
+  let line=RestaurantPOSState.cart.find(x=>x.recipeId===recipeId);
+  if(line) line.qty+=1; else RestaurantPOSState.cart.push({recipeId:r.id,qty:1,price:Number(r.price||0)});
+  render();
+}
+function restaurantPosChange(recipeId,delta){
+  const line=RestaurantPOSState.cart.find(x=>x.recipeId===recipeId); if(!line)return;
+  line.qty=Math.max(0,Number(line.qty||0)+delta); if(line.qty<=0) RestaurantPOSState.cart=RestaurantPOSState.cart.filter(x=>x.recipeId!==recipeId); render();
+}
+function restaurantPosView(){
+  const today=restaurantToday(), orders=(DB.posOrders||[]).filter(o=>o.date===today), paid=orders.filter(o=>o.status==='PAID');
+  const revenue=paid.reduce((s,o)=>s+restaurantOrderTotal(o),0), avg=paid.length?revenue/paid.length:0;
+  const appOrders=orders.filter(o=>['TABLET','QR'].includes(o.channel)).length;
+  const q=String(RestaurantPOSState.q||'').toLowerCase();
+  const recipes=(DB.restaurantRecipes||[]).filter(r=>r.active!==false && (!q || `${r.name} ${r.group||''}`.toLowerCase().includes(q)));
+  const groups=[...new Set(recipes.map(r=>r.group||'Khác'))];
+  const productCards=recipes.map(r=>{
+    const qty=restaurantPosQty(r.id); const fc=(r.items||[]).reduce((s,i)=>s+Number(i.quantity||0)*Number(Q.product(i.materialId)?.price||0),0);
+    return `<button class="restaurant-pos-product" data-act="restaurant-pos-add" data-id="${esc(r.id)}"><div class="restaurant-pos-product-icon"><i class="fa-solid fa-bowl-food"></i></div><b>${esc(r.name)}</b><span>${esc(r.group||'Món')}</span><strong>${fmtVND(r.price||0)}</strong>${qty?`<em>${qty}</em>`:''}<small>Food cost ${fmtVND(fc)}</small></button>`;
+  }).join('');
+  const cartRows=(RestaurantPOSState.cart||[]).map(x=>{const r=restaurantRecipe(x.recipeId);return `<div class="restaurant-pos-cart-row"><div><b>${esc(r?.name||x.recipeId)}</b><span>${fmtVND(x.price)}</span></div><div class="restaurant-pos-stepper"><button data-act="restaurant-pos-dec" data-id="${esc(x.recipeId)}">−</button><b>${fmtN(x.qty)}</b><button data-act="restaurant-pos-inc" data-id="${esc(x.recipeId)}">+</button></div><strong>${fmtVND(Number(x.qty)*Number(x.price))}</strong></div>`}).join('') || `<div class="restaurant-pos-empty"><i class="fa-solid fa-basket-shopping"></i><b>Chưa có món trong đơn</b><span>Chọn món ở danh sách bên trái để bắt đầu bán hàng.</span></div>`;
+  const storeOptions=(DB.stores||[]).filter(s=>s.status!=='inactive').map(s=>`<option value="${esc(s.id)}" ${RestaurantPOSState.storeId===s.id?'selected':''}>${esc(s.name)}</option>`).join('');
+  return `${pageHead('POS bán hàng','Lập đơn · Thanh toán · Xuất kho tự động theo Recipe/BOM · Theo dõi đơn tại quầy và App','')}
+  <div class="grid g-auto-sm restaurant-pos-kpis" style="margin-bottom:16px">${mkpi('Doanh thu hôm nay',fmtVND(revenue),'fa-money-bill-wave','green')}${mkpi('Đơn hàng',orders.length,'fa-receipt','blue')}${mkpi('Giá trị đơn bình quân',fmtVND(avg),'fa-chart-line','orange')}${mkpi('Đơn Tablet / QR',appOrders,'fa-mobile-screen-button','teal')}</div>
+  <div class="restaurant-pos-layout">
+    <div class="card restaurant-pos-catalog"><div class="card-head"><div><h3><i class="fa-solid fa-utensils"></i> Chọn món</h3><p>Menu lấy trực tiếp từ Menu / Combo và Recipe hiện có.</p></div></div>
+      <div class="toolbar"><div class="search"><i class="fa-solid fa-magnifying-glass"></i><input id="restaurantPosSearch" value="${esc(RestaurantPOSState.q||'')}" placeholder="Tìm món..." oninput="window.RestaurantPOSState.q=this.value;render()"></div><span class="spacer"></span><span class="chip">${recipes.length} món</span></div>
+      <div class="restaurant-pos-groups">${groups.map(g=>`<span class="chip">${esc(g)}</span>`).join('')}</div>
+      <div class="restaurant-pos-products">${productCards||'<div class="empty">Không có món phù hợp.</div>'}</div>
+    </div>
+    <div class="card restaurant-pos-order"><div class="card-head"><div><h3><i class="fa-solid fa-basket-shopping"></i> Đơn hiện tại</h3><p>${fmtN(RestaurantPOSState.cart.length)} dòng món</p></div><button class="btn btn-sm" data-act="restaurant-pos-clear">Xóa đơn</button></div>
+      <div class="form-grid cols-2 restaurant-pos-order-meta"><div class="field"><label>Chi nhánh</label><select class="inp" id="restaurantPosStore" onchange="window.RestaurantPOSState.storeId=this.value;render()">${storeOptions}</select></div><div class="field"><label>Kênh bán</label><select class="inp" id="restaurantPosChannel" onchange="window.RestaurantPOSState.channel=this.value"><option value="POS" ${RestaurantPOSState.channel==='POS'?'selected':''}>Tại quầy</option><option value="TABLET" ${RestaurantPOSState.channel==='TABLET'?'selected':''}>Tablet</option><option value="QR" ${RestaurantPOSState.channel==='QR'?'selected':''}>QR</option></select></div><div class="field"><label>Ca bán hàng</label><select class="inp" id="restaurantPosShift" onchange="window.RestaurantPOSState.shift=this.value"><option ${RestaurantPOSState.shift==='Ca sáng'?'selected':''}>Ca sáng</option><option ${RestaurantPOSState.shift==='Ca trưa'?'selected':''}>Ca trưa</option><option ${RestaurantPOSState.shift==='Ca tối'?'selected':''}>Ca tối</option></select></div><div class="field"><label>Kho thành phẩm nguồn</label><input class="inp" disabled value="${esc(Q.warehouseName(restaurantPosStore()?.sourceWarehouseId)||'Chưa liên kết')}"></div></div>
+      <div class="restaurant-pos-cart">${cartRows}</div>
+      <div class="restaurant-pos-summary"><div><span>Tạm tính</span><b>${fmtVND(restaurantPosCartTotal())}</b></div><div class="total"><span>Tổng thanh toán</span><strong>${fmtVND(restaurantPosCartTotal())}</strong></div></div>
+      <button class="btn btn-primary restaurant-pos-pay" data-act="restaurant-pos-checkout" ${RestaurantPOSState.cart.length?'':'disabled'}><i class="fa-solid fa-credit-card"></i> Thanh toán & xuất kho</button>
+    </div>
+  </div>`;
+}
+
 Views.restaurant = function () {
   restaurantHydrate();
   const tab=State.tab||'dashboard'; const today=restaurantToday(); const orders=DB.posOrders||[]; const todayOrders=orders.filter(o=>o.date===today); const revenue=todayOrders.filter(o=>o.status==='PAID').reduce((s,o)=>s+restaurantOrderTotal(o),0);
-  const head=pageHead('Nhà hàng & Cửa hàng','POS, đặt món, menu, công thức, chi nhánh, tồn nguyên liệu và doanh thu liên thông kho', tab==='pos'?`<button class="btn btn-primary" data-act="restaurant-pos-open"><i class="fa-solid fa-cash-register"></i>Bán tại quầy</button>`:tab==='tablet'?`<button class="btn btn-primary" data-act="restaurant-tablet-open"><i class="fa-solid fa-tablet-screen-button"></i>Tạo đơn Tablet</button>`:tab==='qr'?`<button class="btn btn-primary" data-act="restaurant-qr-open"><i class="fa-solid fa-qrcode"></i>Tạo đơn QR</button>`:(tab==='menu'||tab==='recipe')?`<button class="btn btn-primary" data-act="restaurant-recipe-new"><i class="fa-solid fa-plus"></i>Thêm món</button>`:tab==='branches'?`<button class="btn btn-primary" data-act="restaurant-store-new"><i class="fa-solid fa-plus"></i>Thêm chi nhánh</button>`:'');
+  const pageMeta={
+    dashboard:['Tổng quan Nhà hàng & Cửa hàng','Doanh thu, đơn hàng, cửa hàng và tình trạng bán hàng theo thời gian thực'],
+    pos:['POS bán hàng','Bán hàng tại quầy, thanh toán và tự động trừ tồn điểm bán theo Recipe/BOM'],
+    tablet:['Tablet Ordering','Nhân viên phục vụ tạo đơn tại bàn và chuyển đơn về hệ thống xử lý'],
+    qr:['QR Ordering','Theo dõi các đơn khách gọi món qua QR và xử lý thanh toán tại cửa hàng'],
+    menu:['Menu / Combo','Quản lý món bán, nhóm món, giá bán và trạng thái kinh doanh'],
+    recipe:['Recipe / BOM món ăn','Khai báo định lượng thành phẩm dùng để chế biến món và trừ tồn điểm bán'],
+    orders:['Đơn hàng Nhà hàng','Theo dõi tập trung đơn POS, Tablet và QR của toàn bộ chi nhánh'],
+    branches:['Chi nhánh / Cửa hàng','Mỗi chi nhánh liên kết một Kho thành phẩm nguồn tại Thủ Đức, Bình Dương hoặc Đồng Nai'],
+    store_stock:['Tồn kho cửa hàng','Chỉ hiển thị thành phẩm cửa hàng đã thực nhận qua quy trình yêu cầu bổ sung → kho xuất → cửa hàng nhập'],
+    replenishment:['Yêu cầu bổ sung hàng','Cửa hàng yêu cầu thành phẩm từ Kho thành phẩm nguồn; kho xuất và cửa hàng xác nhận nhập'],
+    issue:['Xuất kho nguyên liệu','Theo dõi thành phẩm đã sử dụng tại điểm bán theo đơn POS/Tablet/QR'],
+    revenue:['Doanh thu cửa hàng','Theo dõi doanh thu và số đơn theo từng chi nhánh'],
+    reports:['Báo cáo Nhà hàng','Doanh thu theo món và dữ liệu phục vụ quản trị Food Cost / hiệu quả bán hàng']
+  };
+  const meta=pageMeta[tab]||pageMeta.dashboard;
+  const head=pageHead(meta[0],meta[1], tab==='pos'?`<button class="btn btn-primary" data-act="restaurant-pos-open"><i class="fa-solid fa-cash-register"></i>Bán tại quầy</button>`:tab==='tablet'?`<button class="btn btn-primary" data-act="restaurant-tablet-open"><i class="fa-solid fa-tablet-screen-button"></i>Tạo đơn Tablet</button>`:tab==='qr'?`<button class="btn btn-primary" data-act="restaurant-qr-open"><i class="fa-solid fa-qrcode"></i>Tạo đơn QR</button>`:(tab==='menu'||tab==='recipe')?`<button class="btn btn-primary" data-act="restaurant-recipe-new"><i class="fa-solid fa-plus"></i>Thêm món</button>`:tab==='branches'?`<button class="btn btn-primary" data-act="restaurant-store-new"><i class="fa-solid fa-plus"></i>Thêm chi nhánh</button>`:tab==='replenishment'?`<button class="btn btn-primary" data-act="restaurant-replenishment-new"><i class="fa-solid fa-plus"></i>Tạo yêu cầu</button>`:'');
   let body='';
+  if(tab==='pos') return restaurantPosView();
   if(tab==='dashboard'){
     body=`<div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Doanh thu hôm nay',fmtVND(revenue),'fa-sack-dollar','green')}${mkpi('Hóa đơn hôm nay',todayOrders.length,'fa-receipt','blue')}${mkpi('Cửa hàng',(DB.stores||[]).filter(s=>s.status!=='inactive').length,'fa-store','teal')}${mkpi('Món đang bán',(DB.restaurantRecipes||[]).filter(r=>r.active!==false).length,'fa-utensils','orange')}</div><div class="card"><div class="card-head"><div><h3>Đơn gần nhất</h3><p>Tổng hợp mọi kênh POS / Tablet / QR.</p></div></div>${tableShell([{t:'Đơn'},{t:'Ngày'},{t:'Cửa hàng'},{t:'Kênh'},{t:'Bàn'},{t:'Ca'},{t:'Doanh thu',cls:'right'},{t:'Trạng thái'},{t:'Thao tác',cls:'right'}],restaurantOrderRows(orders.slice(0,10)),{emptyTitle:'Chưa có đơn hàng'})}</div>`;
-  } else if(['pos','tablet','qr','orders'].includes(tab)){
+  } else if(['tablet','qr','orders'].includes(tab)){
     const channel=tab==='pos'?'POS':tab==='tablet'?'TABLET':tab==='qr'?'QR':null; const list=channel?orders.filter(o=>(o.channel||'POS')===channel):orders;
     body=`<div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tổng đơn',list.length,'fa-receipt','blue')}${mkpi('Chờ xử lý',list.filter(o=>o.status==='OPEN').length,'fa-clock','orange')}${mkpi('Đã thanh toán',list.filter(o=>o.status==='PAID').length,'fa-circle-check','green')}${mkpi('Doanh thu',fmtVND(list.filter(o=>o.status==='PAID').reduce((s,o)=>s+restaurantOrderTotal(o),0)),'fa-money-bill-wave','teal')}</div><div class="card">${tableShell([{t:'Đơn'},{t:'Ngày'},{t:'Cửa hàng'},{t:'Kênh'},{t:'Bàn'},{t:'Ca'},{t:'Tổng tiền',cls:'right'},{t:'Trạng thái'},{t:'Thao tác',cls:'right'}],restaurantOrderRows(list),{emptyTitle:'Chưa có đơn hàng'})}</div>`;
   } else if(tab==='menu'||tab==='recipe'){
-    body=`<div class="card">${tableShell(tab==='recipe'?[{t:'Mã món'},{t:'Tên món'},{t:'Giá bán',cls:'right'},{t:'Định lượng nguyên liệu'},{t:'Food Cost',cls:'right'},{t:'Trạng thái'},{t:'Thao tác',cls:'right'}]:[{t:'Mã món'},{t:'Tên món'},{t:'Giá bán',cls:'right'},{t:'Đơn vị'},{t:'Trạng thái'},{t:'Thao tác',cls:'right'}],restaurantRecipeRows(tab),{emptyTitle:'Chưa có món'})}</div>`;
+    body=`<div class="card">${tableShell(tab==='recipe'?[{t:'Mã món'},{t:'Tên món'},{t:'Giá bán',cls:'right'},{t:'Định lượng thành phẩm'},{t:'Food Cost',cls:'right'},{t:'Trạng thái'},{t:'Thao tác',cls:'right'}]:[{t:'Mã món'},{t:'Tên món'},{t:'Giá bán',cls:'right'},{t:'Đơn vị'},{t:'Trạng thái'},{t:'Thao tác',cls:'right'}],restaurantRecipeRows(tab),{emptyTitle:'Chưa có món'})}</div>`;
   } else if(tab==='branches'){
-    const rows=(DB.stores||[]).map(s=>`<tr><td><span class="code">${esc(s.id)}</span></td><td>${cell2(esc(s.name),esc(s.address||''))}</td><td>${esc((DB.warehouses||[]).find(w=>w.id===s.warehouseId)?.name||s.warehouseId)}</td><td>${s.status!=='inactive'?'<span class="badge green">Hoạt động</span>':'<span class="badge gray">Ngưng</span>'}</td><td>${rowActions([{act:'restaurant-store-view',data:`data-id="${esc(s.id)}"`,icon:'fa-eye',title:'Xem chi tiết'},{act:'restaurant-store-edit',data:`data-id="${esc(s.id)}"`,icon:'fa-pen',title:'Sửa'},{act:'restaurant-store-delete',data:`data-id="${esc(s.id)}"`,icon:'fa-trash',title:'Xóa'}])}</td></tr>`).join('');
+    const rows=(DB.stores||[]).map(s=>`<tr><td><span class="code">${esc(s.id)}</span></td><td>${cell2(esc(s.name),esc(s.address||''))}</td><td>${esc(Q.warehouseName(s.sourceWarehouseId)||'Chưa liên kết')}</td><td>${s.status!=='inactive'?'<span class="badge green">Hoạt động</span>':'<span class="badge gray">Ngưng</span>'}</td><td>${rowActions([{act:'restaurant-store-view',data:`data-id="${esc(s.id)}"`,icon:'fa-eye',title:'Xem chi tiết'},{act:'restaurant-store-edit',data:`data-id="${esc(s.id)}"`,icon:'fa-pen',title:'Sửa'},{act:'restaurant-store-delete',data:`data-id="${esc(s.id)}"`,icon:'fa-trash',title:'Xóa'}])}</td></tr>`).join('');
     body=`<div class="card">${tableShell([{t:'Mã'},{t:'Chi nhánh'},{t:'Kho liên kết'},{t:'Trạng thái'},{t:'Thao tác',cls:'right'}],rows,{emptyTitle:'Chưa có chi nhánh'})}</div>`;
+  } else if(tab==='store_stock'){
+    const f=F('restaurant-store-stock',{q:'',storeId:'',stockStatus:''});
+    const q=String(f.q||'').toLowerCase().trim();
+    const stores=(DB.stores||[]).filter(s=>s.status!=='inactive');
+    const rowsData=(DB.restaurantStoreStocks||[]).map(stock=>{
+      const store=restaurantStore(stock.storeId); const item=Q.product(stock.productId)||restaurantItem(stock.productId); const min=restaurantMinStock(stock.productId); const qty=Number(stock.qtyAvailable??stock.qtyOnHand??0); const status=qty<=0?'OUT':(min>0&&qty<=min?'LOW':'OK'); return {store,productId:stock.productId,item,min,qty,lotId:stock.lotId||'',status};
+    }).filter(x=>x.store);
+    const filtered=rowsData.filter(x=>{ if(f.storeId&&x.store.id!==f.storeId)return false; if(f.stockStatus&&x.status!==f.stockStatus)return false; if(q&&!`${x.productId} ${x.item?.name||''} ${x.store.name}`.toLowerCase().includes(q))return false; return true; });
+    const rows=filtered.map(x=>{ const status=x.status==='OUT'?'<span class="badge red">Hết hàng</span>':x.status==='LOW'?'<span class="badge orange">Sắp hết</span>':'<span class="badge green">Đủ hàng</span>'; const acts=[]; if(x.status!=='OK') acts.push({act:'restaurant-replenishment-new',data:`data-store="${esc(x.store.id)}" data-product="${esc(x.productId)}" data-qty="${Number(Math.max((x.min||0)*2-x.qty, x.min||1))}"`,icon:'fa-paper-plane',title:'Tạo yêu cầu bổ sung'}); return `<tr><td>${esc(x.store.name)}</td><td><span class="code">${esc(x.productId)}</span></td><td>${esc(x.item?.name||x.productId)}</td><td>${esc(x.lotId||'—')}</td><td class="right num">${fmtDec(x.qty,3)} ${esc(x.item?.unit||'')}</td><td class="right num">${fmtDec(x.min,3)} ${esc(x.item?.unit||'')}</td><td>${status}</td><td>${acts.length?rowActions(acts):'<span class="muted">—</span>'}</td></tr>`; }).join('');
+    const totalItems=rowsData.length, low=rowsData.filter(x=>x.status==='LOW').length, out=rowsData.filter(x=>x.status==='OUT').length;
+    body=`<div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Mặt hàng đã nhập',totalItems,'fa-boxes-stacked','blue')}${mkpi('Sắp hết',low,'fa-triangle-exclamation','orange')}${mkpi('Hết hàng',out,'fa-circle-xmark','red')}${mkpi('Cửa hàng',stores.length,'fa-store','teal')}</div><div class="card"><div class="toolbar">${searchBox('restaurant-store-stock','Tìm mã hàng, tên hàng, cửa hàng…')}${selectFilter('restaurant-store-stock','storeId',stores.map(s=>[s.id,s.name]),'Tất cả cửa hàng')}${selectFilter('restaurant-store-stock','stockStatus',[['OK','Đủ hàng'],['LOW','Sắp hết'],['OUT','Hết hàng']],'Tất cả trạng thái')}${(f.q||f.storeId||f.stockStatus)?'<button class="btn btn-sm" data-act="clear-filter" data-key="restaurant-store-stock"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>':''}<span class="spacer"></span><span class="chip">${fmtN(filtered.length)} dòng tồn</span></div>${tableShell([{t:'Cửa hàng'},{t:'Mã TP'},{t:'Thành phẩm'},{t:'Lô'},{t:'Tồn khả dụng',cls:'right'},{t:'Tồn tối thiểu',cls:'right'},{t:'Trạng thái'},{t:'Thao tác'}],rows,{emptyTitle:'Cửa hàng chưa có tồn',emptyDesc:'Đúng nghiệp vụ: tạo Yêu cầu bổ sung → Kho thành phẩm xuất hàng → Cửa hàng xác nhận nhập. Sau bước nhập, dữ liệu mới xuất hiện tại đây.'})}</div>`;
+  } else if(tab==='replenishment'){
+    DB.storeReplenishmentRequests=DB.storeReplenishmentRequests||[];
+    const f=F('restaurant-replenishment',{q:'',storeId:'',status:'',dateFrom:'',dateTo:''});
+    const q=String(f.q||'').trim().toLowerCase();
+    const stores=(DB.stores||[]).filter(s=>s.status!=='inactive');
+    const suggestions=restaurantReplenishmentSuggestions()
+      .filter(x=>!f.storeId||x.store.id===f.storeId)
+      .filter(x=>!q||`${x.store.name} ${x.productId} ${restaurantItem(x.productId)?.name||''}`.toLowerCase().includes(q));
+    const suggestionRows=suggestions.map(x=>{const item=restaurantItem(x.productId);return `<tr><td>${esc(x.store.name)}</td><td><span class="code">${esc(x.productId)}</span><div class="cell-sub">${esc(item?.name||x.productId)}</div></td><td class="right num">${fmtDec(x.qty,3)} ${esc(item?.unit||'')}</td><td class="right num">${fmtDec(x.min,3)} ${esc(item?.unit||'')}</td><td class="right num strong">${fmtDec(x.suggested,3)} ${esc(item?.unit||'')}</td><td>${rowActions([{act:'restaurant-replenishment-new',data:`data-store="${esc(x.store.id)}" data-product="${esc(x.productId)}" data-qty="${Number(x.suggested||0)}"`,icon:'fa-paper-plane',title:'Tạo yêu cầu bổ sung'}])}</td></tr>`}).join('');
+    const requestList=(DB.storeReplenishmentRequests||[]).filter(r=>{
+      if(f.storeId&&r.storeId!==f.storeId)return false;
+      if(f.status&&r.status!==f.status)return false;
+      const d=String(r.date||String(r.createdAt||'').slice(0,10));
+      if(f.dateFrom&&d<f.dateFrom)return false;
+      if(f.dateTo&&d>f.dateTo)return false;
+      const store=restaurantStore(r.storeId),items=restaurantRequestItems(r);
+      const hay=[r.id,store?.name,r.transferId,r.goodsIssueId,r.note,...items.map(it=>`${it.productId} ${restaurantItem(it.productId)?.name||''}`)].join(' ').toLowerCase();
+      return !q||hay.includes(q);
+    }).sort((a,b)=>String(b.createdAt||b.date||'').localeCompare(String(a.createdAt||a.date||''))||String(b.id||'').localeCompare(String(a.id||'')));
+    const requestRows=requestList.map(r=>{const store=restaurantStore(r.storeId),items=restaurantRequestItems(r);const acts=[{act:'restaurant-replenishment-view',data:`data-id="${esc(r.id)}"`,icon:'fa-eye',title:'Xem yêu cầu'}];if(r.status==='ISSUED')acts.push({act:'restaurant-replenishment-receive',data:`data-id="${esc(r.id)}"`,icon:'fa-box-open',title:'Cửa hàng nhập hàng'});const itemText=items.slice(0,2).map(it=>esc(restaurantItem(it.productId)?.name||it.productId)).join('<br>')+(items.length>2?`<div class="cell-sub">+${items.length-2} thành phẩm khác</div>`:'');const qtyText=items.slice(0,2).map(it=>{const item=restaurantItem(it.productId);return `${fmtDec(it.quantity,3)} ${esc(item?.unit||'')}`}).join('<br>')+(items.length>2?'<div class="cell-sub">…</div>':'');const actor=r.status==='RECEIVED'?(r.receivedBy||r.issuedBy||r.createdBy):(r.status==='ISSUED'?(r.issuedBy||r.createdBy):r.createdBy);return `<tr><td><span class="code">${esc(r.id)}</span><div class="cell-sub">${fmtDate(r.date)}</div></td><td>${esc(store?.name||r.storeId)}</td><td>${itemText||'—'}</td><td class="right num">${qtyText||'—'}</td><td>${restaurantReplenishmentStatus(r.status)}</td><td>${r.goodsIssueId?`<span class="code">${esc(r.goodsIssueId)}</span><div class="cell-sub">${esc(r.transferId||'')}</div>`:(r.transferId?`<span class="code">${esc(r.transferId)}</span>`:'—')}</td><td>${esc(Q.employeeName(actor)||actor||'—')}</td><td>${rowActions(acts)}</td></tr>`}).join('');
+    const all=DB.storeReplenishmentRequests||[];
+    body=`<div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Cảnh báo thiếu',restaurantReplenishmentSuggestions().length,'fa-triangle-exclamation','orange')}${mkpi('Chờ kho xử lý',all.filter(r=>r.status==='REQUESTED').length,'fa-clock','blue')}${mkpi('Chờ cửa hàng nhận',all.filter(r=>r.status==='ISSUED').length,'fa-truck','blue')}${mkpi('Đã nhập cửa hàng',all.filter(r=>r.status==='RECEIVED').length,'fa-circle-check','green')}</div>
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><div><h3>Cảnh báo thiếu thành phẩm tại cửa hàng</h3><p>Ưu tiên mặt hàng dưới tồn tối thiểu để cửa hàng tạo yêu cầu bổ sung; Kho là nơi duyệt và xuất.</p></div></div>${tableShell([{t:'Cửa hàng'},{t:'Hàng hóa'},{t:'Tồn hiện tại',cls:'right'},{t:'Tồn tối thiểu',cls:'right'},{t:'SL đề xuất',cls:'right'},{t:'Thao tác'}],suggestionRows,{emptyTitle:'Không có mặt hàng dưới mức tối thiểu'})}</div>
+    <div class="card"><div class="card-head"><div><h3>Yêu cầu bổ sung hàng</h3><p>Cửa hàng lập yêu cầu → Kho duyệt & xuất → Cửa hàng xác nhận nhập. Phiếu xuất kho được lưu để truy vết lịch sử lô.</p></div></div>
+      <div class="toolbar">${searchBox('restaurant-replenishment','Tìm yêu cầu, cửa hàng, hàng hóa, phiếu xuất…')}${selectFilter('restaurant-replenishment','storeId',stores.map(s=>[s.id,s.name]),'Tất cả cửa hàng')}${selectFilter('restaurant-replenishment','status',[['REQUESTED','Chờ kho xử lý'],['ISSUED','Kho đã xuất · chờ nhận'],['RECEIVED','Cửa hàng đã nhập'],['CANCELLED','Đã hủy']],'Tất cả trạng thái')}<input class="inp" type="date" data-f="restaurant-replenishment.dateFrom" value="${esc(f.dateFrom||'')}" title="Từ ngày"><input class="inp" type="date" data-f="restaurant-replenishment.dateTo" value="${esc(f.dateTo||'')}" title="Đến ngày">${(f.q||f.storeId||f.status||f.dateFrom||f.dateTo)?'<button class="btn btn-sm" data-act="clear-filter" data-key="restaurant-replenishment"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>':''}<span class="spacer"></span><span class="chip">${fmtN(requestList.length)} yêu cầu</span></div>
+      ${tableShell([{t:'Yêu cầu / Ngày'},{t:'Cửa hàng'},{t:'Hàng hóa'},{t:'SL yêu cầu',cls:'right'},{t:'Trạng thái'},{t:'Phiếu xuất / chuyển'},{t:'Người thực hiện'},{t:'Thao tác'}],requestRows,{emptyTitle:'Không có yêu cầu bổ sung phù hợp'})}</div>`;
   } else if(tab==='issue'){
-    const storeWh=new Set((DB.stores||[]).map(s=>s.warehouseId)); const tx=(DB.inventoryTransactions||[]).filter(t=>storeWh.has(t.warehouseId)&&Number(t.qty||0)<0);
-    const rows=tx.map(t=>`<tr><td><span class="code">${esc(t.transactionNumber||t.id)}</span></td><td>${fmtDate(t.date)}</td><td>${esc(restaurantStore((DB.stores||[]).find(s=>s.warehouseId===t.warehouseId)?.id)?.name||t.warehouseId)}</td><td>${esc(Q.material(t.productId)?.name||t.productId)}</td><td class="right num">${fmtDec(Math.abs(Number(t.qty||0)),3)} ${esc(Q.material(t.productId)?.unit||'')}</td><td>${esc(t.refId||'—')}</td><td>${rowActions([{act:'inventory-transaction-detail',data:`data-id="${esc(t.id)}"`,icon:'fa-eye',title:'Xem chi tiết'}])}</td></tr>`).join('');
-    body=`<div class="card"><div class="card-head"><div><h3>Xuất nguyên liệu tại cửa hàng</h3><p>Các giao dịch trừ kho phát sinh từ bán hàng POS/Tablet/QR.</p></div></div>${tableShell([{t:'Chứng từ'},{t:'Ngày'},{t:'Cửa hàng'},{t:'Nguyên liệu'},{t:'SL xuất',cls:'right'},{t:'Tham chiếu'},{t:'Thao tác',cls:'right'}],rows,{emptyTitle:'Chưa có giao dịch xuất'})}</div>`;
+    const tx=(DB.restaurantStoreStockTransactions||[]).filter(t=>t.type==='POS_ISSUE');
+    const rows=tx.map(t=>`<tr><td><span class="code">${esc(t.id)}</span></td><td>${fmtDate(t.date)}</td><td>${esc(restaurantStore(t.storeId)?.name||t.storeId)}</td><td>${esc(Q.product(t.productId)?.name||t.productId)}</td><td class="right num">${fmtDec(Math.abs(Number(t.qty||0)),3)} ${esc(Q.product(t.productId)?.unit||'')}</td><td>${esc(t.refId||'—')}</td></tr>`).join('');
+    body=`<div class="card"><div class="card-head"><div><h3>Xuất thành phẩm tại cửa hàng</h3><p>Các giao dịch trừ Tồn kho cửa hàng phát sinh khi POS/Tablet/QR thanh toán món.</p></div></div>${tableShell([{t:'Giao dịch'},{t:'Ngày'},{t:'Cửa hàng'},{t:'Thành phẩm'},{t:'SL sử dụng',cls:'right'},{t:'Đơn POS'}],rows,{emptyTitle:'Chưa có giao dịch xuất'})}</div>`;
   } else if(tab==='revenue'){
     const byStore=(DB.stores||[]).map(s=>{const os=orders.filter(o=>o.storeId===s.id&&o.status==='PAID');return {s,count:os.length,amount:os.reduce((n,o)=>n+restaurantOrderTotal(o),0)};});
     const rows=byStore.map(x=>`<tr><td>${esc(x.s.name)}</td><td class="right num">${x.count}</td><td class="right num">${fmtVND(x.amount)}</td><td class="right num">${fmtVND(x.count?x.amount/x.count:0)}</td><td>${rowActions([{act:'restaurant-store-view',data:`data-id="${esc(x.s.id)}"`,icon:'fa-eye',title:'Xem chi tiết chi nhánh'}])}</td></tr>`).join('');
@@ -238,8 +450,35 @@ Views.restaurant = function () {
     const rows=Object.entries(sales).sort((a,b)=>b[1].amount-a[1].amount).map(([id,x])=>`<tr><td><span class="code">${esc(id)}</span></td><td>${esc(restaurantRecipe(id)?.name||id)}</td><td class="right num">${fmtN(x.qty)}</td><td class="right num">${fmtVND(x.amount)}</td><td>${rowActions([{act:'restaurant-recipe-view',data:`data-id="${esc(id)}"`,icon:'fa-eye',title:'Xem chi tiết món'}])}</td></tr>`).join('');
     body=`<div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tổng doanh thu',fmtVND(orders.filter(o=>o.status==='PAID').reduce((s,o)=>s+restaurantOrderTotal(o),0)),'fa-chart-line','green')}${mkpi('Tổng hóa đơn',orders.filter(o=>o.status==='PAID').length,'fa-receipt','blue')}${mkpi('Món có doanh số',Object.keys(sales).length,'fa-utensils','orange')}</div><div class="card">${tableShell([{t:'Mã món'},{t:'Món'},{t:'SL bán',cls:'right'},{t:'Doanh thu',cls:'right'},{t:'Thao tác',cls:'right'}],rows,{emptyTitle:'Chưa có dữ liệu báo cáo'})}</div>`;
   } else body='<div class="empty-state">Chưa có dữ liệu.</div>';
-  return `${head}${restaurantTabs(tab)}${body}`;
+  return `${head}${body}`;
 };
+
+
+const SUPPLIER_TABS=[{id:'overview',label:'Tổng quan'},{id:'orders',label:'Đơn mua'},{id:'debt',label:'Công nợ'},{id:'history',label:'Lịch sử giao dịch'}];
+function supplierDrawerBody(supplier){
+  const tab=State.supplierTab||'overview';
+  const pos=(DB.purchaseOrders||[]).filter(po=>po.supplierId===supplier.id).sort((a,b)=>String(b.date||'').localeCompare(String(a.date||''))||String(b.id||'').localeCompare(String(a.id||'')));
+  const refunds=(DB.supplierRefunds||[]).filter(r=>r.supplierId===supplier.id).sort((a,b)=>String(b.createdAt||b.date||'').localeCompare(String(a.createdAt||a.date||'')));
+  const payments=(DB.supplierPayments||[]).filter(r=>r.supplierId===supplier.id).sort((a,b)=>String(b.createdAt||b.date||'').localeCompare(String(a.createdAt||a.date||'')));
+  const purchases=pos.reduce((n,po)=>n+Number(po.total||0),0), payable=pos.reduce((n,po)=>n+(typeof purchasePayableRemaining==='function'?purchasePayableRemaining(po):0),0), refundDue=pos.reduce((n,po)=>n+(typeof purchaseSupplierRefundDue==='function'?purchaseSupplierRefundDue(po):0),0), refunded=refunds.reduce((n,r)=>n+Number(r.amount||0),0);
+  const tabs=`<div class="tabs">${SUPPLIER_TABS.map(t=>`<button class="tab ${tab===t.id?'active':''}" data-act="supplier-tab" data-tab="${t.id}" data-id="${esc(supplier.id)}">${t.label}${t.id==='orders'?`<span class="cnt">${pos.length}</span>`:''}</button>`).join('')}</div>`;
+  let inner='';
+  if(tab==='overview') inner=`<div class="grid g-auto-sm" style="margin-bottom:16px">${mkpi('Tổng đơn mua',pos.length,'fa-cart-shopping','blue')}${mkpi('Giá trị mua lũy kế',fmtShort(purchases),'fa-sack-dollar','green')}${mkpi('Còn phải trả',fmtShort(payable),'fa-file-invoice-dollar',payable>0?'red':'slate')}${mkpi('NCC còn phải hoàn',fmtShort(refundDue),'fa-rotate-left',refundDue>0?'orange':'slate')}</div>
+  <div class="form-sec-title"><i class="fa-solid fa-building"></i>Thông tin nhà cung cấp</div><div class="info-grid" style="margin-bottom:18px">${infoItem('Mã NCC',`<span class="code">${esc(supplier.id)}</span>`)}${infoItem('Tên nhà cung cấp',esc(supplier.name||'—'))}${infoItem('Nhóm cung ứng',esc(supplier.group||'—'))}${infoItem('Mã số thuế',esc(supplier.taxCode||'—'))}${infoItem('Địa chỉ',esc(supplier.address||'—'))}${infoItem('Điều khoản thanh toán',esc(supplier.paymentTerm||'Theo hợp đồng'))}</div>
+  <div class="form-sec-title"><i class="fa-solid fa-address-card"></i>Đầu mối liên hệ</div><div class="info-grid" style="margin-bottom:18px">${infoItem('Người liên hệ',esc(supplier.contact||'—'))}${infoItem('Số điện thoại',esc(supplier.phone||'—'))}${infoItem('Email',esc(supplier.email||'—'))}${infoItem('Tài khoản NCC',supplier.bankAccount?`${esc(supplier.bankAccount)} · ${esc(supplier.bankName||'')}`:'—')}</div>
+  <div class="form-sec-title"><i class="fa-solid fa-star"></i>Đánh giá</div><div class="info-grid">${infoItem('Đánh giá hiện tại',Number(supplier.rating||0)?`<b>${Number(supplier.rating).toFixed(1)} / 5</b>`:'Chưa đánh giá')}${infoItem('NCC đã hoàn tiền',`<b class="num">${fmtVND(refunded)}</b>`)}</div>`;
+  if(tab==='orders') inner=tableShell([{t:'Mã PO'},{t:'Ngày'},{t:'Giá trị',cls:'right'},{t:'Đã trả',cls:'right'},{t:'Còn phải trả',cls:'right'},{t:'NCC còn phải hoàn',cls:'right'},{t:'Trạng thái'}],pos.map(po=>`<tr class="clickable" data-act="po-view" data-id="${esc(po.id)}"><td><span class="code">${esc(po.id)}</span></td><td>${fmtDate(po.date)}</td><td class="right num">${fmtVND(po.total)}</td><td class="right num">${fmtVND(purchasePaidAmount(po))}</td><td class="right num">${fmtVND(purchasePayableRemaining(po))}</td><td class="right num" style="color:${purchaseSupplierRefundDue(po)>0?'var(--orange)':'var(--text-3)'}">${fmtVND(purchaseSupplierRefundDue(po))}</td><td>${badge(po.status)}</td></tr>`),{emptyTitle:'Chưa có đơn mua'});
+  if(tab==='debt'){
+    const debtRows=pos.map(po=>{const remain=purchasePayableRemaining(po),due=purchaseSupplierRefundDue(po),gross=purchaseSupplierRefundGrossDue(po),got=purchaseSupplierRefundedAmount(po);return `<tr><td><span class="code">${esc(po.id)}</span></td><td>${fmtDate(po.date)}</td><td class="right num">${fmtVND(po.total)}</td><td class="right num">${fmtVND(purchasePaidAmount(po))}</td><td class="right num">${fmtVND(remain)}</td><td class="right num">${fmtVND(gross)}</td><td class="right num" style="color:var(--green)">${fmtVND(got)}</td><td class="right strong num" style="color:${due>0?'var(--orange)':'var(--text-3)'}">${fmtVND(due)}</td><td>${remain>0?`<button class="btn btn-xs btn-primary" data-act="supplier-pay-modal" data-id="${esc(po.id)}">Thanh toán</button>`:due>0?`<button class="btn btn-xs btn-primary" data-act="supplier-refund-modal" data-id="${esc(po.id)}">Ghi nhận hoàn tiền</button>`:'<span class="badge green">Tất toán</span>'}</td></tr>`;});
+    const refRows=refunds.map(r=>`<tr><td><span class="code">${esc(r.id)}</span></td><td>${fmtDate(r.date)}</td><td><span class="code">${esc(r.poId)}</span></td><td class="right strong num">${fmtVND(r.amount)}</td><td>${esc(r.method==='BANK_TRANSFER'?'Chuyển khoản ngân hàng':r.method==='CASH'?'Tiền mặt':r.method||'—')}</td><td>${esc(r.bankName||'—')}</td><td>${esc(r.receivedByName||r.createdByName||'—')}</td><td>${esc(r.reference||'')}</td></tr>`);
+    inner=`<div class="grid g-auto-sm" style="margin-bottom:16px">${mkpi('Còn phải trả NCC',fmtShort(payable),'fa-money-bill-transfer',payable>0?'red':'slate')}${mkpi('NCC phải hoàn',fmtShort(refundDue),'fa-rotate-left',refundDue>0?'orange':'slate')}${mkpi('NCC đã hoàn',fmtShort(refunded),'fa-circle-check','green')}</div><div class="card" style="margin-bottom:14px">${tableShell([{t:'PO'},{t:'Ngày'},{t:'Tổng PO',cls:'right'},{t:'Đã trả',cls:'right'},{t:'Còn phải trả',cls:'right'},{t:'Phát sinh hoàn',cls:'right'},{t:'Đã hoàn',cls:'right'},{t:'Còn phải hoàn',cls:'right'},{t:'Thao tác'}],debtRows,{emptyTitle:'Không có công nợ'})}</div><div class="card"><div class="card-head"><div><h3>Lịch sử NCC hoàn tiền</h3><p>Mỗi lần hoàn tiền được ghi nhận riêng, mới nhất trước.</p></div></div>${tableShell([{t:'Mã nhận hoàn'},{t:'Ngày'},{t:'PO'},{t:'Số tiền',cls:'right'},{t:'Phương thức'},{t:'Ngân hàng nhận'},{t:'Người ghi nhận'},{t:'Tham chiếu'}],refRows,{emptyTitle:'Chưa có lần NCC hoàn tiền'})}</div>`;
+  }
+  if(tab==='history'){
+    const events=[]; pos.forEach(po=>events.push({d:po.date,t:`Đơn mua ${po.id}`,s:`${fmtVND(po.total)} · ${Q.supplierName(po.supplierId)}`,icon:'fa-cart-shopping',tone:'blue'})); payments.forEach(x=>events.push({d:x.date,t:`Thanh toán ${x.id}`,s:`Đã trả ${fmtVND(x.amount)} · PO ${x.poId}`,icon:'fa-money-bill-transfer',tone:'red'})); refunds.forEach(x=>events.push({d:x.date,t:`NCC hoàn tiền ${x.id}`,s:`Đã nhận ${fmtVND(x.amount)} · PO ${x.poId}`,icon:'fa-rotate-left',tone:'green'})); events.sort((a,b)=>String(b.d||'').localeCompare(String(a.d||''))); inner=events.length?`<div class="tline">${events.map(e=>`<div class="tline-item done"><span class="tline-dot" style="background:var(--surface);border-color:var(--${e.tone})"><i class="fa-solid ${e.icon}" style="color:var(--${e.tone})"></i></span><div class="tline-title">${esc(e.t)}</div><div class="tline-sub">${esc(e.s)} · ${fmtDate(e.d)}</div></div>`).join('')}</div>`:'<div class="empty-state">Chưa có giao dịch.</div>';
+  }
+  return tabs+`<div style="padding:17px 18px">${inner}</div>`;
+}
+function openSupplierDrawer(id){ const s=Q.supplier(id); if(!s)return; State.supplierTab=State.supplierTab||'overview'; Drawer.open({title:`<div style="display:flex;align-items:center;gap:11px">${avatarHTML(s.name,'lg')}<span>${esc(s.name)}<div style="font-size:12.5px;font-weight:500;color:var(--text-3);margin-top:2px">${esc(s.id)} · ${esc(s.group||'Nhà cung cấp')}</div></span></div>`,wide:true,body:supplierDrawerBody(s),foot:`<button class="btn" data-act="drawer-close">Đóng</button><button class="btn" data-act="supplier-edit" data-id="${esc(s.id)}"><i class="fa-solid fa-pen"></i>Sửa thông tin</button>`}); }
 
 Views.suppliers = function () {
   const f = F('suppliers', { q: '', group: '' });
@@ -1654,7 +1893,7 @@ Views['subcontracting-partners'] = function () {
   </div>`;
 };
 function openSubcontractingForm() {
-  Modal.open({ title: 'Tạo kế hoạch gia công', sub: 'Khai báo đối tác, sản phẩm, số lượng và hạn hoàn thành', size: 'md', body: `<div class="form-grid"><div class="field"><label>Đối tác gia công</label><input class="inp" id="subPartner" value="Cơ sở Đậu Hủ Tân Phúc" /></div><div class="field"><label>Sản phẩm</label><select class="inp" id="subProduct">${DB.products.map((product) => `<option value="${product.id}">${esc(product.name)}</option>`).join('')}</select></div></div><div class="form-grid"><div class="field"><label>Số lượng kế hoạch</label><input class="inp num" id="subQty" type="number" min="1" value="500" /></div><div class="field"><label>Đơn giá gia công</label><input class="inp num" id="subCost" type="number" min="0" value="1500" /></div></div><div class="form-grid"><div class="field"><label>Ngày giao nguyên liệu</label><input class="inp" id="subIssueDate" type="date" value="${currentDateYMD()}" min="${currentDateYMD()}" /></div><div class="field"><label>Ngày cần hoàn thành</label><input class="inp" id="subDueDate" type="date" value="${addDays(currentDateYMD(), 10)}" min="${currentDateYMD()}" /></div></div>`, foot: '<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-save"><i class="fa-solid fa-floppy-disk"></i>Lưu kế hoạch</button>' });
+  Modal.open({ title: 'Tạo kế hoạch gia công', sub: 'Khai báo đối tác, sản phẩm, số lượng và hạn hoàn thành', size: 'md', body: `<div class="form-grid"><div class="field"><label>Đối tác gia công</label><input class="inp" id="subPartner" value="Cơ sở Đậu Hủ Tân Phúc" /></div><div class="field"><label>Sản phẩm</label><select class="inp" id="subProduct">${DB.products.map((product) => `<option value="${product.id}">${esc(product.name)}</option>`).join('')}</select></div></div><div class="form-grid"><div class="field"><label>Số lượng kế hoạch</label><input class="inp num" id="subQty" type="number" min="1" value="500" /></div><div class="field"><label>Đơn giá gia công</label><input class="inp num" id="subCost" data-money="1" type="text" inputmode="numeric" min="0" value="1500" /></div></div><div class="form-grid"><div class="field"><label>Ngày giao nguyên liệu</label><input class="inp" id="subIssueDate" type="date" value="${currentDateYMD()}" min="${currentDateYMD()}" /></div><div class="field"><label>Ngày cần hoàn thành</label><input class="inp" id="subDueDate" type="date" value="${addDays(currentDateYMD(), 10)}" min="${currentDateYMD()}" /></div></div>`, foot: '<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-save"><i class="fa-solid fa-floppy-disk"></i>Lưu kế hoạch</button>' });
 }
 
 
@@ -1775,6 +2014,7 @@ function openFinalInspectionModal(id) {
   const ins = (DB.productionFinalInspections || []).find(x=>x.id===id); if (!ins) return;
   const po = Q.po(ins.productionOrderId);
   const row = (DB.inventory || []).find(r=>r.lotId===ins.lotId && r.productId===ins.productId);
+  const lot = Q.lot(ins.lotId);
   const readonly = (ins.status||'PENDING') !== 'PENDING' || !Auth.hasPermission('QC_INSPECT');
   const total = Number(ins.qty || row?.qtyPending || po?.qty || 0);
   Modal.open({
@@ -1787,6 +2027,8 @@ function openFinalInspectionModal(id) {
       ${infoItem('Số lượng chờ QC',`<b>${fmtN(total)} ${esc(ins.unit||po?.unit||'')}</b>`)}
       ${infoItem('Kho chờ QC',`${esc(Q.warehouseName(ins.warehouseId))} · ${esc(Q.locationName(ins.locationId))}`)}
       ${infoItem('Mã lô',`<span class="code">${esc(ins.lotNumber||'—')}</span>`)}
+      ${infoItem('Ngày sản xuất', lot?.mfgDate ? fmtDate(lot.mfgDate) : '—')}
+      ${infoItem('Hạn sử dụng', lot?.expiryDate ? fmtDate(lot.expiryDate) : '<span class="muted">Chưa quy định</span>')}
       ${infoItem('Trạng thái',finalInspectionStatusHtml(ins.status||'PENDING'))}
     </div>
     <div class="note-box" style="margin-bottom:14px"><b>Nguyên tắc tồn kho:</b> ${fmtN(total)} ${esc(ins.unit||po?.unit||'')} hiện chỉ là <b>tồn chờ QC</b>, chưa được tính vào tồn khả dụng. Khi QC xác nhận, chỉ số lượng đạt mới được cộng vào tồn kho thành phẩm.</div>
@@ -1841,6 +2083,35 @@ function subcontractingInspectionView() {
     </div>`;
 }
 
+
+/* ==========================================================================
+ * QC/QA - Hồ sơ kiểm nghiệm, CAPA, Thu hồi sản phẩm
+ * Dữ liệu nghiệp vụ riêng; tham chiếu master lô/sản phẩm đã có, không nhân đôi.
+ * ======================================================================= */
+let __qualityOpsHydrated=false;
+function qualityOpsHydrate(){
+  if(__qualityOpsHydrated)return;
+  __qualityOpsHydrated=true;
+  DB.qualityCoa=Array.isArray(DB.qualityCoa)?DB.qualityCoa:[];
+  DB.qualityCapa=Array.isArray(DB.qualityCapa)?DB.qualityCapa:[];
+  DB.qualityRecalls=Array.isArray(DB.qualityRecalls)?DB.qualityRecalls:[];
+}
+function qualityOpsPersist(keys){
+  if(typeof RestaurantQualityAPI==='undefined') return Promise.resolve(false);
+  return RestaurantQualityAPI.syncQuality(keys).catch(err=>{
+    console.error('[QualityAPI] Không đồng bộ được dữ liệu server:',err);
+    if(typeof Toast!=='undefined') Toast.err('Không lưu được lên server',err?.message||'Kiểm tra bảng lenam_quality_* trên KIO.');
+    throw err;
+  });
+}
+function qualityLotLabel(lotId){const l=(DB.inventoryLots||[]).find(x=>x.id===lotId);const p=Q.product(l?.productId)||Q.material(l?.productId);return l?`${l.lotNumber||l.id} · ${p?.name||l.productId}`:lotId||'—';}
+function qualityCoaView(){qualityOpsHydrate();const rows=(DB.qualityCoa||[]).map(x=>`<tr><td><span class="code">${esc(x.id)}</span></td><td>${cell2(esc(qualityLotLabel(x.lotId)),esc(x.productId||''))}</td><td>${fmtDate(x.testDate)}</td><td>${esc(x.inspector||'—')}</td><td>${x.result==='PASSED'?'<span class="badge green">Đạt</span>':x.result==='FAILED'?'<span class="badge red">Không đạt</span>':'<span class="badge orange">Chờ kết quả</span>'}</td><td>${rowActions([{act:'quality-coa-view',data:`data-id="${esc(x.id)}"`,icon:'fa-eye',title:'Xem hồ sơ'},{act:'quality-coa-edit',data:`data-id="${esc(x.id)}"`,icon:'fa-pen',title:'Cập nhật'}])}</td></tr>`).join('');return `${pageHead('Hồ sơ kiểm nghiệm','Quản lý kết quả kiểm nghiệm theo đúng lô/sản phẩm đã tồn tại trong hệ thống.',`<button class="btn btn-primary" data-act="quality-coa-new"><i class="fa-solid fa-plus"></i>Lập hồ sơ</button>`)}<div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tổng hồ sơ',(DB.qualityCoa||[]).length,'fa-flask-vial','blue')}${mkpi('Đạt',(DB.qualityCoa||[]).filter(x=>x.result==='PASSED').length,'fa-circle-check','green')}${mkpi('Không đạt',(DB.qualityCoa||[]).filter(x=>x.result==='FAILED').length,'fa-circle-xmark','red')}</div><div class="card">${tableShell([{t:'Mã hồ sơ'},{t:'Lô / Sản phẩm'},{t:'Ngày kiểm'},{t:'Người kiểm'},{t:'Kết quả'},{t:'Thao tác'}],rows,{emptyTitle:'Chưa có hồ sơ kiểm nghiệm'})}</div>`;}
+function openQualityCoaForm(id=''){qualityOpsHydrate();const x=(DB.qualityCoa||[]).find(v=>v.id===id)||{};const lots=(DB.inventoryLots||[]);Modal.open({title:id?`Cập nhật hồ sơ · ${id}`:'Lập hồ sơ kiểm nghiệm',size:'lg',body:`<input type="hidden" id="qualityCoaId" value="${esc(id)}"><div class="form-grid cols-2"><div class="field"><label>Lô kiểm nghiệm *</label><select class="inp" id="qualityCoaLot">${lots.map(l=>`<option value="${esc(l.id)}" ${x.lotId===l.id?'selected':''}>${esc(qualityLotLabel(l.id))}</option>`).join('')}</select></div><div class="field"><label>Ngày kiểm *</label><input class="inp" id="qualityCoaDate" type="date" value="${esc(x.testDate||restaurantToday())}"></div><div class="field"><label>Người kiểm</label><input class="inp" id="qualityCoaInspector" value="${esc(x.inspector||DB.currentUser?.name||'QC/QA')}"></div><div class="field"><label>Kết quả</label><select class="inp" id="qualityCoaResult"><option value="PENDING" ${x.result==='PENDING'?'selected':''}>Chờ kết quả</option><option value="PASSED" ${x.result==='PASSED'?'selected':''}>Đạt</option><option value="FAILED" ${x.result==='FAILED'?'selected':''}>Không đạt</option></select></div></div><div class="field"><label>Nội dung / chỉ tiêu kiểm nghiệm</label><textarea class="inp" id="qualityCoaTests" rows="4" placeholder="Ví dụ: Cảm quan: Đạt; Khối lượng: Đạt; Vi sinh: Đạt">${esc((x.tests||[]).map(t=>`${t.name}: ${t.result}`).join('; '))}</textarea></div><div class="field"><label>Ghi chú</label><textarea class="inp" id="qualityCoaNote" rows="3">${esc(x.note||'')}</textarea></div>`,foot:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="quality-coa-save"><i class="fa-solid fa-floppy-disk"></i>Lưu hồ sơ</button>'});}
+function qualityCapaView(){qualityOpsHydrate();const rows=(DB.qualityCapa||[]).map(x=>`<tr><td><span class="code">${esc(x.id)}</span></td><td>${cell2(esc(x.issue),esc(x.source||''))}</td><td>${esc(x.owner||'—')}</td><td>${fmtDate(x.dueDate)}</td><td>${x.status==='CLOSED'?'<span class="badge green">Đã đóng</span>':x.status==='IN_PROGRESS'?'<span class="badge blue">Đang xử lý</span>':'<span class="badge orange">Mở</span>'}</td><td>${rowActions([{act:'quality-capa-view',data:`data-id="${esc(x.id)}"`,icon:'fa-eye',title:'Xem CAPA'},{act:'quality-capa-edit',data:`data-id="${esc(x.id)}"`,icon:'fa-pen',title:'Cập nhật'}])}</td></tr>`).join('');return `${pageHead('CAPA','Theo dõi hành động khắc phục và phòng ngừa từ sai lệch, lỗi QC hoặc khiếu nại.',`<button class="btn btn-primary" data-act="quality-capa-new"><i class="fa-solid fa-plus"></i>Tạo CAPA</button>`)}<div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('CAPA đang mở',(DB.qualityCapa||[]).filter(x=>x.status!=='CLOSED').length,'fa-screwdriver-wrench','orange')}${mkpi('Đang xử lý',(DB.qualityCapa||[]).filter(x=>x.status==='IN_PROGRESS').length,'fa-spinner','blue')}${mkpi('Đã đóng',(DB.qualityCapa||[]).filter(x=>x.status==='CLOSED').length,'fa-circle-check','green')}</div><div class="card">${tableShell([{t:'Mã CAPA'},{t:'Vấn đề / Nguồn'},{t:'Phụ trách'},{t:'Hạn xử lý'},{t:'Trạng thái'},{t:'Thao tác'}],rows,{emptyTitle:'Chưa có CAPA'})}</div>`;}
+function openQualityCapaForm(id=''){qualityOpsHydrate();const x=(DB.qualityCapa||[]).find(v=>v.id===id)||{};Modal.open({title:id?`Cập nhật CAPA · ${id}`:'Tạo CAPA',size:'lg',body:`<input type="hidden" id="qualityCapaId" value="${esc(id)}"><div class="form-grid cols-2"><div class="field"><label>Nguồn phát hiện</label><select class="inp" id="qualityCapaSource"><option>Kiểm tra chất lượng</option><option>Khiếu nại khách hàng</option><option>Kiểm kê / thất thoát</option><option>Thu hồi sản phẩm</option></select></div><div class="field"><label>Phụ trách *</label><input class="inp" id="qualityCapaOwner" value="${esc(x.owner||'QC/QA')}"></div><div class="field"><label>Hạn xử lý</label><input class="inp" type="date" id="qualityCapaDue" value="${esc(x.dueDate||restaurantToday())}"></div><div class="field"><label>Trạng thái</label><select class="inp" id="qualityCapaStatus"><option value="OPEN" ${x.status==='OPEN'?'selected':''}>Mở</option><option value="IN_PROGRESS" ${x.status==='IN_PROGRESS'?'selected':''}>Đang xử lý</option><option value="CLOSED" ${x.status==='CLOSED'?'selected':''}>Đã đóng</option></select></div></div><div class="field"><label>Vấn đề / sai lệch *</label><textarea class="inp" id="qualityCapaIssue" rows="2">${esc(x.issue||'')}</textarea></div><div class="field"><label>Nguyên nhân gốc</label><textarea class="inp" id="qualityCapaRoot" rows="2">${esc(x.rootCause||'')}</textarea></div><div class="field"><label>Hành động khắc phục</label><textarea class="inp" id="qualityCapaCorrection" rows="2">${esc(x.correction||'')}</textarea></div><div class="field"><label>Hành động phòng ngừa</label><textarea class="inp" id="qualityCapaPreventive" rows="2">${esc(x.preventive||'')}</textarea></div>`,foot:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="quality-capa-save"><i class="fa-solid fa-floppy-disk"></i>Lưu CAPA</button>'});}
+function qualityRecallView(){qualityOpsHydrate();const rows=(DB.qualityRecalls||[]).map(x=>`<tr><td><span class="code">${esc(x.id)}</span></td><td>${cell2(esc(qualityLotLabel(x.lotId)),esc(x.reason||''))}</td><td>${fmtDate(x.date)}</td><td class="right num">${fmtDec(x.qty||0,2)}</td><td>${x.status==='CLOSED'?'<span class="badge green">Đã hoàn tất</span>':x.status==='IN_PROGRESS'?'<span class="badge red">Đang thu hồi</span>':'<span class="badge orange">Khởi tạo</span>'}</td><td>${rowActions([{act:'quality-recall-view',data:`data-id="${esc(x.id)}"`,icon:'fa-eye',title:'Xem thu hồi'},{act:'quality-recall-edit',data:`data-id="${esc(x.id)}"`,icon:'fa-pen',title:'Cập nhật'}])}</td></tr>`).join('');return `${pageHead('Thu hồi sản phẩm','Quản lý thu hồi theo lô để đảm bảo truy xuất và kiểm soát sản phẩm không phù hợp.',`<button class="btn btn-primary" data-act="quality-recall-new"><i class="fa-solid fa-plus"></i>Tạo đợt thu hồi</button>`)}<div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Đợt thu hồi',(DB.qualityRecalls||[]).length,'fa-rotate-left','blue')}${mkpi('Đang thu hồi',(DB.qualityRecalls||[]).filter(x=>x.status==='IN_PROGRESS').length,'fa-triangle-exclamation','red')}${mkpi('Đã hoàn tất',(DB.qualityRecalls||[]).filter(x=>x.status==='CLOSED').length,'fa-circle-check','green')}</div><div class="card">${tableShell([{t:'Mã thu hồi'},{t:'Lô / Lý do'},{t:'Ngày'},{t:'SL mục tiêu',cls:'right'},{t:'Trạng thái'},{t:'Thao tác'}],rows,{emptyTitle:'Chưa có đợt thu hồi'})}</div>`;}
+function openQualityRecallForm(id=''){qualityOpsHydrate();const x=(DB.qualityRecalls||[]).find(v=>v.id===id)||{};const lots=(DB.inventoryLots||[]).filter(l=>Q.product(l.productId));Modal.open({title:id?`Cập nhật thu hồi · ${id}`:'Tạo đợt thu hồi sản phẩm',size:'lg',body:`<input type="hidden" id="qualityRecallId" value="${esc(id)}"><div class="form-grid cols-2"><div class="field"><label>Lô thành phẩm *</label><select class="inp" id="qualityRecallLot">${lots.map(l=>`<option value="${esc(l.id)}" ${x.lotId===l.id?'selected':''}>${esc(qualityLotLabel(l.id))}</option>`).join('')}</select></div><div class="field"><label>Ngày khởi tạo</label><input class="inp" type="date" id="qualityRecallDate" value="${esc(x.date||restaurantToday())}"></div><div class="field"><label>Số lượng mục tiêu</label><input class="inp right num" type="number" min="0" step="0.01" id="qualityRecallQty" value="${Number(x.qty||0)}"></div><div class="field"><label>Trạng thái</label><select class="inp" id="qualityRecallStatus"><option value="OPEN" ${x.status==='OPEN'?'selected':''}>Khởi tạo</option><option value="IN_PROGRESS" ${x.status==='IN_PROGRESS'?'selected':''}>Đang thu hồi</option><option value="CLOSED" ${x.status==='CLOSED'?'selected':''}>Đã hoàn tất</option></select></div></div><div class="field"><label>Lý do thu hồi *</label><textarea class="inp" id="qualityRecallReason" rows="3">${esc(x.reason||'')}</textarea></div><div class="field"><label>Phạm vi / hướng xử lý</label><textarea class="inp" id="qualityRecallAction" rows="3">${esc(x.action||'')}</textarea></div>`,foot:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="quality-recall-save"><i class="fa-solid fa-floppy-disk"></i>Lưu đợt thu hồi</button>'});}
+
 /* Đăng ký Views cho các phân hệ doanh nghiệp tiêu chuẩn */
 ['accounting', 'quality', 'maintenance', 'logistics', 'rnd', 'approvals', 'bi'].forEach(key => {
   Views[key] = function (params = {}) {
@@ -1848,6 +2119,9 @@ function subcontractingInspectionView() {
     if (key === 'quality' && tab === 'iqc') return incomingInspectionView();
     if (key === 'quality' && tab === 'fqc') return finalInspectionView();
     if (key === 'quality' && tab === 'subcontracting_qc') return subcontractingInspectionView();
+    if (key === 'quality' && tab === 'coa') return qualityCoaView();
+    if (key === 'quality' && tab === 'capa') return qualityCapaView();
+    if (key === 'quality' && tab === 'recall') return qualityRecallView();
     if (!tab || tab === 'dashboard') {
       if (ENTERPRISE_MODULES[key]) return enterpriseView(key);
       if (key === 'bi' && typeof Views.reports === 'function') return Views.reports(params);
@@ -1956,7 +2230,7 @@ function openSubcontractingForm(id=''){
       <div class="field"><label>Đối tác gia công *</label><select class="inp" id="subPartner"><option value="">-- Chọn đối tác --</option>${(DB.subcontractingPartners||[]).filter(p=>p.status!=='inactive').map(p=>`<option value="${esc(p.id)}" ${(o?.partnerId===p.id||o?.partner===p.name)?'selected':''}>${esc(p.name)}</option>`).join('')}</select></div>
       <div class="field"><label>Thành phẩm *</label><select class="inp" id="subProduct">${(DB.products||[]).map(p=>`<option value="${esc(p.id)}" ${o?.productId===p.id?'selected':''}>${esc(p.id)} — ${esc(p.name)} (${esc(p.unit)})</option>`).join('')}</select></div>
       <div class="field"><label>Số lượng kế hoạch *</label><input class="inp right num" id="subQty" type="number" min="0.01" step="0.01" value="${Number(o?.plannedQty||100)}"></div>
-      <div class="field"><label>Đơn giá gia công</label><input class="inp right num" id="subCost" type="number" min="0" step="100" value="${Number(o?.unitCost||1500)}"></div>
+      <div class="field"><label>Đơn giá gia công</label><input class="inp right num" id="subCost" data-money="1" type="text" inputmode="numeric" min="0" step="100" value="${Number(o?.unitCost||1500)}"></div>
       <div class="field"><label>Ngày giao NVL dự kiến</label><input class="inp" id="subIssueDate" type="date" min="${today}" value="${o?.issueDate&&o.issueDate>=today?o.issueDate:today}"></div>
       <div class="field"><label>Ngày cần nhận hàng *</label><input class="inp" id="subDueDate" type="date" min="${today}" value="${o?.dueDate&&o.dueDate>=today?o.dueDate:addDays(today,7)}"></div>
       <div class="field" style="grid-column:1/-1"><label>Ghi chú</label><textarea class="inp" id="subNote" rows="3" placeholder="Yêu cầu đóng gói, quy cách, điều kiện giao nhận…">${esc(o?.note||'')}</textarea></div>
@@ -1965,7 +2239,7 @@ function openSubcontractingForm(id=''){
   });
 }
 function subcontractingSaveOrder(id=''){
-  subcontractHydrate(); const partner=subcontractPartner($('#subPartner')?.value); const product=Q.product($('#subProduct')?.value); const qty=Number($('#subQty')?.value||0); const cost=Number($('#subCost')?.value||0); const today=subcontractToday(); const issueDate=$('#subIssueDate')?.value||today; const dueDate=$('#subDueDate')?.value||addDays(today,7);
+  subcontractHydrate(); const partner=subcontractPartner($('#subPartner')?.value); const product=Q.product($('#subProduct')?.value); const qty=Number($('#subQty')?.value||0); const cost=parseMoney($('#subCost')?.value||0); const today=subcontractToday(); const issueDate=$('#subIssueDate')?.value||today; const dueDate=$('#subDueDate')?.value||addDays(today,7);
   if(!partner||!product||qty<=0){Toast.err('Thiếu thông tin','Vui lòng chọn đối tác, thành phẩm và nhập số lượng lớn hơn 0.');return;}
   if(issueDate<today||dueDate<today||dueDate<issueDate){Toast.err('Ngày không hợp lệ','Ngày giao NVL và ngày cần nhận phải từ ngày hiện tại; ngày nhận không được trước ngày giao NVL.');return;}
   const payload={partnerId:partner.id,partner:partner.name,productId:product.id,plannedQty:qty,unit:product.unit,issueDate,dueDate,unitCost:cost,note:$('#subNote')?.value?.trim()||''};
@@ -2014,8 +2288,8 @@ function subcontractingReceiveGoods(id){
   (DB.goodsReceipts||(DB.goodsReceipts=[])).unshift({id:receiptId,poId:'',prId:'',date:today,receivedBy:DB.currentUser?.id||'',warehouse:'Gia công',warehouseId:'WH-004',locationId:'LOC-007',status:'RECEIVED',note:`Nhận hàng từ ${o.partner} · ${o.id}`,sourceType:'SUBCONTRACTING',refDoc:o.id,items});
   o.receivedQty=Number(o.receivedQty||0)+recv;o.goodQty=Number(o.goodQty||0)+good;o.defectQty=Number(o.defectQty||0)+bad;o.lastReceivedAt=new Date().toISOString();o.lastReceiptId=receiptId;o.receiveNote=$('#subReceiveNote')?.value?.trim()||'';o.partnerProgress=Math.max(Number(o.partnerProgress||0),Math.round(o.receivedQty/Number(o.plannedQty||1)*100));o.status=o.receivedQty+1e-9>=Number(o.plannedQty||0)?'COMPLETED':'PARTIAL_RECEIVED';subcontractPersist();subcontractSyncInventory();Modal.close();render();Toast.ok('Đã nhận hàng gia công',`${receiptId} · đạt ${fmtDec(good,2)} · lỗi ${fmtDec(bad,2)}`);
 }
-function openSubcontractingPaymentModal(id){const o=(DB.subcontractingOrders||[]).find(x=>x.id===id);if(!o)return;const debt=subcontractDebt(o);if(debt<=0){Toast.info('Không còn công nợ',id);return;}Modal.open({title:`Thanh toán gia công · ${id}`,sub:`${esc(o.partner)} · còn phải trả ${fmtVND(debt)}`,size:'md',body:`<div class="field"><label>Số tiền thanh toán *</label><input class="inp right num" id="subPayAmount" type="number" min="1" max="${debt}" value="${debt}"></div><div class="field"><label>Ghi chú</label><textarea class="inp" id="subPayNote" rows="2"></textarea></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-pay-save" data-id="${esc(id)}">Ghi nhận thanh toán</button>`});}
-function subcontractingSavePayment(id){const o=(DB.subcontractingOrders||[]).find(x=>x.id===id);if(!o)return;const debt=subcontractDebt(o),amt=Number($('#subPayAmount')?.value||0);if(amt<=0||amt>debt+1e-9){Toast.err('Số tiền không hợp lệ',`Số tiền phải từ 1 đến ${fmtVND(debt)}.`);return;}o.paid=Number(o.paid||0)+amt;(o.payments||(o.payments=[])).unshift({date:subcontractToday(),amount:amt,note:$('#subPayNote')?.value?.trim()||'',by:DB.currentUser?.id||''});subcontractPersist();Modal.close();render();Toast.ok('Đã ghi nhận thanh toán',`${id} · ${fmtVND(amt)}`);}
+function openSubcontractingPaymentModal(id){const o=(DB.subcontractingOrders||[]).find(x=>x.id===id);if(!o)return;const debt=subcontractDebt(o);if(debt<=0){Toast.info('Không còn công nợ',id);return;}Modal.open({title:`Thanh toán gia công · ${id}`,sub:`${esc(o.partner)} · còn phải trả ${fmtVND(debt)}`,size:'md',body:`<div class="field"><label>Số tiền thanh toán *</label><input class="inp right num" id="subPayAmount" data-money="1" type="text" inputmode="numeric" min="1" max="${debt}" value="${debt}"></div><div class="field"><label>Ghi chú</label><textarea class="inp" id="subPayNote" rows="2"></textarea></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-pay-save" data-id="${esc(id)}">Ghi nhận thanh toán</button>`});}
+function subcontractingSavePayment(id){const o=(DB.subcontractingOrders||[]).find(x=>x.id===id);if(!o)return;const debt=subcontractDebt(o),amt=parseMoney($('#subPayAmount')?.value||0);if(amt<=0||amt>debt+1e-9){Toast.err('Số tiền không hợp lệ',`Số tiền phải từ 1 đến ${fmtVND(debt)}.`);return;}o.paid=Number(o.paid||0)+amt;(o.payments||(o.payments=[])).unshift({date:subcontractToday(),amount:amt,note:$('#subPayNote')?.value?.trim()||'',by:DB.currentUser?.id||''});subcontractPersist();Modal.close();render();Toast.ok('Đã ghi nhận thanh toán',`${id} · ${fmtVND(amt)}`);}
 
 function openSubcontractingPartnerForm(id=''){
   subcontractHydrate();const p=id?(DB.subcontractingPartners||[]).find(x=>x.id===id):null;Modal.open({title:p?'Sửa đối tác gia công':'Thêm đối tác gia công',sub:p?`${p.id} · ${esc(p.name)}`:'Khai báo đơn vị nhận gia công',size:'md',body:`<div class="form-grid cols-2"><div class="field" style="grid-column:1/-1"><label>Tên đối tác *</label><input class="inp" id="subPartnerName" value="${esc(p?.name||'')}"></div><div class="field"><label>Người liên hệ</label><input class="inp" id="subPartnerContact" value="${esc(p?.contact||'')}"></div><div class="field"><label>Điện thoại</label><input class="inp" id="subPartnerPhone" value="${esc(p?.phone||'')}"></div><div class="field" style="grid-column:1/-1"><label>Địa chỉ</label><input class="inp" id="subPartnerAddress" value="${esc(p?.address||'')}"></div><div class="field"><label>Trạng thái</label><select class="inp" id="subPartnerStatus"><option value="active" ${p?.status!=='inactive'?'selected':''}>Đang hoạt động</option><option value="inactive" ${p?.status==='inactive'?'selected':''}>Ngừng hoạt động</option></select></div><div class="field"><label>Ghi chú</label><input class="inp" id="subPartnerNote" value="${esc(p?.note||'')}"></div></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-partner-save" data-id="${esc(p?.id||'')}">Lưu đối tác</button>`});
@@ -2113,14 +2387,14 @@ function openSubcontractingForm(id=''){
     <div class="field"><label>Đối tác gia công *</label><select class="inp" id="subPartner"><option value="">-- Chọn đối tác --</option>${(DB.subcontractingPartners||[]).filter(p=>p.status!=='inactive').map(p=>`<option value="${esc(p.id)}" ${(o?.partnerId===p.id||o?.partner===p.name)?'selected':''}>${esc(p.name)}</option>`).join('')}</select></div>
     <div class="field"><label>Thành phẩm / bán thành phẩm *</label><select class="inp" id="subProduct">${(DB.products||[]).map(p=>`<option value="${esc(p.id)}" ${o?.productId===p.id?'selected':''}>${esc(p.id)} — ${esc(p.name)} (${esc(p.unit)})</option>`).join('')}</select></div>
     <div class="field"><label>Số lượng kế hoạch *</label><input class="inp right num" id="subQty" type="number" min="0.01" step="0.01" value="${Number(o?.plannedQty||100)}"></div>
-    <div class="field"><label>Đơn giá gia công / đơn vị *</label><input class="inp right num" id="subCost" type="number" min="0" step="100" value="${Number(o?.unitCost||1500)}"></div>
+    <div class="field"><label>Đơn giá gia công / đơn vị *</label><input class="inp right num" id="subCost" data-money="1" type="text" inputmode="numeric" min="0" step="100" value="${Number(o?.unitCost||1500)}"></div>
     <div class="field"><label>Ngày dự kiến giao NVL</label><input class="inp" id="subIssueDate" type="date" min="${today}" value="${o?.issueDate&&o.issueDate>=today?o.issueDate:today}"></div>
     <div class="field"><label>Ngày cần hoàn thành *</label><input class="inp" id="subDueDate" type="date" min="${today}" value="${o?.dueDate&&o.dueDate>=today?o.dueDate:addDays(today,7)}"></div>
     <div class="field" style="grid-column:1/-1"><label>Yêu cầu kỹ thuật / ghi chú</label><textarea class="inp" id="subNote" rows="3" placeholder="Quy cách, đóng gói, tiêu chuẩn chất lượng, điều kiện giao nhận…">${esc(o?.note||'')}</textarea></div>
   </div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-save" data-id="${esc(o?.id||'')}"><i class="fa-solid fa-floppy-disk"></i>${o?'Lưu kế hoạch':'Tạo kế hoạch'}</button>`});
 }
 function subcontractingSaveOrder(id=''){
-  subcontractHydrate(); const partner=subcontractPartner($('#subPartner')?.value), product=Q.product($('#subProduct')?.value), qty=Number($('#subQty')?.value||0), cost=Number($('#subCost')?.value||0), today=subcontractToday(), issueDate=$('#subIssueDate')?.value||today, dueDate=$('#subDueDate')?.value||addDays(today,7);
+  subcontractHydrate(); const partner=subcontractPartner($('#subPartner')?.value), product=Q.product($('#subProduct')?.value), qty=Number($('#subQty')?.value||0), cost=parseMoney($('#subCost')?.value||0), today=subcontractToday(), issueDate=$('#subIssueDate')?.value||today, dueDate=$('#subDueDate')?.value||addDays(today,7);
   if(!partner||!product||qty<=0||cost<0){Toast.err('Thiếu thông tin','Vui lòng chọn đối tác, sản phẩm, số lượng và đơn giá hợp lệ.');return;} if(issueDate<today||dueDate<today||dueDate<issueDate){Toast.err('Ngày không hợp lệ','Ngày phải từ hiện tại và hạn hoàn thành không được trước ngày giao NVL.');return;}
   const payload={partnerId:partner.id,partner:partner.name,productId:product.id,plannedQty:qty,unit:product.unit,issueDate,dueDate,unitCost:cost,note:$('#subNote')?.value?.trim()||''};
   if(id){const o=subcontractV3Orders().find(x=>x.id===id);if(!o||o.status!=='DRAFT')return;Object.assign(o,payload,{updatedAt:new Date().toISOString()});}
@@ -2187,18 +2461,71 @@ function openSubcontractingQcModal(id,receiptId=''){
 function subcontractingQcConfirm(id,receiptId){const o=subcontractV3Orders().find(x=>x.id===id);if(!o)return;const r=subcontractV3Receipts(o).find(x=>x.id===receiptId);if(!r||r.qcStatus==='DONE')return;const good=Number($('#subQcGood')?.value||0),bad=Number($('#subQcBad')?.value||0);if(good<0||bad<0||Math.abs(good+bad-Number(r.qty||0))>1e-6){Toast.err('Kết quả QC không hợp lệ','Số đạt + số lỗi phải bằng số lượng nhận.');return;}r.goodQty=good;r.defectQty=bad;r.qcNote=$('#subQcNote')?.value?.trim()||'';r.qcStatus='DONE';r.qcAt=new Date().toISOString();r.qcBy=DB.currentUser?.id||'';o.goodQty=subcontractV3Receipts(o).reduce((s,x)=>s+Number(x.goodQty||0),0);o.defectQty=subcontractV3Receipts(o).reduce((s,x)=>s+Number(x.defectQty||0),0);subcontractV3RecalcStatus(o);subcontractPersist();Modal.close();render();Toast.ok('Đã kiểm tra chất lượng',`${r.id} · đạt ${fmtDec(good,2)} · lỗi ${fmtDec(bad,2)}. Kết quả đã chuyển sang Kho → Nhập kho → Kho thành phẩm.`);}
 
 function openSubcontractingWarehouseModal(id,receiptId=''){
-  const o=subcontractV3Orders().find(x=>x.id===id);if(!o)return;const r=subcontractV3Receipts(o).find(x=>x.id===receiptId)||(subcontractV3Receipts(o).find(x=>x.qcStatus==='DONE'&&!x.warehoused));if(!r){Toast.info('Không có lô chờ nhập kho',id);return;}
-  Modal.open({title:`Nhập kho hàng gia công · ${r.id}`,sub:`${o.id} · ${esc(Q.product(o.productId)?.name||o.productId)}`,size:'lg',body:`<div class="info-grid">${infoItem('QC đạt',`${fmtDec(r.goodQty,2)} ${esc(Q.product(o.productId)?.unit||'')}`)}${infoItem('QC lỗi',`${fmtDec(r.defectQty,2)} ${esc(Q.product(o.productId)?.unit||'')}`)}${infoItem('Kho hàng đạt','Kho Thành phẩm - Thủ Đức')}${infoItem('Kho hàng lỗi','Kho Hàng lỗi / Tiêu hủy')}</div><div class="note-box" style="margin-top:12px">Hàng đạt sẽ cộng vào <b>Kho thành phẩm</b>; hàng lỗi được tách vào <b>Kho Hàng lỗi</b> và không tính vào tồn bán được.</div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-warehouse-confirm" data-id="${esc(id)}" data-receipt="${esc(r.id)}"><i class="fa-solid fa-warehouse"></i>Xác nhận nhập kho</button>`});
-}
-function subcontractingWarehouseConfirm(id,receiptId){
-  const o=subcontractV3Orders().find(x=>x.id===id);if(!o)return;const r=subcontractV3Receipts(o).find(x=>x.id===receiptId);if(!r||r.qcStatus!=='DONE'||r.warehoused)return;const today=subcontractToday(),product=Q.product(o.productId),receiptIdDoc=nextCode('PNGC-2026-',DB.goodsReceipts||[]),items=[];
-  function post(qty,warehouseId,locationId,suffix,qc){if(Number(qty||0)<=0)return;const lotId=nextCode('LOT-',DB.inventoryLots||[]),lotNumber=`LOT-${o.id.replace('GC-','GC')}-${r.id.replace('NHGC-2026-','')}${suffix}`;(DB.inventoryLots||(DB.inventoryLots=[])).unshift({id:lotId,lotNumber,productId:o.productId,productionOrderId:'',mfgDate:today,expiryDate:addDays(today,7),supplierLot:'',supplierId:'',qcStatus:qc,status:'active',createdAt:`${today} 09:00`,subcontractingOrderId:o.id,subcontractingReceiptId:r.id});const result=InventoryService.apply({productId:o.productId,warehouseId,locationId,lotId,quantity:Number(qty),type:'PRODUCTION_RECEIPT',refType:'SUBCONTRACTING',refId:receiptIdDoc,note:`Nhập hàng gia công ${o.id} · ${r.id}`,updateMaterial:false});if(!result.ok)throw new Error(result.message);items.push({materialId:o.productId,name:product?.name||o.productId,unit:product?.unit||'',qty:Number(qty),lotNumber,locationId,qcStatus:qc});}
-  try{post(r.goodQty,'WH-004','LOC-007','-OK','PASSED');post(r.defectQty,'WH-006','LOC-010','-DEF','FAILED');}catch(err){Toast.err('Không thể nhập kho',err.message);return;}
-  (DB.goodsReceipts||(DB.goodsReceipts=[])).unshift({id:receiptIdDoc,poId:'',prId:'',date:today,receivedBy:DB.currentUser?.id||'',warehouse:'Gia công',warehouseId:'WH-004',locationId:'LOC-007',status:'RECEIVED',note:`Nhập kho sau QC từ ${o.partner} · ${o.id} · ${r.id}`,sourceType:'SUBCONTRACTING',refDoc:o.id,sourceReceiptId:r.id,items});r.warehoused=true;r.warehouseAt=new Date().toISOString();r.warehouseBy=DB.currentUser?.id||'';r.goodsReceiptId=receiptIdDoc;o.storedGoodQty=subcontractV3Receipts(o).filter(x=>x.warehoused).reduce((s,x)=>s+Number(x.goodQty||0),0);o.storedDefectQty=subcontractV3Receipts(o).filter(x=>x.warehoused).reduce((s,x)=>s+Number(x.defectQty||0),0);o.lastReceiptId=receiptIdDoc;subcontractV3RecalcStatus(o);subcontractPersist();subcontractSyncInventory();Modal.close();render();Toast.ok('Đã nhập kho hàng gia công',`${receiptIdDoc} · đạt ${fmtDec(r.goodQty,2)} · lỗi ${fmtDec(r.defectQty,2)}`);
+  const o=subcontractV3Orders().find(x=>x.id===id);if(!o)return;
+  const r=subcontractV3Receipts(o).find(x=>x.id===receiptId)||(subcontractV3Receipts(o).find(x=>x.qcStatus==='DONE'&&!x.warehoused));
+  if(!r){Toast.info('Không có lô chờ nhập kho',id);return;}
+  const product=Q.product(o.productId)||{};
+  const mfgDate=r.mfgDate||r.date||subcontractToday();
+  const shelfLifeDays=Math.max(0,Number(product.shelfLifeDays||0));
+  const expiryDate=shelfLifeDays>0?addDays(mfgDate,shelfLifeDays):'';
+  const finished=(DB.warehouses||[]).filter(w=>w.type==='FINISHED_GOODS'&&w.status!=='inactive');
+  const defect=(DB.warehouses||[]).find(w=>w.type==='DEFECTIVE'&&w.status!=='inactive');
+  const first=finished[0];const locs=first?Q.locationsOf(first.id).filter(l=>l.status!=='inactive'):[];
+  Modal.open({title:`Nhập kho hàng gia công · ${r.id}`,sub:`${o.id} · ${esc(product.name||o.productId)}`,size:'lg',body:`
+    <div class="info-grid">${infoItem('QC đạt',`${fmtDec(r.goodQty,2)} ${esc(product.unit||'')}`)}${infoItem('QC lỗi',`${fmtDec(r.defectQty,2)} ${esc(product.unit||'')}`)}${infoItem('Hàng lỗi',esc(defect?.name||'Chưa cấu hình Kho Hàng lỗi'))}</div>
+    <div class="form-grid cols-2" style="margin-top:14px">
+      <div class="field"><label>Kho thành phẩm nhận hàng đạt *</label><select class="inp" id="subWarehouseGoodWh">${finished.map(w=>`<option value="${esc(w.id)}">${esc(w.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Vị trí/kệ nhận *</label><select class="inp" id="subWarehouseGoodLoc">${locs.map(l=>`<option value="${esc(l.id)}">${esc(l.name)} · ${esc(l.code)}</option>`).join('')}</select></div>
+      <div class="field"><label>Số lô từ đối tác *</label><input class="inp" id="subWarehouseLotNumber" value="${esc(r.lotNumber||'')}" placeholder="Nhập đúng số lô trên hàng/chứng từ đối tác"></div>
+      <div class="field"><label>Ngày sản xuất / hoàn thành *</label><input class="inp" id="subWarehouseMfgDate" type="date" value="${esc(mfgDate)}"></div>
+      <div class="field"><label>Hạn sử dụng theo quy định thành phẩm</label><input class="inp" value="${expiryDate?esc(fmtDate(expiryDate)):'Chưa quy định số ngày HSD'}" disabled></div>
+      <div class="field"><label>Quy định HSD</label><input class="inp" value="${shelfLifeDays>0?`${shelfLifeDays} ngày từ ngày sản xuất`:'Chưa khai báo'}" disabled></div>
+    </div>
+    <div class="note-box" style="margin-top:12px"><b>Quy tắc lô:</b> hàng từ gia công không tự sinh số lô. Kho phải nhập số lô thực tế từ đối tác. HSD được hệ thống tính từ ngày sản xuất theo quy định của master Thành phẩm.</div>
+    <div class="note-box" style="margin-top:8px">Hàng đạt vào <b>Kho thành phẩm được chọn ở trên</b>; hàng lỗi vào <b>Kho Hàng lỗi</b>, không tính vào tồn bán được.</div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-warehouse-confirm" data-id="${esc(id)}" data-receipt="${esc(r.id)}"><i class="fa-solid fa-warehouse"></i>Xác nhận nhập kho</button>`});
+  const whSel=document.querySelector('#subWarehouseGoodWh'),locSel=document.querySelector('#subWarehouseGoodLoc');
+  const fill=()=>{const ls=Q.locationsOf(whSel?.value||'').filter(l=>l.status!=='inactive');if(locSel)locSel.innerHTML=ls.map(l=>`<option value="${esc(l.id)}">${esc(l.name)} · ${esc(l.code)}</option>`).join('');};
+  whSel?.addEventListener('change',fill);
 }
 
-function openSubcontractingReconcileModal(id){const o=subcontractV3Orders().find(x=>x.id===id);if(!o||o.status!=='COMPLETED'){Toast.warn('Chưa thể đối chiếu','Chỉ đối chiếu công nợ sau khi nhận, QC và nhập kho hoàn tất.');return;}const expected=Number(o.goodQty||0)*Number(o.unitCost||0);Modal.open({title:`Đối chiếu công nợ · ${o.id}`,sub:`${esc(o.partner)} · nghiệm thu ${fmtDec(o.goodQty,2)} ${esc(Q.product(o.productId)?.unit||'')}`,size:'md',body:`<div class="info-grid">${infoItem('SL QC đạt',fmtDec(o.goodQty,2))}${infoItem('Đơn giá',fmtVND(o.unitCost||0))}${infoItem('Giá trị theo hệ thống',fmtVND(expected))}</div><div class="field" style="margin-top:14px"><label>Giá trị đối chiếu *</label><input class="inp right num" id="subReconcileAmount" type="number" min="0" value="${Number(o.reconciledAmount??expected)}"></div><div class="field"><label>Ghi chú đối chiếu</label><textarea class="inp" id="subReconcileNote" rows="3">${esc(o.reconcileNote||'')}</textarea></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-reconcile-confirm" data-id="${esc(id)}"><i class="fa-solid fa-scale-balanced"></i>Xác nhận đối chiếu</button>`});}
-function subcontractingReconcileConfirm(id){const o=subcontractV3Orders().find(x=>x.id===id);if(!o||o.status!=='COMPLETED')return;const amount=Number($('#subReconcileAmount')?.value||0);if(amount<0){Toast.err('Giá trị không hợp lệ','Giá trị đối chiếu không được âm.');return;}o.reconciledAmount=amount;o.reconciledAt=new Date().toISOString();o.reconciledBy=DB.currentUser?.id||'';o.reconcileNote=$('#subReconcileNote')?.value?.trim()||'';subcontractPersist();Modal.close();render();Toast.ok('Đã đối chiếu công nợ',`${id} · ${fmtVND(amount)}`);}
+function subcontractingWarehouseConfirm(id,receiptId){
+  const o=subcontractV3Orders().find(x=>x.id===id);if(!o)return;
+  const r=subcontractV3Receipts(o).find(x=>x.id===receiptId);if(!r||r.qcStatus!=='DONE'||r.warehoused)return;
+  const today=subcontractToday(),product=Q.product(o.productId)||{},receiptIdDoc=nextCode('PNGC-2026-',DB.goodsReceipts||[]),items=[];
+  const lotNumber=String($('#subWarehouseLotNumber')?.value||'').trim();
+  const mfgDate=$('#subWarehouseMfgDate')?.value||'';
+  const shelfLifeDays=Math.max(0,Number(product.shelfLifeDays||0));
+  if(!lotNumber){Toast.err('Thiếu số lô','Hàng gia công phải nhập số lô thực tế từ đối tác; hệ thống không tự sinh lô.');return;}
+  if(!mfgDate){Toast.err('Thiếu ngày sản xuất','Vui lòng nhập ngày sản xuất / hoàn thành từ đối tác.');return;}
+  if(mfgDate>today){Toast.err('Ngày sản xuất không hợp lệ','Ngày sản xuất / hoàn thành không được lớn hơn ngày hiện tại.');return;}
+  const expiryDate=shelfLifeDays>0?addDays(mfgDate,shelfLifeDays):'';
+  let lot=(DB.inventoryLots||[]).find(x=>x.productId===o.productId&&String(x.lotNumber||'').trim().toLowerCase()===lotNumber.toLowerCase());
+  if(lot && String(lot.subcontractingOrderId||'')!==String(o.id)){
+    Toast.err('Số lô đã tồn tại',`${lotNumber} đã thuộc nguồn khác. Vui lòng kiểm tra số lô đối tác.`);return;
+  }
+  if(!lot){
+    lot={id:nextCode('LOT-',DB.inventoryLots||[]),lotNumber,productId:o.productId,productionOrderId:'',mfgDate,expiryDate,supplierLot:lotNumber,supplierId:'',qcStatus:Number(r.defectQty||0)>0?(Number(r.goodQty||0)>0?'PARTIAL_FAILED':'FAILED'):'PASSED',status:'active',createdAt:`${today} 09:00`,subcontractingOrderId:o.id,subcontractingReceiptId:r.id};
+    (DB.inventoryLots||(DB.inventoryLots=[])).unshift(lot);
+  }
+  function post(qty,warehouseId,locationId,qc){
+    if(Number(qty||0)<=0)return;
+    const result=InventoryService.apply({productId:o.productId,warehouseId,locationId,lotId:lot.id,quantity:Number(qty),type:'PRODUCTION_RECEIPT',refType:'SUBCONTRACTING',refId:receiptIdDoc,note:`Nhập hàng gia công ${o.id} · ${r.id}`,updateMaterial:false});
+    if(!result.ok)throw new Error(result.message);
+    items.push({materialId:o.productId,name:product.name||o.productId,unit:product.unit||'',qty:Number(qty),lotId:lot.id,lotNumber,locationId,qcStatus:qc,mfgDate,expiryDate});
+  }
+  const goodWhId=document.querySelector('#subWarehouseGoodWh')?.value||'';const goodLocId=document.querySelector('#subWarehouseGoodLoc')?.value||'';
+  const goodWh=(DB.warehouses||[]).find(w=>w.id===goodWhId&&w.type==='FINISHED_GOODS'&&w.status!=='inactive');const goodLoc=(DB.warehouseLocations||[]).find(l=>l.id===goodLocId&&l.warehouseId===goodWhId&&l.status!=='inactive');
+  if(Number(r.goodQty||0)>0&&(!goodWh||!goodLoc)){Toast.err('Thiếu kho thành phẩm','Hãy chọn Kho thành phẩm và vị trí nhận hàng đạt.');return;}
+  const defectWh=(DB.warehouses||[]).find(w=>w.type==='DEFECTIVE'&&w.status!=='inactive');const defectLoc=(DB.warehouseLocations||[]).find(l=>l.warehouseId===defectWh?.id&&l.status!=='inactive');
+  if(Number(r.defectQty||0)>0&&(!defectWh||!defectLoc)){Toast.err('Thiếu Kho Hàng lỗi','Cần cấu hình Kho Hàng lỗi và vị trí lưu.');return;}
+  try{post(r.goodQty,goodWhId,goodLocId,'PASSED');post(r.defectQty,defectWh?.id||'',defectLoc?.id||'','FAILED');}catch(err){Toast.err('Không thể nhập kho',err.message);return;}
+  (DB.goodsReceipts||(DB.goodsReceipts=[])).unshift({id:receiptIdDoc,poId:'',prId:'',date:today,receivedBy:DB.currentUser?.id||'',warehouse:'Gia công',warehouseId:goodWhId,locationId:goodLocId,status:'RECEIVED',note:`Nhập kho sau QC từ ${o.partner} · ${o.id} · ${r.id}`,sourceType:'SUBCONTRACTING',refDoc:o.id,sourceReceiptId:r.id,items});
+  r.lotNumber=lotNumber;r.lotId=lot.id;r.mfgDate=mfgDate;r.expiryDate=expiryDate;r.warehoused=true;r.warehouseAt=new Date().toISOString();r.warehouseBy=DB.currentUser?.id||'';r.goodsReceiptId=receiptIdDoc;
+  o.storedGoodQty=subcontractV3Receipts(o).filter(x=>x.warehoused).reduce((s,x)=>s+Number(x.goodQty||0),0);o.storedDefectQty=subcontractV3Receipts(o).filter(x=>x.warehoused).reduce((s,x)=>s+Number(x.defectQty||0),0);o.lastReceiptId=receiptIdDoc;subcontractV3RecalcStatus(o);subcontractPersist();subcontractSyncInventory();Modal.close();render();Toast.ok('Đã nhập kho hàng gia công',`${receiptIdDoc} · lô ${lotNumber} · đạt ${fmtDec(r.goodQty,2)} · lỗi ${fmtDec(r.defectQty,2)}`);
+}
+
+function openSubcontractingReconcileModal(id){const o=subcontractV3Orders().find(x=>x.id===id);if(!o||o.status!=='COMPLETED'){Toast.warn('Chưa thể đối chiếu','Chỉ đối chiếu công nợ sau khi nhận, QC và nhập kho hoàn tất.');return;}const expected=Number(o.goodQty||0)*Number(o.unitCost||0);Modal.open({title:`Đối chiếu công nợ · ${o.id}`,sub:`${esc(o.partner)} · nghiệm thu ${fmtDec(o.goodQty,2)} ${esc(Q.product(o.productId)?.unit||'')}`,size:'md',body:`<div class="info-grid">${infoItem('SL QC đạt',fmtDec(o.goodQty,2))}${infoItem('Đơn giá',fmtVND(o.unitCost||0))}${infoItem('Giá trị theo hệ thống',fmtVND(expected))}</div><div class="field" style="margin-top:14px"><label>Giá trị đối chiếu *</label><input class="inp right num" id="subReconcileAmount" data-money="1" type="text" inputmode="numeric" min="0" value="${Number(o.reconciledAmount??expected)}"></div><div class="field"><label>Ghi chú đối chiếu</label><textarea class="inp" id="subReconcileNote" rows="3">${esc(o.reconcileNote||'')}</textarea></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-reconcile-confirm" data-id="${esc(id)}"><i class="fa-solid fa-scale-balanced"></i>Xác nhận đối chiếu</button>`});}
+function subcontractingReconcileConfirm(id){const o=subcontractV3Orders().find(x=>x.id===id);if(!o||o.status!=='COMPLETED')return;const amount=parseMoney($('#subReconcileAmount')?.value||0);if(amount<0){Toast.err('Giá trị không hợp lệ','Giá trị đối chiếu không được âm.');return;}o.reconciledAmount=amount;o.reconciledAt=new Date().toISOString();o.reconciledBy=DB.currentUser?.id||'';o.reconcileNote=$('#subReconcileNote')?.value?.trim()||'';subcontractPersist();Modal.close();render();Toast.ok('Đã đối chiếu công nợ',`${id} · ${fmtVND(amount)}`);}
 
 function openSubcontractingDetail(id){
   const o=subcontractV3Orders().find(x=>x.id===id);if(!o)return;const p=subcontractProduct(o),bom=subcontractBomLines(o),wasteRows=subcontractV3WasteRows(o),receipts=subcontractV3Receipts(o),amount=subcontractOrderAmount(o),debt=subcontractDebt(o);
@@ -2275,8 +2602,8 @@ function openSubcontractingPartnerDetail(idOrName){
 }
 
 /* Bảo vệ thanh toán: chỉ thanh toán sau khi đã đối chiếu công nợ. */
-function openSubcontractingPaymentModal(id){const o=subcontractV3Orders().find(x=>x.id===id);if(!o)return;if(!o.reconciledAt){Toast.warn('Chưa đối chiếu công nợ','Hãy xác nhận đối chiếu công nợ trước khi ghi nhận thanh toán.');return;}const debt=subcontractDebt(o);if(debt<=0){Toast.info('Không còn công nợ',id);return;}Modal.open({title:`Thanh toán gia công · ${id}`,sub:`${esc(o.partner)} · còn phải trả ${fmtVND(debt)}`,size:'md',body:`<div class="field"><label>Số tiền thanh toán *</label><input class="inp right num" id="subPayAmount" type="number" min="1" max="${debt}" value="${debt}"></div><div class="field"><label>Ghi chú</label><textarea class="inp" id="subPayNote" rows="2"></textarea></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-pay-save" data-id="${esc(id)}">Ghi nhận thanh toán</button>`});}
-function subcontractingSavePayment(id){const o=subcontractV3Orders().find(x=>x.id===id);if(!o||!o.reconciledAt){Toast.warn('Chưa đối chiếu công nợ','Không thể thanh toán trước khi đối chiếu.');return;}const debt=subcontractDebt(o),amt=Number($('#subPayAmount')?.value||0);if(amt<=0||amt>debt+1e-9){Toast.err('Số tiền không hợp lệ',`Số tiền phải từ 1 đến ${fmtVND(debt)}.`);return;}o.paid=Number(o.paid||0)+amt;(o.payments||(o.payments=[])).unshift({date:subcontractToday(),amount:amt,note:$('#subPayNote')?.value?.trim()||'',by:DB.currentUser?.id||''});subcontractPersist();Modal.close();render();Toast.ok('Đã ghi nhận thanh toán',`${id} · ${fmtVND(amt)}`);}
+function openSubcontractingPaymentModal(id){const o=subcontractV3Orders().find(x=>x.id===id);if(!o)return;if(!o.reconciledAt){Toast.warn('Chưa đối chiếu công nợ','Hãy xác nhận đối chiếu công nợ trước khi ghi nhận thanh toán.');return;}const debt=subcontractDebt(o);if(debt<=0){Toast.info('Không còn công nợ',id);return;}Modal.open({title:`Thanh toán gia công · ${id}`,sub:`${esc(o.partner)} · còn phải trả ${fmtVND(debt)}`,size:'md',body:`<div class="field"><label>Số tiền thanh toán *</label><input class="inp right num" id="subPayAmount" data-money="1" type="text" inputmode="numeric" min="1" max="${debt}" value="${debt}"></div><div class="field"><label>Ghi chú</label><textarea class="inp" id="subPayNote" rows="2"></textarea></div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="subcontracting-pay-save" data-id="${esc(id)}">Ghi nhận thanh toán</button>`});}
+function subcontractingSavePayment(id){const o=subcontractV3Orders().find(x=>x.id===id);if(!o||!o.reconciledAt){Toast.warn('Chưa đối chiếu công nợ','Không thể thanh toán trước khi đối chiếu.');return;}const debt=subcontractDebt(o),amt=parseMoney($('#subPayAmount')?.value||0);if(amt<=0||amt>debt+1e-9){Toast.err('Số tiền không hợp lệ',`Số tiền phải từ 1 đến ${fmtVND(debt)}.`);return;}o.paid=Number(o.paid||0)+amt;(o.payments||(o.payments=[])).unshift({date:subcontractToday(),amount:amt,note:$('#subPayNote')?.value?.trim()||'',by:DB.currentUser?.id||''});subcontractPersist();Modal.close();render();Toast.ok('Đã ghi nhận thanh toán',`${id} · ${fmtVND(amt)}`);}
 
 
 /* ========================================================================== 

@@ -14,12 +14,14 @@ const InventoryAPI = (() => {
   const SETTINGS_TABLE = KIO_CONFIG.inventorySettingsTable;
   const CACHE_KEY = KIO_CONFIG.storageKeys.inventoryCache;
   const DEMO_SEED_KEY = KIO_CONFIG.storageKeys.inventoryDemoSeed;
+  const DELIVERY_TEST_SEED_VERSION = '20260916-finished-1000-v1';
 
   const DEMO_DATA = KioDataUtils.snapshotCollections(TABLES);
   const DEMO_SETTINGS = {
     id: 'INVENTORY_SETTINGS',
     inventoryAlertConfig: KioDataUtils.clone(DB.inventoryAlertConfig || {}),
     finishedMinStock: KioDataUtils.clone(DB.finishedMinStock || {}),
+    testDataVersions: {},
   };
 
   let syncTimer = null;
@@ -110,6 +112,7 @@ const InventoryAPI = (() => {
       id: 'INVENTORY_SETTINGS',
       inventoryAlertConfig: KioDataUtils.clone(DB.inventoryAlertConfig || {}),
       finishedMinStock: KioDataUtils.clone(DB.finishedMinStock || {}),
+      testDataVersions: KioDataUtils.clone(DB.inventoryTestDataVersions || {}),
     };
     return out;
   }
@@ -333,6 +336,44 @@ const InventoryAPI = (() => {
     return data;
   }
 
+
+  // [SALES RESERVATION RECONCILIATION]
+  // qtyReserved chỉ hợp lệ khi có phiếu SALES_ISSUE đang PENDING_CONFIRMATION.
+  // Dọn các giữ chỗ legacy/orphan để Tồn kho không còn hiển thị giữ chỗ khi
+  // không còn chứng từ xuất bán tương ứng. Không trừ/cộng qtyOnHand.
+  async function reconcileSalesReservations({ persist = false } = {}) {
+    const inventory = Array.isArray(DB.inventory) ? DB.inventory : [];
+    const issues = Array.isArray(DB.goodsIssues) ? DB.goodsIssues : [];
+    const expected = new Map();
+    issues
+      .filter(gi => gi?.type === 'SALES_ISSUE' && gi?.status === 'PENDING_CONFIRMATION')
+      .forEach(gi => (gi.items || []).forEach(it => {
+        const key = inventoryBalanceIdentity({
+          productId: it.productId || it.materialId,
+          warehouseId: it.warehouseId || gi.warehouseId,
+          locationId: it.locationId,
+          lotId: it.lotId,
+        });
+        expected.set(key, Number(expected.get(key) || 0) + Number(it.qty || 0));
+      }));
+    let changed = false;
+    inventory.forEach(row => {
+      const want = Math.max(0, Math.round(Number(expected.get(inventoryBalanceIdentity(row)) || 0) * 10000) / 10000);
+      const current = Math.max(0, Number(row.qtyReserved || 0));
+      if (Math.abs(current - want) > 1e-9) {
+        row.qtyReserved = want;
+        row.qtyAvailable = Math.max(0, Math.round((Number(row.qtyOnHand || 0) - want) * 10000) / 10000);
+        row.lastUpdated = row.lastUpdated || new Date().toISOString();
+        changed = true;
+      }
+    });
+    if (changed && persist) {
+      await KioStore.syncCollection(TABLES.inventory, inventory);
+      console.info('[InventoryAPI] Đã đối soát giữ chỗ bán theo phiếu SALES_ISSUE đang chờ xác nhận.');
+    }
+    return changed;
+  }
+
   function apply(data) {
     Object.keys(TABLES).forEach(key => {
       if (!Array.isArray(data?.[key])) return;
@@ -351,6 +392,9 @@ const InventoryAPI = (() => {
     if (data?.settings?.finishedMinStock && typeof data.settings.finishedMinStock === 'object') {
       DB.finishedMinStock = data.settings.finishedMinStock;
     }
+    if (data?.settings?.testDataVersions && typeof data.settings.testDataVersions === 'object') {
+      DB.inventoryTestDataVersions = { ...data.settings.testDataVersions };
+    }
   }
 
   // OPTION A: bổ sung demo còn thiếu, nhưng server luôn thắng khi trùng key.
@@ -360,6 +404,16 @@ const InventoryAPI = (() => {
 
     for (const [key, table] of Object.entries(TABLES)) {
       const remote = Array.isArray(serverData?.[key]) ? serverData[key] : [];
+
+      // [REAL DATA] Thành phẩm là master thật trên KIO. Không seed/merge DB.products
+      // demo vào lenam_finished_products khi mở hệ thống trên máy/trình duyệt mới.
+      // Nếu server chưa có packedWeightG/shelfLifeDays, người dùng khai báo trực tiếp trong form
+      // Thành phẩm rồi InventoryAPI sẽ sync field đó lên server như các field master khác.
+      if (key === 'products') {
+        merged[key] = remote;
+        continue;
+      }
+
       const demo = Array.isArray(DEMO_DATA[key]) ? DEMO_DATA[key] : [];
       const remoteKeys = new Set(
         remote.map((item, index) => KioDataUtils.recordKey(item, index))
@@ -404,6 +458,7 @@ const InventoryAPI = (() => {
             id: 'INVENTORY_SETTINGS',
             inventoryAlertConfig: DB.inventoryAlertConfig || {},
             finishedMinStock: DB.finishedMinStock || {},
+            testDataVersions: DB.inventoryTestDataVersions || {},
           }]);
           continue;
         }
@@ -468,9 +523,152 @@ const InventoryAPI = (() => {
     return serverData;
   }
 
+  function stablePackedWeightG(productId) {
+    const text = String(productId || 'TP');
+    let hash = 0;
+    for (let i = 0; i < text.length; i += 1) hash = ((hash * 31) + text.charCodeAt(i)) >>> 0;
+    // 250g -> 790g, bước 10g: đủ khác nhau để test tải xe nhưng vẫn hợp lý cho thành phẩm thực phẩm.
+    return 250 + (hash % 55) * 10;
+  }
+
+  function datePlusDaysLocal(dateText, days) {
+    const d = new Date(`${dateText}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return '';
+    d.setDate(d.getDate() + Math.max(0, Number(days || 0)));
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
+  // [ONE-TIME SERVER TEST DATA]
+  // Chuẩn bị dữ liệu thật trên KIO để test Logistics:
+  // - Mỗi thành phẩm có tổng tồn khả dụng nền = 1.000 ĐVT, phân bổ qua các kho thành phẩm hiện có.
+  // - Mỗi thành phẩm có khối lượng đóng gói khác nhau (gram) để tính tải xe.
+  // - Chỉ chạy một lần trên toàn server nhờ marker trong lenam_inventory_settings.
+  // Sau khi marker đã được ghi, các thay đổi tồn kho thực tế về sau KHÔNG bị reset lại 1.000.
+  async function ensureFinishedDeliveryTestData() {
+    const settingsRows = await KioStore.listCollection(SETTINGS_TABLE);
+    let settings = settingsRows.find(x => x?.id === 'INVENTORY_SETTINGS') || {
+      id:'INVENTORY_SETTINGS',
+      inventoryAlertConfig: DB.inventoryAlertConfig || {},
+      finishedMinStock: DB.finishedMinStock || {},
+      testDataVersions: {},
+    };
+    if (settings?.testDataVersions?.finishedDelivery === DELIVERY_TEST_SEED_VERSION) {
+      DB.inventoryTestDataVersions = { ...(settings.testDataVersions || {}) };
+      return false;
+    }
+
+    const [products, inventory, lots, warehouses, locations, goodsIssues] = await Promise.all([
+      KioStore.listCollection(TABLES.products),
+      KioStore.listCollection(TABLES.inventory),
+      KioStore.listCollection(TABLES.inventoryLots),
+      KioStore.listCollection(TABLES.warehouses),
+      KioStore.listCollection(TABLES.warehouseLocations),
+      KioStore.listCollection(TABLES.goodsIssues),
+    ]);
+    if (!products.length) return false;
+
+    const finishedWarehouses = warehouses.filter(w =>
+      String(w?.type || '').toUpperCase() === 'FINISHED_GOODS' &&
+      String(w?.status || 'active').toLowerCase() !== 'inactive'
+    );
+    const targets = finishedWarehouses.map(w => ({
+      wh: w,
+      loc: locations.find(l => l?.warehouseId === w.id && String(l?.status || 'active').toLowerCase() !== 'inactive') || null,
+    })).filter(x => x.loc);
+    if (!targets.length) throw new Error('Không tìm thấy Kho thành phẩm có Kệ/Vị trí để tạo tồn test.');
+
+    const finishedWarehouseIds = new Set(finishedWarehouses.map(w => w.id));
+    const productIds = new Set(products.map(p => p.id));
+    const keptInventory = inventory.filter(row => !(productIds.has(row?.productId) && finishedWarehouseIds.has(row?.warehouseId)));
+    const nextLots = Array.isArray(lots) ? lots.slice() : [];
+    const lotIds = new Set(nextLots.map(l => String(l?.id || '')));
+    const now = new Date();
+    const todayText = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+
+    products.forEach((product, productIndex) => {
+      const packedWeightG = stablePackedWeightG(product.id);
+      product.packedWeightG = packedWeightG;
+      product.packedWeightKg = Math.round((packedWeightG / 1000) * 1000000) / 1000000;
+
+      const base = Math.floor(1000 / targets.length);
+      let remaining = 1000;
+      targets.forEach((target, index) => {
+        const qty = index === targets.length - 1 ? remaining : base;
+        remaining -= qty;
+        const safeProduct = String(product.id || `P${productIndex+1}`).replace(/[^A-Za-z0-9]/g,'');
+        const safeWh = String(target.wh.id || `W${index+1}`).replace(/[^A-Za-z0-9]/g,'');
+        let lotId = `LOT-TEST-${safeProduct}-${safeWh}`;
+        if (!lotIds.has(lotId)) {
+          lotIds.add(lotId);
+          nextLots.push({
+            id:lotId,
+            lotNumber:`TEST-${product.id}-${target.wh.code || target.wh.id}`,
+            productId:product.id,
+            productionDate:todayText,
+            mfgDate:todayText,
+            expiryDate:Number(product.shelfLifeDays||0)>0 ? datePlusDaysLocal(todayText, Number(product.shelfLifeDays)) : '',
+            qcStatus:'PASSED',
+            status:'active',
+            sourceType:'LOGISTICS_TEST_DATA',
+            createdAt:new Date().toISOString(),
+          });
+        }
+        keptInventory.push({
+          productId:product.id,
+          warehouseId:target.wh.id,
+          locationId:target.loc.id,
+          lotId,
+          qtyOnHand:qty,
+          qtyReserved:0,
+          qtyAvailable:qty,
+          qtyPending:0,
+          qtyRejected:0,
+          unit:product.unit || '',
+          sourceType:'LOGISTICS_TEST_DATA',
+          sourceId:DELIVERY_TEST_SEED_VERSION,
+          lastUpdated:new Date().toISOString(),
+        });
+      });
+    });
+
+    // Áp vào DB trước để đối soát giữ chỗ SALES_ISSUE thật đang chờ xác nhận.
+    DB.products = products;
+    DB.inventory = keptInventory;
+    DB.inventoryLots = nextLots;
+    DB.goodsIssues = goodsIssues;
+    await reconcileSalesReservations({ persist:false });
+
+    settings = {
+      ...settings,
+      inventoryAlertConfig: settings.inventoryAlertConfig || DB.inventoryAlertConfig || {},
+      finishedMinStock: settings.finishedMinStock || DB.finishedMinStock || {},
+      testDataVersions: {
+        ...(settings.testDataVersions || {}),
+        finishedDelivery: DELIVERY_TEST_SEED_VERSION,
+      },
+    };
+    DB.inventoryTestDataVersions = { ...(settings.testDataVersions || {}) };
+
+    await KioStore.replaceCollection(TABLES.products, products);
+    await KioStore.replaceCollection(TABLES.inventoryLots, nextLots);
+    await KioStore.replaceCollection(TABLES.inventory, DB.inventory);
+    await KioStore.syncCollection(SETTINGS_TABLE, [settings]);
+    writeCache(snapshotCurrentDb());
+    console.info(`[InventoryAPI] Đã tạo dữ liệu test Logistics trên KIO: ${products.length} thành phẩm, mỗi thành phẩm tổng tồn 1.000 ĐVT.`);
+    return true;
+  }
+
   async function bootstrap() {
     if (booted) return true;
     booted = true;
+    try {
+      await ensureFinishedDeliveryTestData();
+    } catch (err) {
+      console.warn('[InventoryAPI] Không thể chuẩn bị tồn thành phẩm test trên KIO:', err);
+    }
     const cached = readCache();
 
     // [PERFORMANCE] Chỉ nạp cache/data.js ở lúc boot. Không đọc toàn bộ bảng
@@ -517,6 +715,10 @@ const InventoryAPI = (() => {
       }
     }
 
+    if (wanted.includes('inventory') || wanted.includes('goodsIssues')) {
+      try { await reconcileSalesReservations({ persist: wanted.includes('inventory') && wanted.includes('goodsIssues') }); }
+      catch (err) { console.warn('[InventoryAPI] Không đối soát được giữ chỗ bán:', err); }
+    }
     if (Object.keys(out).length) writeCache(snapshotCurrentDb());
     return out;
   }
@@ -542,7 +744,9 @@ const InventoryAPI = (() => {
     }
     if (hasData(data)) {
       apply(data);
-      Object.keys(TABLES).forEach(key => lastRefresh.set(key, Date.now()));      writeCache(snapshotCurrentDb());
+      await reconcileSalesReservations({ persist: true });
+      Object.keys(TABLES).forEach(key => lastRefresh.set(key, Date.now()));
+      writeCache(snapshotCurrentDb());
     }
     return data;
   }
@@ -568,7 +772,9 @@ const InventoryAPI = (() => {
     'inv-save-alert-config': () => ['settings'],
     // Nhà hàng/POS: khi thanh toán mới phát sinh trừ tồn và ledger kho cửa hàng.
     'restaurant-pos-save': () => ['inventory', 'inventoryTransactions'],
+    'restaurant-pos-checkout-confirm': () => ['inventory', 'inventoryTransactions'],
     'restaurant-order-pay': () => ['inventory', 'inventoryTransactions'],
+    'restaurant-replenishment-fulfill-save': () => ['stockTransfers', 'inventory', 'inventoryTransactions'],
   };
 
   function wrapActions(actions) {
@@ -616,5 +822,6 @@ const InventoryAPI = (() => {
     scheduleCollections,
     cacheCurrent,
     wrapActions,
+    ensureFinishedDeliveryTestData,
   };
 })();

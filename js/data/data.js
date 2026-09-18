@@ -94,10 +94,6 @@ const PURCHASE_INVENTORY_CONFIG = {
       label: 'Đơn đặt hàng'
     },
     {
-      id: 'debts',
-      label: 'Công nợ nhà cung cấp'
-    },
-    {
       id: 'price_history',
       label: 'Lịch sử giá mua'
     },
@@ -222,7 +218,7 @@ const PURCHASE_INVENTORY_CONFIG = {
     },
     {
       id: 'locations',
-      label: 'Vị trí lưu trữ',
+      label: 'Quản lý kho',
       route: 'inv-warehouses'
     },
     {
@@ -590,6 +586,8 @@ const STATUS = {
   QUARANTINE:      { label: 'Cách ly',       tone: 'purple' },
   // Chuyển kho
   IN_TRANSIT:      { label: 'Đang đi đường',  tone: 'teal' },
+  COMPLETED:       { label: 'Đã hoàn thành',   tone: 'green' },
+  ISSUED:          { label: 'Đã xuất kho',     tone: 'blue' },
 };
 
 /* ---------------------------------------------------------------------------
@@ -1634,32 +1632,45 @@ DB.supplierQuotations.unshift(
   { id: 'BG-NCC-006', prId: 'YCM-2026-0042', supplierId: 'NCC-04', date: '2026-08-15', validUntil: '2026-08-29', leadTimeDays: 3, paymentTerm: 'Thanh toán COD', selected: true, note: 'Báo giá đường và muối ăn', items: [{ materialId: 'VT-005', name: 'Đường cát trắng', unit: 'Kg', qty: 300, price: 22000, amount: 6600000 }, { materialId: 'VT-007', name: 'Muối ăn tinh', unit: 'Kg', qty: 60, price: 8000, amount: 480000 }], total: 7080000 }
 );
 
-/* ---- Danh mục kho ---------------------------------------------------------
- * Mỗi bản ghi là MỘT KHO VẬT LÝ tại một địa điểm cụ thể.
- * `type` dùng để gom theo 3 nhóm nghiệp vụ chính: RAW_MATERIAL,
- * SEMI_FINISHED, FINISHED_GOODS. Kệ/vị trí nằm trong warehouseLocations.
+/* ---- Kho vật lý (địa điểm) -----------------------------------------------
+ * `warehouseSites` là danh sách kho theo địa điểm thực tế: Thủ Đức, Bình Dương,
+ * Đồng Nai... Đây là master hiển thị trong menu Quản lý kho.
+ *
+ * `warehouses` bên dưới được giữ nguyên làm các KHU NGHIỆP VỤ nội bộ để không
+ * thay đổi logic nhập/xuất/QC hiện hữu. Mỗi khu trỏ về một kho vật lý bằng siteId.
+ * ------------------------------------------------------------------------- */
+DB.warehouseSites = [
+  { id:'SITE-TD', code:'TD', name:'Kho Thủ Đức', address:'128 Lê Văn Việt, TP. Thủ Đức, TP.HCM', province:'Thành phố Hồ Chí Minh', district:'TP. Thủ Đức', ward:'', addressDetail:'128 Lê Văn Việt', managerId:'NV-018', status:'active', note:'Kho trung tâm Thủ Đức' },
+  { id:'SITE-BD', code:'BD', name:'Kho Bình Dương', address:'KCN Sóng Thần, Dĩ An, Bình Dương', province:'Bình Dương', district:'Dĩ An', ward:'', addressDetail:'KCN Sóng Thần', managerId:'NV-018', status:'active', note:'Kho khu vực Bình Dương' },
+  { id:'SITE-DN', code:'DN', name:'Kho Đồng Nai', address:'KCN Biên Hòa 2, Đồng Nai', province:'Đồng Nai', district:'Biên Hòa', ward:'', addressDetail:'KCN Biên Hòa 2', managerId:'NV-018', status:'active', note:'Kho khu vực Đồng Nai' },
+];
+
+/* ---- Khu nghiệp vụ bên trong từng kho vật lý -----------------------------
+ * Giữ nguyên id/type để toàn bộ chứng từ và tồn kho cũ tiếp tục hoạt động.
+ * UI Quản lý kho sẽ gọi các record này là KHU thay vì Kho.
  * ------------------------------------------------------------------------- */
 DB.warehouses = [
   // KHO NGUYÊN LIỆU
-  { id: 'WH-001', code: 'RAW_TD', name: 'Kho Nguyên liệu - Thủ Đức', type: 'RAW_MATERIAL', address: '128 Lê Văn Việt, TP. Thủ Đức, TP.HCM', managerId: 'NV-018', status: 'active', note: 'Kho nguyên liệu trung tâm phục vụ nhà máy Thủ Đức' },
-  { id: 'WH-008', code: 'RAW_BD', name: 'Kho Nguyên liệu - Bình Dương', type: 'RAW_MATERIAL', address: 'KCN Sóng Thần, Dĩ An, Bình Dương', managerId: 'NV-018', status: 'active', note: 'Kho vệ tinh nguyên liệu phục vụ sản xuất Bình Dương' },
-  { id: 'WH-009', code: 'RAW_DN', name: 'Kho Nguyên liệu - Đồng Nai', type: 'RAW_MATERIAL', address: 'KCN Biên Hòa 2, Đồng Nai', managerId: 'NV-018', status: 'active', note: 'Kho dự trữ nguyên liệu khu vực Đồng Nai' },
+  { id: 'WH-001', siteId: 'SITE-TD', code: 'RAW_TD', name: 'Kho Nguyên liệu - Thủ Đức', type: 'RAW_MATERIAL', address: '128 Lê Văn Việt, TP. Thủ Đức, TP.HCM', managerId: 'NV-018', status: 'active', note: 'Kho nguyên liệu trung tâm phục vụ nhà máy Thủ Đức' },
+  { id: 'WH-008', siteId: 'SITE-BD', code: 'RAW_BD', name: 'Kho Nguyên liệu - Bình Dương', type: 'RAW_MATERIAL', address: 'KCN Sóng Thần, Dĩ An, Bình Dương', managerId: 'NV-018', status: 'active', note: 'Kho vệ tinh nguyên liệu phục vụ sản xuất Bình Dương' },
+  { id: 'WH-009', siteId: 'SITE-DN', code: 'RAW_DN', name: 'Kho Nguyên liệu - Đồng Nai', type: 'RAW_MATERIAL', address: 'KCN Biên Hòa 2, Đồng Nai', managerId: 'NV-018', status: 'active', note: 'Kho dự trữ nguyên liệu khu vực Đồng Nai' },
 
   // KHO BÁN THÀNH PHẨM
-  { id: 'WH-003', code: 'SEMI_TD', name: 'Kho Bán thành phẩm - Thủ Đức', type: 'SEMI_FINISHED', address: 'Xưởng sản xuất Thủ Đức, TP.HCM', managerId: 'NV-007', status: 'active', note: 'BTP sau đông tụ/ép khuôn chờ công đoạn tiếp theo' },
-  { id: 'WH-011', code: 'SEMI_BD', name: 'Kho Bán thành phẩm - Bình Dương', type: 'SEMI_FINISHED', address: 'Xưởng Bình Dương, Dĩ An, Bình Dương', managerId: 'NV-007', status: 'active', note: 'BTP điều phối giữa các dây chuyền Bình Dương' },
-  { id: 'WH-014', code: 'SEMI_DN', name: 'Kho Bán thành phẩm - Đồng Nai', type: 'SEMI_FINISHED', address: 'KCN Biên Hòa 2, Đồng Nai', managerId: 'NV-007', status: 'active', note: 'Kho BTP dự phòng cho điểm sản xuất Đồng Nai' },
+  { id: 'WH-003', siteId: 'SITE-TD', code: 'SEMI_TD', name: 'Kho Bán thành phẩm - Thủ Đức', type: 'SEMI_FINISHED', address: 'Xưởng sản xuất Thủ Đức, TP.HCM', managerId: 'NV-007', status: 'active', note: 'BTP sau đông tụ/ép khuôn chờ công đoạn tiếp theo' },
+  { id: 'WH-011', siteId: 'SITE-BD', code: 'SEMI_BD', name: 'Kho Bán thành phẩm - Bình Dương', type: 'SEMI_FINISHED', address: 'Xưởng Bình Dương, Dĩ An, Bình Dương', managerId: 'NV-007', status: 'active', note: 'BTP điều phối giữa các dây chuyền Bình Dương' },
+  { id: 'WH-014', siteId: 'SITE-DN', code: 'SEMI_DN', name: 'Kho Bán thành phẩm - Đồng Nai', type: 'SEMI_FINISHED', address: 'KCN Biên Hòa 2, Đồng Nai', managerId: 'NV-007', status: 'active', note: 'Kho BTP dự phòng cho điểm sản xuất Đồng Nai' },
 
   // KHO THÀNH PHẨM
-  { id: 'WH-004', code: 'FIN_TD', name: 'Kho Thành phẩm - Thủ Đức', type: 'FINISHED_GOODS', address: '128 Lê Văn Việt, TP. Thủ Đức, TP.HCM', managerId: 'NV-018', status: 'active', note: 'Kho thành phẩm trung tâm, bảo quản theo điều kiện sản phẩm' },
-  { id: 'WH-012', code: 'FIN_BD', name: 'Kho Thành phẩm - Bình Dương', type: 'FINISHED_GOODS', address: 'KCN Sóng Thần, Dĩ An, Bình Dương', managerId: 'NV-018', status: 'active', note: 'Kho thành phẩm khu vực Bình Dương' },
-  { id: 'WH-013', code: 'FIN_DN', name: 'Kho Thành phẩm - Đồng Nai', type: 'FINISHED_GOODS', address: 'KCN Biên Hòa 2, Đồng Nai', managerId: 'NV-018', status: 'active', note: 'Kho thành phẩm khu vực Đồng Nai' },
+  { id: 'WH-004', siteId: 'SITE-TD', code: 'FIN_TD', name: 'Kho Thành phẩm - Thủ Đức', type: 'FINISHED_GOODS', address: '128 Lê Văn Việt, TP. Thủ Đức, TP.HCM', managerId: 'NV-018', status: 'active', note: 'Kho thành phẩm trung tâm, bảo quản theo điều kiện sản phẩm' },
+  { id: 'WH-012', siteId: 'SITE-BD', code: 'FIN_BD', name: 'Kho Thành phẩm - Bình Dương', type: 'FINISHED_GOODS', address: 'KCN Sóng Thần, Dĩ An, Bình Dương', managerId: 'NV-018', status: 'active', note: 'Kho thành phẩm khu vực Bình Dương' },
+  { id: 'WH-013', siteId: 'SITE-DN', code: 'FIN_DN', name: 'Kho Thành phẩm - Đồng Nai', type: 'FINISHED_GOODS', address: 'KCN Biên Hòa 2, Đồng Nai', managerId: 'NV-018', status: 'active', note: 'Kho thành phẩm khu vực Đồng Nai' },
 
   // KHO PHỤ TRỢ - giữ nguyên cho các nghiệp vụ hiện có
-  { id: 'WH-002', code: 'PRODUCTION', name: 'Kho Phân xưởng sản xuất', type: 'PRODUCTION', address: 'Khu A - Phân xưởng sản xuất', managerId: 'NV-005', status: 'active', note: 'Kho đệm trung chuyển tại khu sản xuất' },
-  { id: 'WH-005', code: 'STORE', name: 'Kho Cửa hàng Quận 9', type: 'STORE', address: '128 Lê Văn Việt, TP. Thủ Đức, TP.HCM', managerId: 'NV-004', status: 'active', note: 'Kho cửa hàng bán lẻ' },
-  { id: 'WH-006', code: 'DEFECTIVE', name: 'Kho Hàng lỗi / Tiêu hủy', type: 'DEFECTIVE', address: 'Khu xử lý phế phẩm', managerId: 'NV-015', status: 'active', note: 'Chứa hàng lỗi chờ xử lý' },
-  { id: 'WH-007', code: 'RETURNED', name: 'Kho Hàng trả về', type: 'RETURNED', address: 'Khu tiếp nhận trả hàng', managerId: 'NV-019', status: 'active', note: 'Tiếp nhận hàng trả từ khách hàng' }
+  { id: 'WH-002', siteId: 'SITE-TD', code: 'PRODUCTION', name: 'Kho Phân xưởng sản xuất', type: 'PRODUCTION', address: 'Khu A - Phân xưởng sản xuất', managerId: 'NV-005', status: 'active', note: 'Kho đệm trung chuyển tại khu sản xuất' },
+  { id: 'WH-005', siteId: 'SITE-TD', code: 'STORE_LVV', name: 'Kho Cửa hàng Lê Văn Việt', type: 'STORE', address: '128 Lê Văn Việt, TP. Thủ Đức, TP.HCM', managerId: 'NV-004', status: 'active', note: 'Kho riêng của Cửa hàng Lê Văn Việt' },
+  { id: 'WH-015', siteId: 'SITE-TD', code: 'STORE_BD_TD', name: 'Kho Quầy Bún Đậu Thủ Đức', type: 'STORE', address: 'TP. Thủ Đức, TP.HCM', managerId: 'NV-004', status: 'active', note: 'Kho riêng của Quầy Bún Đậu Thủ Đức' },
+  { id: 'WH-006', siteId: 'SITE-TD', code: 'DEFECTIVE', name: 'Kho Hàng lỗi / Tiêu hủy', type: 'DEFECTIVE', address: 'Khu xử lý phế phẩm', managerId: 'NV-015', status: 'active', note: 'Chứa hàng lỗi chờ xử lý' },
+  { id: 'WH-007', siteId: 'SITE-TD', code: 'RETURNED', name: 'Kho Hàng trả về', type: 'RETURNED', address: 'Khu tiếp nhận trả hàng', managerId: 'NV-019', status: 'active', note: 'Tiếp nhận hàng trả từ khách hàng' }
 ];
 
 /* ---- Vị trí/kệ trong từng kho ------------------------------------------- */
@@ -1691,7 +1702,8 @@ DB.warehouseLocations = [
   { id: 'LOC-021', warehouseId: 'WH-013', code: 'DN-FIN-T1', name: 'Kệ T1 - Thành phẩm', parentLocation: '', locationType: 'SHELF', capacity: 4000, currentUsage: 480, status: 'active' },
 
   // Kho phụ trợ
-  { id: 'LOC-009', warehouseId: 'WH-005', code: 'STORE-M1', name: 'Tủ mát M1', parentLocation: '', locationType: 'SHELF', capacity: 1000, currentUsage: 350, status: 'active' },
+  { id: 'LOC-009', warehouseId: 'WH-005', code: 'LVV-M1', name: 'Kệ/Tủ M1 - Cửa hàng Lê Văn Việt', parentLocation: '', locationType: 'SHELF', capacity: 1000, currentUsage: 350, status: 'active' },
+  { id: 'LOC-024', warehouseId: 'WH-015', code: 'BDTD-M1', name: 'Kệ/Tủ M1 - Quầy Bún Đậu Thủ Đức', parentLocation: '', locationType: 'SHELF', capacity: 1000, currentUsage: 0, status: 'active' },
   { id: 'LOC-010', warehouseId: 'WH-006', code: 'DEF-D1', name: 'Kệ D1 - Chờ xử lý', parentLocation: '', locationType: 'SHELF', capacity: 1000, currentUsage: 50, status: 'active' },
   { id: 'LOC-023', warehouseId: 'WH-007', code: 'RET-R1', name: 'Kệ R1 - Hàng khách trả', parentLocation: '', locationType: 'SHELF', capacity: 2000, currentUsage: 0, status: 'active' }
 ];
@@ -1773,27 +1785,6 @@ DB.inventory.push(
   { productId: 'SP-002', warehouseId: 'WH-012', locationId: 'LOC-020', lotId: 'LOT-SP002-001', qtyOnHand: 160, qtyReserved: 20, qtyAvailable: 140, unit: 'Khối', lastUpdated: '2026-09-07 08:00' }
 );
 
-/* Tồn nguyên liệu tại kho cửa hàng, dùng cho POS và không gộp với kho NVL chính. */
-DB.inventory.push(
-  { productId: 'VT-001', warehouseId: 'WH-005', locationId: 'LOC-009', lotId: 'LOT-VT001-002', qtyOnHand: 80, qtyReserved: 0, qtyAvailable: 80, unit: 'Kg', lastUpdated: '2026-08-28 07:00' },
-  { productId: 'VT-004', warehouseId: 'WH-005', locationId: 'LOC-009', lotId: 'LOT-VT004-001', qtyOnHand: 20, qtyReserved: 0, qtyAvailable: 20, unit: 'Lít', lastUpdated: '2026-08-28 07:00' },
-  { productId: 'VT-011', warehouseId: 'WH-005', locationId: 'LOC-009', lotId: 'LOT-VT001-002', qtyOnHand: 200, qtyReserved: 0, qtyAvailable: 200, unit: 'Cái', lastUpdated: '2026-08-28 07:00' },
-  { productId: 'VT-020', warehouseId: 'WH-005', locationId: 'LOC-009', lotId: 'LOT-VT004-001', qtyOnHand: 10, qtyReserved: 0, qtyAvailable: 10, unit: 'Kg', lastUpdated: '2026-08-28 07:00' },
-);
-
-/* ---- Dữ liệu Nhà hàng & POS: công thức dùng chung nguyên liệu kho ---- */
-DB.stores = [
-  { id: 'STORE-001', code: 'CH-001', name: 'Cửa hàng Lê Văn Việt', warehouseId: 'WH-005', address: 'Quận 9, TP. Hồ Chí Minh', status: 'active' },
-  { id: 'STORE-002', code: 'CH-002', name: 'Quầy Bún Đậu Thủ Đức', warehouseId: 'WH-005', address: 'TP. Thủ Đức, TP. Hồ Chí Minh', status: 'active' },
-];
-DB.restaurantRecipes = [
-  { id: 'MON-001', name: 'Bún đậu mắm tôm Lê Nam', group: 'Món chính', price: 45000, unit: 'Suất', active: true, items: [{ materialId: 'VT-001', quantity: 0.08, unit: 'Kg' }, { materialId: 'VT-004', quantity: 0.01, unit: 'Lít' }, { materialId: 'VT-020', quantity: 0.015, unit: 'Kg' }] },
-  { id: 'MON-002', name: 'Đậu hủ chiên giòn', group: 'Món ăn nhanh', price: 30000, unit: 'Phần', active: true, items: [{ materialId: 'VT-001', quantity: 0.12, unit: 'Kg' }, { materialId: 'VT-004', quantity: 0.02, unit: 'Lít' }] },
-  { id: 'MON-003', name: 'Sữa đậu nành tươi', group: 'Đồ uống', price: 18000, unit: 'Chai', active: true, items: [{ materialId: 'VT-001', quantity: 0.1, unit: 'Kg' }, { materialId: 'VT-011', quantity: 1, unit: 'Cái' }] },
-];
-DB.posOrders = [
-  { id: 'POS-2026-0001', storeId: 'STORE-001', shift: 'Ca sáng', employeeId: 'NV-004', date: '2026-08-28', items: [{ recipeId: 'MON-001', quantity: 12, price: 45000 }], payment: 'Tiền mặt', status: 'PAID' },
-];
 DB.subcontractingOrders = [
   { id: 'GC-2026-001', partner: 'Cơ sở Đậu Hủ Tân Phúc', productId: 'SP-002', plannedQty: 500, issuedQty: 300, receivedQty: 0, goodQty: 0, defectQty: 0, issueDate: '2026-08-20', dueDate: '2026-08-30', status: 'IN_PROGRESS', unitCost: 2500, paid: 0 },
   { id: 'GC-2026-002', partner: 'Xưởng Đóng Gói An Bình', productId: 'SP-003', plannedQty: 2000, issuedQty: 2000, receivedQty: 1980, goodQty: 1970, defectQty: 10, issueDate: '2026-08-18', dueDate: '2026-08-25', status: 'COMPLETED', unitCost: 800, paid: 1200000 },
@@ -1887,6 +1878,10 @@ DB.supplierPayments = [
   { id: 'TT-2026-0088', poId: 'PO-2026-0037', supplierId: 'NCC-08', date: '2026-08-09', amount: 2000000, method: 'Chuyển khoản', bankRef: 'FT2608091122', note: 'Tạm ứng PO-0037 hóa chất vệ sinh', createdBy: 'NV-023' },
   { id: 'TT-2026-0087', poId: 'PO-2026-0035', supplierId: 'NCC-01', date: '2026-08-05', amount: 121000000, method: 'Chuyển khoản', bankRef: 'FT2608053421', note: 'Tất toán PO-0035 đậu nành', createdBy: 'NV-022' },
 ];
+
+/* ---- Hoàn tiền từ Nhà cung cấp do trả hàng / trả dư ---- */
+DB.supplierRefunds = DB.supplierRefunds || [];
+
 
 /* ---- Lịch sử giá mua nguyên vật liệu ---- */
 DB.purchasePriceHistory = [
@@ -2390,7 +2385,13 @@ const Q = {
   customer: (id) => DB.customers.find((c) => c.id === id),
   customerName: (id) => (Q.customer(id) || {}).name || '—',
   employee: (id) => DB.employees.find((e) => e.id === id),
-  employeeName: (id) => (Q.employee(id) || {}).name || '—',
+  employeeName: (id) => {
+    const emp = Q.employee(id);
+    if (emp?.name) return emp.name;
+    const user = (DB.users || []).find(u => String(u.id) === String(id) || String(u.empId || '') === String(id));
+    if (user) return String(user.username || '').toLowerCase() === 'admin' || user.roleId === 'ROLE_ADMIN' ? 'Admin' : (user.fullName || user.name || user.username || '—');
+    return '—';
+  },
   product: (id) => DB.products.find((p) => p.id === id),
   material: (id) => DB.materials.find((m) => m.id === id),
   supplier: (id) => DB.suppliers.find((s) => s.id === id),

@@ -309,9 +309,19 @@ function openCustomerCareModal(customerId) {
 
 function customerDrawerBody(c) {
   const tab = State.customerTab || 'overview';
-  const orders = Q.ordersOf(c.id).sort((a, b) => b.date.localeCompare(a.date));
+  const orders = Q.ordersOf(c.id).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.id || '').localeCompare(String(a.id || '')));
   const contracts = Q.contractsOf(c.id);
   const revenue = typeof SalesCRM !== 'undefined' ? SalesCRM.revenueOfCustomer(c.id) : Q.revenueOf(c.id);
+  const debtOrders = orders.filter((o) => ['dh_da_giao', 'dh_hoan_tat'].includes(o.status));
+  const customerPaidTotal = typeof SalesCRM !== 'undefined'
+    ? debtOrders.reduce((s, o) => s + SalesCRM.paidOfOrder(o.id), 0)
+    : 0;
+  const customerReceivable = typeof SalesCRM !== 'undefined'
+    ? debtOrders.reduce((s, o) => s + SalesCRM.receivableOfOrder(o), 0)
+    : Number(c.debt || 0);
+  const customerOverdue = typeof SalesCRM !== 'undefined'
+    ? debtOrders.reduce((s, o) => s + (SalesCRM.receivableStatus(o) === 'OVERDUE' ? SalesCRM.receivableOfOrder(o) : 0), 0)
+    : Number(c.debt || 0);
 
   const counts = { orders: orders.length, contracts: contracts.length };
 
@@ -327,7 +337,7 @@ function customerDrawerBody(c) {
       <div class="grid g-auto-sm" style="margin-bottom:16px">
         ${mkpi('Tổng đơn hàng', orders.length, 'fa-cart-flatbed', 'blue')}
         ${mkpi('Doanh số lũy kế', fmtShort(revenue), 'fa-sack-dollar', 'green')}
-        ${mkpi('Công nợ', fmtShort(c.debt), 'fa-file-invoice', c.debt > 0 ? 'red' : 'slate')}
+        ${mkpi('Công nợ', fmtShort(customerReceivable), 'fa-file-invoice', customerReceivable > 0 ? 'red' : 'slate')}
         ${mkpi('Hợp đồng', contracts.length, 'fa-file-contract', 'indigo')}
       </div>
       <div class="form-sec-title"><i class="fa-solid fa-building"></i>Thông tin doanh nghiệp</div>
@@ -382,25 +392,65 @@ function customerDrawerBody(c) {
   }
 
   if (tab === 'debt') {
-    const paidTotal = contracts.reduce((s, x) => s + x.paid, 0);
-    const valueTotal = contracts.reduce((s, x) => s + x.value, 0);
+    const statusBadge = (st) => ({
+      UNPAID: '<span class="badge slate">Chưa thanh toán</span>',
+      PARTIALLY_PAID: '<span class="badge orange">Thanh toán một phần</span>',
+      PAID: '<span class="badge green">Đã thanh toán</span>',
+      OVERDUE: '<span class="badge red">Quá hạn</span>'
+    }[st] || '<span class="badge slate">—</span>');
+
+    const totalReceivable = debtOrders.reduce((s, o) => s + Number(o.total || 0), 0);
+    const debtRows = debtOrders.map((o) => {
+      const paid = SalesCRM.paidOfOrder(o.id);
+      const remain = SalesCRM.receivableOfOrder(o);
+      const status = SalesCRM.receivableStatus(o);
+      const due = o.paymentDueDate || o.dueDate || '';
+      return `<tr class="clickable" data-act="open-order" data-id="${esc(o.id)}">
+        <td><span class="code">${esc(o.id)}</span></td>
+        <td class="num">${fmtDate(o.date)}</td>
+        <td class="num">${due ? fmtDate(due) : '—'}</td>
+        <td class="right num">${fmtVND(Number(o.total || 0))}</td>
+        <td class="right num" style="color:var(--green)">${fmtVND(paid)}</td>
+        <td class="right strong num" style="color:${remain > 0 ? 'var(--red)' : 'var(--text-3)'}">${fmtVND(remain)}</td>
+        <td>${statusBadge(status)}</td>
+      </tr>`;
+    });
+
+    const paymentRows = [...(DB.customerPayments || [])]
+      .filter((p) => String(p.customerId || '') === String(c.id || ''))
+      .sort((a, b) => String(b.createdAt || b.date || '').localeCompare(String(a.createdAt || a.date || '')) || String(b.id || '').localeCompare(String(a.id || '')))
+      .map((p) => `<tr>
+        <td><span class="code">${esc(p.id)}</span></td>
+        <td class="num">${fmtDate(p.date)}</td>
+        <td><span class="code">${esc(p.orderId || '—')}</span></td>
+        <td class="right strong num">${fmtVND(Number(p.amount || 0))}</td>
+        <td>${esc(p.method || '—')}</td>
+        <td>${esc(p.bankName || '—')}</td>
+        <td>${esc(p.payerName || p.collectedByName || '—')}</td>
+        <td class="muted">${esc(p.reference || p.bankRef || '')}</td>
+      </tr>`);
+
     inner = `
       <div class="grid g-auto-sm" style="margin-bottom:16px">
-        ${mkpi('Giá trị hợp đồng', fmtShort(valueTotal), 'fa-file-contract', 'blue')}
-        ${mkpi('Đã thanh toán', fmtShort(paidTotal), 'fa-money-bill-transfer', 'green')}
-        ${mkpi('Còn phải thu', fmtShort(valueTotal - paidTotal), 'fa-hourglass-half', 'orange')}
-        ${mkpi('Quá hạn', fmtShort(c.debt), 'fa-triangle-exclamation', c.debt > 0 ? 'red' : 'slate')}
+        ${mkpi('Tổng phải thu', fmtShort(totalReceivable), 'fa-file-invoice-dollar', 'blue')}
+        ${mkpi('Đã thu', fmtShort(customerPaidTotal), 'fa-money-bill-transfer', 'green')}
+        ${mkpi('Còn phải thu', fmtShort(customerReceivable), 'fa-hourglass-half', customerReceivable > 0 ? 'orange' : 'slate')}
+        ${mkpi('Quá hạn', fmtShort(customerOverdue), 'fa-triangle-exclamation', customerOverdue > 0 ? 'red' : 'slate')}
       </div>
-      ${tableShell(
-        [{ t: 'Chứng từ' }, { t: 'Ngày' }, { t: 'Giá trị', cls: 'right' }, { t: 'Đã trả', cls: 'right' }, { t: 'Còn lại', cls: 'right' }, { t: 'Tình trạng' }],
-        contracts.map((ct) => `<tr>
-          <td><span class="code">${ct.id}</span></td>
-          <td class="num">${fmtDate(ct.signDate)}</td>
-          <td class="right num">${fmtVND(ct.value)}</td>
-          <td class="right num" style="color:var(--green)">${fmtVND(ct.paid)}</td>
-          <td class="right strong num">${fmtVND(ct.remain)}</td>
-          <td>${ct.remain <= 0 ? '<span class="badge green">Đã tất toán</span>' : '<span class="badge orange">Còn dư nợ</span>'}</td></tr>`),
-        { emptyTitle: 'Không có công nợ', emptyDesc: 'Khách hàng không phát sinh công nợ.' })}`;
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head"><div><h3>Công nợ theo đơn hàng</h3><p>Đồng bộ trực tiếp với Công nợ khách hàng trong CRM.</p></div></div>
+        ${tableShell(
+          [{ t: 'Đơn hàng' }, { t: 'Ngày đơn' }, { t: 'Hạn thanh toán' }, { t: 'Tổng phải thu', cls: 'right' }, { t: 'Đã thu', cls: 'right' }, { t: 'Còn phải thu', cls: 'right' }, { t: 'Trạng thái' }],
+          debtRows,
+          { emptyTitle: 'Không có công nợ', emptyDesc: 'Khách hàng chưa có đơn hàng đã giao hoặc hoàn tất.' })}
+      </div>
+      <div class="card">
+        <div class="card-head"><div><h3>Lịch sử thu tiền</h3><p>Các lần thanh toán của khách hàng, giao dịch mới nhất hiển thị trước.</p></div></div>
+        ${tableShell(
+          [{ t: 'Mã thu' }, { t: 'Ngày' }, { t: 'Đơn hàng' }, { t: 'Số tiền', cls: 'right' }, { t: 'Phương thức' }, { t: 'Ngân hàng' }, { t: 'Người thực hiện' }, { t: 'Tham chiếu' }],
+          paymentRows,
+          { emptyTitle: 'Chưa có lịch sử thu tiền', emptyDesc: 'Các lần thu công nợ sẽ tự động xuất hiện tại đây.' })}
+      </div>`;
   }
 
   if (tab === 'history') {

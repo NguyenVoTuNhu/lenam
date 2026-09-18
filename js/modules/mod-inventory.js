@@ -161,6 +161,7 @@ function openInventoryItemForm(type = 'RAW_MATERIAL', id = '') {
       <div class="field"><label>Tồn kho tối thiểu</label><input class="inp right num" id="invItemMinStock" type="number" min="0" value="${item ? Number(isRaw ? item?.minStock || 0 : type==='FINISHED_GOODS' ? DB.finishedMinStock?.[item?.id] || 0 : item?.minStock || 0) : ''}" placeholder="0"></div>
       ${!item && (isRaw || type === 'FINISHED_GOODS') ? `<div class="field"><label>Số lượng ban đầu</label><input class="inp right num" id="invItemOpeningQty" type="number" min="0" step="any" value="" placeholder="0"><div class="cell-sub" style="margin-top:5px">Nếu nhập &gt; 0, hệ thống ghi nhận là <b>tồn đầu kỳ</b>. ${type === 'FINISHED_GOODS' ? 'Thành phẩm được đưa vào Kho thành phẩm và tạo lô mở đầu để có thể theo dõi/xuất bán.' : 'Không tạo PR/PO hay phiếu nhập mua hàng.'}</div></div>` : ''}
       ${!isRaw ? `<div class="field" style="grid-column:1/-1"><label>Quy cách / mô tả</label><input class="inp" id="invItemSpec" value="${esc(item?.spec || '')}" placeholder="Quy cách sản phẩm"></div>` : ''}
+      ${type === 'FINISHED_GOODS' ? `<div class="field"><label>Khối lượng đóng gói / 1 ${esc(item?.unit || 'ĐVT bán')} (g)</label><input class="inp right num" id="invItemPackedWeightG" type="number" inputmode="decimal" min="0" step="0.01" value="${item ? Number(item?.packedWeightG || (Number(item?.packedWeightKg || 0) * 1000) || 0) || '' : ''}" placeholder="Ví dụ: 400"><div class="cell-sub" style="margin-top:5px">Khối lượng thực tế của 1 đơn vị bán sau đóng gói. Logistics tự quy đổi sang kg để tính tải xe.</div></div><div class="field"><label>Hạn sử dụng mặc định (ngày)</label><input class="inp right num" id="invItemShelfLifeDays" type="number" min="0" step="1" value="${item ? Number(item?.shelfLifeDays || 0) || '' : ''}" placeholder="Ví dụ: 7"><div class="cell-sub" style="margin-top:5px">HSD = Ngày sản xuất + số ngày này. 0/để trống = chưa quy định.</div></div>` : ''}
     </div>
     <div class="alert info" style="margin-top:12px"><i class="fa-solid fa-circle-info"></i><span>${item ? 'Sửa master không tự thay đổi số lượng tồn kho.' : `Nếu không nhập số lượng ban đầu thì ${typeLabel} mới có tồn = 0. Nguyên liệu và thành phẩm có thể khai báo tồn đầu kỳ khi tạo mới; các luồng mua hàng/sản xuất hiện tại vẫn giữ nguyên.`}</span></div>`,
     foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="inventory-item-save" data-type="${type}" data-id="${esc(item?.id || '')}"><i class="fa-solid fa-floppy-disk"></i>Lưu ${typeLabel}</button>`
@@ -175,7 +176,7 @@ function openInventoryMasterDetail(type, id) {
   const typeLabel = type === 'SEMI_FINISHED' ? 'Bán thành phẩm' : 'Thành phẩm';
   Modal.open({
     title: esc(item.name || id), sub: `${id} · ${typeLabel} · ${esc(inventoryItemCategory(item,type)||'Chưa phân loại')}`, size:'md',
-    body:`<div class="info-grid">${infoItem('Mã hàng',`<span class="code">${esc(id)}</span>`)}${infoItem('Danh mục',esc(inventoryItemCategory(item,type)||'—'))}${infoItem('Đơn vị tính',esc(item.unit||'—'))}${infoItem('Đơn giá',fmtVND(Number(item.price||0)))}${infoItem('Tổng tồn',`<b class="num">${fmtN(qty)} ${esc(item.unit||'')}</b>`)}${infoItem('Quy cách',esc(item.spec||'—'))}</div>
+    body:`<div class="info-grid">${infoItem('Mã hàng',`<span class="code">${esc(id)}</span>`)}${infoItem('Danh mục',esc(inventoryItemCategory(item,type)||'—'))}${infoItem('Đơn vị tính',esc(item.unit||'—'))}${infoItem('Đơn giá',fmtVND(Number(item.price||0)))}${infoItem('Tổng tồn',`<b class="num">${fmtN(qty)} ${esc(item.unit||'')}</b>`)}${type === 'FINISHED_GOODS' ? infoItem('Khối lượng đóng gói', Number(item.packedWeightG||0)>0 || Number(item.packedWeightKg||0)>0 ? `<b class="num">${fmtDec(Number(item.packedWeightG||0) || Number(item.packedWeightKg||0)*1000,2)} g / ${esc(item.unit||'ĐVT')}</b>` : '<span class="muted">Chưa khai báo</span>') + infoItem('Hạn sử dụng mặc định', Number(item.shelfLifeDays||0)>0 ? `<b>${fmtN(Number(item.shelfLifeDays))} ngày</b>` : '<span class="muted">Chưa quy định</span>') : ''}${infoItem('Quy cách',esc(item.spec||'—'))}</div>
       <div class="form-sec-title"><i class="fa-solid fa-warehouse"></i>Tồn theo kho/lô</div>${tableShell([{t:'Kho'},{t:'Lô'},{t:'Số lượng',cls:'right'}],rows.map(r=>`<tr><td>${esc(Q.warehouseName(r.warehouseId))}</td><td><span class="code">${esc(Q.lot(r.lotId)?.lotNumber||'—')}</span></td><td class="right num">${fmtN(r.qtyOnHand)} ${esc(r.unit||item.unit||'')}</td></tr>`),{emptyTitle:'Chưa phát sinh tồn kho'})}`,
     foot:`<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="inventory-item-edit" data-type="${type}" data-id="${esc(id)}"><i class="fa-solid fa-pen"></i>Sửa</button>`
   });
@@ -514,10 +515,16 @@ function openInventoryStockLotDetail(productId, lotId) {
     .filter(g => g.type === 'RETURN_OUT' && (g.items || []).some(i => i.productId === productId && i.lotId === lotId))
     .sort((a,b) => String(b.date || '').localeCompare(String(a.date || '')));
 
-  // Lịch sử xuất/sử dụng của lô, không bao gồm trả NCC vì đã hiển thị thành bảng riêng phía trên.
-  const usageIssues = (DB.goodsIssues || [])
-    .filter(g => g.type !== 'RETURN_OUT' && (g.items || []).some(i => i.productId === productId && i.lotId === lotId))
-    .sort((a,b) => String(b.date || '').localeCompare(String(a.date || '')));
+  // Lịch sử xuất/sử dụng lấy từ sổ giao dịch tồn kho vì đây mới là dấu vết xuất thực tế.
+  // goodsIssues chỉ dùng để bổ sung mã phiếu/diễn giải. Cách này bao phủ cả xuất bán thành phẩm
+  // và cấp hàng cửa hàng, kể cả dữ liệu cũ từng bị thiếu chứng từ goodsIssues.
+  const usageTx = (DB.inventoryTransactions || [])
+    .filter(t => t.productId === productId && t.lotId === lotId && Number(t.qty || 0) < 0 && t.type !== 'RETURN_OUT')
+    .sort((a,b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.id || '').localeCompare(String(a.id || '')));
+  const usageRows = usageTx.map(t => {
+    const gi = (DB.goodsIssues || []).find(g => g.id === t.refId || g.transferId === t.refId || ((g.items || []).some(i => i.productId===productId && i.lotId===lotId) && String(g.date||'')===String(t.date||'')));
+    return { tx:t, gi };
+  });
 
   const issuePurpose = type => ({
     PRODUCTION_ISSUE:'Xuất sản xuất', SALES_ISSUE:'Xuất bán hàng', ADJUSTMENT_OUT:'Xuất điều chỉnh',
@@ -555,7 +562,7 @@ function openInventoryStockLotDetail(productId, lotId) {
       <div class="form-sec-title" style="margin-top:16px"><i class="fa-solid fa-arrow-up-from-bracket"></i>Lịch sử xuất / sử dụng của lô</div>
       ${tableShell(
         [{t:'Phiếu xuất'},{t:'Ngày'},{t:'Mục đích sử dụng'},{t:'Chứng từ tham chiếu'},{t:'Số lượng',cls:'right'},{t:'Người lập'}],
-        usageIssues.flatMap(g => (g.items||[]).filter(i=>i.productId===productId && i.lotId===lotId).map(i => `<tr><td><span class="code">${esc(g.id)}</span></td><td>${fmtDate(g.date)}</td><td>${esc(issuePurpose(g.type))}</td><td>${g.refDoc ? `<span class="code">${esc(g.refDoc)}</span>` : '—'}</td><td class="right num strong">${fmtDec(i.qty,3)} ${esc(i.unit||row.unit||'')}</td><td>${esc(Q.employeeName(g.createdBy))}</td></tr>`)),
+        usageRows.map(({tx,gi}) => `<tr><td><span class="code">${esc(gi?.id || tx.transactionNumber || tx.refId || tx.id)}</span></td><td>${fmtDate(tx.date)}</td><td>${esc(gi?.replenishmentId||gi?.storeId?'Cấp hàng cửa hàng':issuePurpose(gi?.type||tx.type))}</td><td>${(gi?.refDoc||tx.refId) ? `<span class="code">${esc(gi?.refDoc||tx.refId)}</span>` : '—'}</td><td class="right num strong">${fmtDec(Math.abs(Number(tx.qty||0)),3)} ${esc(row.unit||item?.unit||'')}</td><td>${esc(Q.employeeName(gi?.confirmedBy||gi?.createdBy||tx.userId))}</td></tr>`),
         {emptyTitle:'Lô này chưa phát sinh xuất kho / sử dụng'}
       )}`,
     foot: '<button class="btn" data-act="modal-close">Đóng</button>'
@@ -574,6 +581,11 @@ Views.warehouse = function () {
     case 'inventory':
       return Views.inventory
         ? Views.inventory()
+        : '';
+
+    case 'warehouse_view':
+      return Views['inv-warehouse-browser']
+        ? Views['inv-warehouse-browser']()
         : '';
 
     case 'receipts':
@@ -859,6 +871,14 @@ Views['inv-issues'] = function () {
   const cfg=cfgs[issueTab]||cfgs.raw;
   const whIds=new Set(DB.warehouses.filter(w=>w.type===cfg.type).map(w=>w.id));
   const ISSUE_TYPES={PRODUCTION_ISSUE:'Xuất sản xuất',SUBCONTRACT_ISSUE:'Xuất gia công',SALES_ISSUE:'Xuất bán hàng',ADJUSTMENT_OUT:'Xuất điều chỉnh',TRANSFER_OUT:'Xuất chuyển kho',DEFECTIVE_ISSUE:'Xuất hàng lỗi',RETURN_OUT:'Xuất trả NCC'};
+  // Ở tab Kho nguyên liệu, ưu tiên tên nguyên liệu thay vì mã để người dùng dễ nhận biết.
+  // Nếu tổng tồn khả dụng tại toàn bộ Kho nguyên liệu đã hết, tên được tô đỏ để cảnh báo ngay trên danh sách xuất.
+  const rawAvailableQty=(productId)=>(DB.inventory||[]).filter(r=>whIds.has(r.warehouseId)&&r.productId===productId).reduce((sum,r)=>sum+Number(r.qtyAvailable??r.qtyOnHand??0),0);
+  const issueItemLabel=(productId,qty,unit='',lotId='',warnOut=false)=>{
+    const item=Q.material(productId)||Q.product(productId); const name=item?.name||productId;
+    const out=warnOut&&issueTab==='raw'&&rawAvailableQty(productId)<=0; const lot=lotId?Q.lot(lotId):null;
+    return `<span ${out?'style="color:var(--danger);font-weight:700"':''}>${esc(name)}</span><div class="cell-sub">${fmtDec(qty,3)} ${esc(unit||item?.unit||'')}${lotId?` · Lô ${esc(lot?.lotNumber||lotId)}`:''}${out?' · Hết tồn kho nguyên liệu':''}</div>`;
+  };
   let entries=(DB.goodsIssues||[]).filter(gi=>whIds.has(gi.warehouseId)).map(gi=>({kind:'issue',date:gi.date,id:gi.id,gi}));
   if(issueTab==='raw') {
     entries.push(...(DB.materialReturnRequests||[]).filter(r=>r.status==='PENDING_WAREHOUSE').map(r=>({kind:'return',date:r.requestedDate,id:r.id,r})));
@@ -897,8 +917,8 @@ Views['inv-issues'] = function () {
       const acts=[{act:'subcontracting-open',data:`data-id="${esc(o.id)}"`,icon:'fa-eye',title:'Xem chi tiết đơn gia công'}];
       if(o.status==='APPROVED') acts.push({act:'subcontracting-issue',data:`data-id="${esc(o.id)}"`,icon:'fa-arrow-up-from-bracket',title:'Xuất NVL gia công'});
       if(o.status==='MATERIAL_ISSUED') acts.push({act:'subcontracting-handover',data:`data-id="${esc(o.id)}"`,icon:'fa-handshake',title:'Xác nhận giao đối tác'});
-      const materials=lines.map(i=>`${i.materialId} (${fmtDec(i.qty,3)} ${Q.material(i.materialId)?.unit||''})`).join(', ');
-      return `<tr><td><span class="code">${esc(o.id)}</span><div class="cell-sub">Yêu cầu NVL gia công</div></td><td><span class="badge indigo">Xuất gia công</span></td><td>${fmtDate(x.date)}</td><td>Kho nguyên liệu</td><td>${esc(o.partner||'—')}</td><td>${esc(materials||'Theo BOM')}</td><td class="right num">—</td><td>${o.status==='APPROVED'?'<span class="badge orange">Chờ xuất NVL</span>':'<span class="badge blue">Đã xuất · chờ giao đối tác</span>'}</td><td class="right">${rowActions(acts)}</td></tr>`;
+      const materials=lines.map(i=>issueItemLabel(i.materialId,i.qty,Q.material(i.materialId)?.unit||'','',o.status==='APPROVED')).join('<br>');
+      return `<tr><td><span class="code">${esc(o.id)}</span><div class="cell-sub">Yêu cầu NVL gia công</div></td><td><span class="badge indigo">Xuất gia công</span></td><td>${fmtDate(x.date)}</td><td>Kho nguyên liệu</td><td>${esc(o.partner||'—')}</td><td>${materials||'Theo BOM'}</td><td class="right num">—</td><td>${o.status==='APPROVED'?'<span class="badge orange">Chờ xuất NVL</span>':'<span class="badge blue">Đã xuất · chờ giao đối tác</span>'}</td><td class="right">${rowActions(acts)}</td></tr>`;
     }
     if(x.kind==='production_request'){
       const r=x.r;
@@ -907,7 +927,7 @@ Views['inv-issues'] = function () {
       const acts=[{act:'pf-mr-view',data:`data-id="${esc(r.id)}"`,icon:'fa-eye',title:'Xem chi tiết yêu cầu NVL'}];
       if(r.status==='WAITING_WAREHOUSE_APPROVAL') acts.push({act:'pf-mr-approve',data:`data-id="${esc(r.id)}"`,icon:'fa-check',title:'Duyệt yêu cầu NVL'});
       if(r.status==='APPROVED') acts.push({act:'pf-mr-issue',data:`data-id="${esc(r.id)}"`,icon:'fa-arrow-up-from-bracket',title:'Xuất NVL cho sản xuất'});
-      return `<tr><td><span class="code">${esc(r.id)}</span><div class="cell-sub">Yêu cầu NVL sản xuất</div></td><td><span class="badge blue">Xuất sản xuất</span></td><td>${fmtDate(r.date)}</td><td>Kho nguyên liệu</td><td><span class="code">${esc(source)}</span></td><td>${esc((r.items||[]).map(i=>`${i.materialId} (${fmtDec(i.qty,3)})`).join(', '))}</td><td class="right num">${fmtDec(total,3)}</td><td>${pfRequestStatus(r.status)}</td><td class="right">${rowActions(acts)}</td></tr>`;
+      return `<tr><td><span class="code">${esc(r.id)}</span><div class="cell-sub">Yêu cầu NVL sản xuất</div></td><td><span class="badge blue">Xuất sản xuất</span></td><td>${fmtDate(r.date)}</td><td>Kho nguyên liệu</td><td><span class="code">${esc(source)}</span></td><td>${(r.items||[]).map(i=>issueItemLabel(i.materialId,i.qty,Q.material(i.materialId)?.unit||'','',['WAITING_WAREHOUSE_APPROVAL','APPROVED'].includes(r.status))).join('<br>')||'—'}</td><td class="right num">${fmtDec(total,3)}</td><td>${pfRequestStatus(r.status)}</td><td class="right">${rowActions(acts)}</td></tr>`;
     }
     if(x.kind==='return'){
       const r=x.r;const lot=Q.lot(r.lotId);
@@ -918,7 +938,7 @@ Views['inv-issues'] = function () {
     const statusHtml = pendingSales ? '<span class="badge orange">Chờ xác nhận xuất</span>' : badge(gi.status);
     const acts=[{act:'inv-issue-view',data:`data-id="${gi.id}"`,icon:'fa-eye',title:'Xem chi tiết'}];
     if(pendingSales) acts.push({act:'inv-sales-issue-confirm',data:`data-id="${gi.id}"`,icon:'fa-circle-check',title:'Xác nhận xuất kho'});
-    return `<tr><td><span class="code">${esc(gi.id)}</span>${pendingSales?'<div class="cell-sub">Yêu cầu từ đơn bán</div>':''}</td><td><span class="badge blue">${esc(ISSUE_TYPES[gi.type]||gi.type)}</span></td><td>${fmtDate(gi.date)}</td><td>${esc(Q.warehouseName(gi.warehouseId))}</td><td><span class="code">${esc(gi.refDoc||'—')}</span></td><td>${esc((gi.items||[]).map(i=>`${i.productId} (${fmtDec(i.qty,3)})`).join(', '))}</td><td class="right num">${fmtDec(total,3)}</td><td>${statusHtml}</td><td class="right">${rowActions(acts)}</td></tr>`;
+    return `<tr><td><span class="code">${esc(gi.id)}</span>${pendingSales?'<div class="cell-sub">Yêu cầu từ đơn bán</div>':''}</td><td><span class="badge blue">${esc(ISSUE_TYPES[gi.type]||gi.type)}</span></td><td>${fmtDate(gi.date)}</td><td>${esc(Q.warehouseName(gi.warehouseId))}</td><td><span class="code">${esc(gi.refDoc||'—')}</span></td><td>${(gi.items||[]).map(i=>issueItemLabel(i.productId,i.qty,i.unit||'',i.lotId||'')).join('<br>')||'—'}</td><td class="right num">${fmtDec(total,3)}</td><td>${statusHtml}</td><td class="right">${rowActions(acts)}</td></tr>`;
   });
   return `${pageHead('Xuất kho','Danh sách phiếu và yêu cầu xuất được quản lý chung theo từng loại kho',`
     <button class="btn" data-act="inv-export-issues"><i class="fa-solid fa-file-export"></i>Xuất Excel</button>
@@ -945,6 +965,7 @@ Views['inv-transfers'] = function () {
     RAW_MATERIAL: { label: 'Chuyển kho nguyên liệu', short: 'Nguyên liệu', icon: 'fa-seedling' },
     SEMI_FINISHED: { label: 'Chuyển kho bán thành phẩm', short: 'Bán thành phẩm', icon: 'fa-layer-group' },
     FINISHED_GOODS: { label: 'Chuyển kho thành phẩm', short: 'Thành phẩm', icon: 'fa-box' },
+    STORE: { label: 'Cấp hàng cửa hàng', short: 'Cửa hàng', icon: 'fa-store' },
   };
   State.invTransferType = State.invTransferType || 'RAW_MATERIAL';
   const activeType = State.invTransferType;
@@ -1402,12 +1423,18 @@ function openNewTransferModal(transferType = 'RAW_MATERIAL') {
     RAW_MATERIAL: { label: 'nguyên liệu', title: 'Phiếu chuyển kho nguyên liệu' },
     SEMI_FINISHED: { label: 'bán thành phẩm', title: 'Phiếu chuyển kho bán thành phẩm' },
     FINISHED_GOODS: { label: 'thành phẩm', title: 'Phiếu chuyển kho thành phẩm' },
+    STORE: { label: 'hàng cấp cửa hàng', title: 'Phiếu cấp hàng cho cửa hàng' },
   };
   const meta = TYPE_META[transferType] || TYPE_META.RAW_MATERIAL;
-  const warehouses = DB.warehouses.filter((w) => w.type === transferType && w.status === 'active');
+  const sourceWarehouses = transferType === 'STORE'
+    ? DB.warehouses.filter((w) => ['RAW_MATERIAL','SEMI_FINISHED','FINISHED_GOODS'].includes(w.type) && w.status === 'active')
+    : DB.warehouses.filter((w) => w.type === transferType && w.status === 'active');
+  const destinationWarehouses = transferType === 'STORE'
+    ? DB.warehouses.filter((w) => w.type === 'STORE' && w.status === 'active')
+    : DB.warehouses.filter((w) => w.type === transferType && w.status === 'active');
   Modal.open({
     title: meta.title,
-    sub: `Chuyển ${meta.label} giữa các kho vật lý cùng loại`,
+    sub: transferType === 'STORE' ? 'Cấp nguyên liệu / thành phẩm từ kho trung tâm sang kho cửa hàng' : `Chuyển ${meta.label} giữa các kho vật lý cùng loại`,
     size: 'lg',
     body: `
       <input type="hidden" id="ckTransferType" value="${transferType}" />
@@ -1416,7 +1443,7 @@ function openNewTransferModal(transferType = 'RAW_MATERIAL') {
         <div class="field"><label>Kho nguồn <span class="req">*</span></label>
           <select class="inp" id="ckFromWh">
             <option value="">-- Chọn kho nguồn --</option>
-            ${warehouses.map((w) => `<option value="${w.id}">${esc(w.name)} · ${esc(w.address)}</option>`).join('')}
+            ${sourceWarehouses.map((w) => `<option value="${w.id}">${esc(w.name)} · ${esc(w.address)}</option>`).join('')}
           </select></div>
         <div class="field"><label>Kho đích <span class="req">*</span></label>
           <select class="inp" id="ckToWh"><option value="">-- Chọn kho đích --</option></select></div>
@@ -1457,10 +1484,10 @@ function openNewTransferModal(transferType = 'RAW_MATERIAL') {
     const to = $('#ckToWh');
     if (!to) return;
     const current = to.value;
-    to.innerHTML = `<option value="">-- Chọn kho đích --</option>` + warehouses
+    to.innerHTML = `<option value="">-- Chọn kho đích --</option>` + destinationWarehouses
       .filter(w => w.id !== fromId)
       .map(w => `<option value="${w.id}">${esc(w.name)} · ${esc(w.address)}</option>`).join('');
-    if (current && current !== fromId && warehouses.some(w => w.id === current)) to.value = current;
+    if (current && current !== fromId && destinationWarehouses.some(w => w.id === current)) to.value = current;
   };
 
   const attachLineEvents = (row) => {
@@ -1568,22 +1595,405 @@ const InventoryService = {
   },
 };
 
-Views['inv-warehouses'] = function () {
-  const rows = DB.warehouses.map((warehouse) => {
-    const locations = Q.locationsOf(warehouse.id);
-    const stock = DB.inventory.filter((row) => row.warehouseId === warehouse.id).reduce((sum, row) => sum + row.qtyOnHand, 0);
-    return `<tr><td><span class="code">${esc(warehouse.code)}</span></td><td class="strong">${esc(warehouse.name)}</td><td>${esc(warehouse.type)}</td><td>${locations.length}</td><td class="right num">${fmtDec(stock, 2)}</td><td>${warehouse.status === 'active' ? '<span class="badge green">Đang hoạt động</span>' : '<span class="badge slate">Ngừng hoạt động</span>'}</td><td class="muted">${esc(warehouse.note)}</td></tr>`;
+function warehouseTypeLabel(type){
+  return ({RAW_MATERIAL:'Kho nguyên liệu',SEMI_FINISHED:'Kho bán thành phẩm',FINISHED_GOODS:'Kho thành phẩm',PRODUCTION:'Kho sản xuất',STORE:'Kho cửa hàng',DEFECTIVE:'Kho hàng lỗi',RETURNED:'Kho hàng trả về'}[type]||type||'—');
+}
+function warehouseZoneTypeLabel(type){
+  return ({RAW_MATERIAL:'Khu Nguyên liệu',SEMI_FINISHED:'Khu Bán thành phẩm',FINISHED_GOODS:'Khu Thành phẩm',PRODUCTION:'Khu Sản xuất',STORE:'Khu Cửa hàng',DEFECTIVE:'Khu Hàng lỗi',RETURNED:'Khu Hàng trả về'}[type]||type||'Khu khác');
+}
+function warehouseSiteIdOf(zone){
+  if(!zone)return '';
+  if(zone.siteId)return zone.siteId;
+  const id=String(zone.id||'');
+  if(['WH-001','WH-002','WH-003','WH-004','WH-005','WH-006','WH-007'].includes(id))return 'SITE-TD';
+  if(['WH-008','WH-011','WH-012'].includes(id))return 'SITE-BD';
+  if(['WH-009','WH-013','WH-014'].includes(id))return 'SITE-DN';
+  const text=[zone.code,zone.name,zone.address].join(' ').toLowerCase();
+  if(text.includes('_td')||text.includes('thủ đức')||text.includes('thu duc')||text.includes('quận 9'))return 'SITE-TD';
+  if(text.includes('_bd')||text.includes('bình dương')||text.includes('binh duong')||text.includes('dĩ an'))return 'SITE-BD';
+  if(text.includes('_dn')||text.includes('đồng nai')||text.includes('dong nai')||text.includes('biên hòa'))return 'SITE-DN';
+  return '';
+}
+function warehouseSitesList(){
+  DB.warehouseSites=DB.warehouseSites||[];
+  return DB.warehouseSites.slice().sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'vi'));
+}
+function warehouseZonesOfSite(siteId){
+  return (DB.warehouses||[]).filter(w=>warehouseSiteIdOf(w)===siteId);
+}
+function warehouseZoneStock(zoneId){
+  const rows=(DB.inventory||[]).filter(r=>r.warehouseId===zoneId);
+  return {
+    onHand:rows.reduce((s,r)=>s+Number(r.qtyOnHand||0),0),
+    reserved:rows.reduce((s,r)=>s+Number(r.qtyReserved||0),0),
+    pending:rows.reduce((s,r)=>s+Number(r.qtyPending||0),0),
+    available:rows.reduce((s,r)=>s+Number(r.qtyAvailable!=null?r.qtyAvailable:(Number(r.qtyOnHand||0)-Number(r.qtyReserved||0))),0),
+  };
+}
+function warehouseCoordText(w){const lat=Number(w?.lat||w?.latitude||0),lng=Number(w?.lng||w?.longitude||0);return lat&&lng?`${lat.toFixed(6)}, ${lng.toFixed(6)}`:'Chưa khai báo';}
+function openWarehouseMasterForm(id=''){
+  const w=(DB.warehouseSites||[]).find(x=>x.id===id)||{};
+  const oldAddressDetail=w.addressDetail || (!w.province ? (w.address||'') : '');
+  Modal.open({title:id?'Cập nhật kho':'Thêm kho',sub:'Kho là địa điểm vật lý. Nguyên liệu, bán thành phẩm và thành phẩm được quản lý theo các khu bên trong kho.',size:'lg',body:`
+    <div class="form-grid cols-2">
+      <div class="field"><label>Mã kho *</label><input class="inp" id="whMasterCode" value="${esc(w.code||'')}" ${id?'disabled':''} placeholder="VD: TD, BD"></div>
+      <div class="field"><label>Tên kho *</label><input class="inp" id="whMasterName" value="${esc(w.name||'')}" placeholder="VD: Kho Thủ Đức"></div>
+      <div class="field"><label>Trạng thái</label><select class="inp" id="whMasterStatus"><option value="active" ${w.status!=='inactive'?'selected':''}>Đang hoạt động</option><option value="inactive" ${w.status==='inactive'?'selected':''}>Ngừng hoạt động</option></select></div>
+      <div class="field"><label>Người phụ trách</label><input class="inp" id="whMasterManager" value="${esc(w.managerId||'')}"></div>
+      <div class="field"><label>Tỉnh / Thành phố *</label><select class="inp" id="whMasterProvince"><option value="${esc(w.province||'')}">${esc(w.province||'-- Chọn Tỉnh/Thành phố --')}</option></select></div>
+      <div class="field"><label>Quận / Huyện *</label><select class="inp" id="whMasterDistrict"><option value="${esc(w.district||'')}">${esc(w.district||'-- Chọn Quận/Huyện --')}</option></select></div>
+      <div class="field"><label>Phường / Xã</label><select class="inp" id="whMasterWard"><option value="${esc(w.ward||'')}">${esc(w.ward||'-- Chọn Phường/Xã --')}</option></select></div>
+      <div class="field"><label>Địa chỉ chi tiết *</label><input class="inp" id="whMasterAddressDetail" value="${esc(oldAddressDetail)}" placeholder="Số nhà, tên đường, khu công nghiệp..."><div class="cell-sub" id="whMasterAddressNote">Địa chỉ này dùng chung cho các khu bên trong kho.</div></div>
+      <input type="hidden" id="whMasterLat" value="${Number(w.lat||w.latitude||0)||''}">
+      <input type="hidden" id="whMasterLng" value="${Number(w.lng||w.longitude||0)||''}">
+      <div class="field" style="grid-column:1/-1"><label>Ghi chú</label><input class="inp" id="whMasterNote" value="${esc(w.note||'')}"></div>
+    </div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="inv-warehouse-save" data-id="${esc(id)}"><i class="fa-solid fa-floppy-disk"></i>Lưu kho</button>`});
+  if(typeof VNAddress!=='undefined') VNAddress.init({provinceId:'whMasterProvince',districtId:'whMasterDistrict',wardId:'whMasterWard',noteId:'whMasterAddressNote',province:w.province||'',district:w.district||'',ward:w.ward||''});
+}
+function saveWarehouseMaster(id=''){
+  DB.warehouseSites=DB.warehouseSites||[];
+  const code=String(document.querySelector('#whMasterCode')?.value||'').trim().toUpperCase();
+  const name=String(document.querySelector('#whMasterName')?.value||'').trim();
+  const addr=(typeof VNAddress!=='undefined')?VNAddress.read('whMaster'):{province:document.querySelector('#whMasterProvince')?.value?.trim()||'',district:document.querySelector('#whMasterDistrict')?.value?.trim()||'',ward:document.querySelector('#whMasterWard')?.value?.trim()||'',addressDetail:document.querySelector('#whMasterAddressDetail')?.value?.trim()||''};
+  if(!addr.address)addr.address=[addr.addressDetail,addr.ward,addr.district,addr.province].filter(Boolean).join(', ');
+  if(!code||!name||!addr.address){Toast.err('Thiếu thông tin','Mã kho, tên kho và địa chỉ là bắt buộc.');return;}
+  if(!id&&DB.warehouseSites.some(x=>String(x.code||'').toUpperCase()===code)){Toast.err('Mã kho đã tồn tại',code);return;}
+  let w=DB.warehouseSites.find(x=>x.id===id);
+  if(!w){const nums=DB.warehouseSites.map(x=>Number(String(x.id||'').match(/(\d+)$/)?.[1]||0));const next=Math.max(0,...nums)+1;w={id:`SITE-${String(next).padStart(3,'0')}`};DB.warehouseSites.push(w);}
+  Object.assign(w,{code,name,address:addr.address,province:addr.province||'',district:addr.district||'',ward:addr.ward||'',addressDetail:addr.addressDetail||'',managerId:String(document.querySelector('#whMasterManager')?.value||'').trim(),status:document.querySelector('#whMasterStatus')?.value||'active',note:String(document.querySelector('#whMasterNote')?.value||'').trim()});
+  // Đồng bộ địa chỉ kho vật lý xuống các khu cũ để Logistics/nhập-xuất hiện hữu vẫn dùng đúng địa điểm.
+  warehouseZonesOfSite(w.id).forEach(z=>{z.siteId=w.id;z.address=w.address;z.province=w.province;z.district=w.district;z.ward=w.ward;z.addressDetail=w.addressDetail;});
+  if(typeof InventoryAPI!=='undefined')InventoryAPI.scheduleCollections(['warehouseSites','warehouses'],40);
+  Modal.close();render();Toast.ok('Đã lưu kho',`${w.code} · ${w.name}`);
+}
+async function deleteWarehouseMaster(id=''){
+  const w=(DB.warehouseSites||[]).find(x=>x.id===id); if(!w)return;
+  const zones=warehouseZonesOfSite(id);
+  if(zones.length){Toast.err('Không thể xóa kho',`Kho ${w.name} đang có ${zones.length} khu. Hãy ngừng hoạt động kho hoặc xử lý các khu trước để bảo toàn lịch sử.`);return;}
+  if(!confirm(`Xóa ${w.code} · ${w.name}?`))return;
+  DB.warehouseSites=(DB.warehouseSites||[]).filter(x=>x.id!==id);
+  if(typeof InventoryAPI!=='undefined') await InventoryAPI.syncCollections(['warehouseSites']);
+  render(); Toast.ok('Đã xóa kho',`${w.code} · ${w.name}`);
+}
+function openWarehouseMasterDetail(id){
+  const w=(DB.warehouseSites||[]).find(x=>x.id===id);if(!w)return;
+  const zones=warehouseZonesOfSite(w.id); const stock=zones.reduce((s,z)=>s+warehouseZoneStock(z.id).onHand,0);
+  State.filters['inv-warehouses']=Object.assign(F('inv-warehouses'),{siteId:w.id,zoneId:'',itemType:'',q:''}); Modal.close(); render();
+}
+function openWarehouseZoneForm(siteId,zoneId=''){
+  const site=(DB.warehouseSites||[]).find(x=>x.id===siteId); if(!site)return;
+  const z=(DB.warehouses||[]).find(x=>x.id===zoneId)||{};
+  const types=['RAW_MATERIAL','SEMI_FINISHED','FINISHED_GOODS','PRODUCTION','STORE','DEFECTIVE','RETURNED'];
+  Modal.open({title:zoneId?'Cập nhật khu':'Thêm khu',sub:`${site.name} · Khu là vùng nghiệp vụ bên trong kho`,body:`<div class="form-grid cols-2">
+    <div class="field"><label>Loại khu *</label><select class="inp" id="whZoneType">${types.map(t=>`<option value="${t}" ${z.type===t?'selected':''}>${warehouseZoneTypeLabel(t)}</option>`).join('')}</select></div>
+    <div class="field"><label>Tên khu</label><input class="inp" id="whZoneName" value="${esc(z.zoneName||'')}" placeholder="Để trống để dùng tên theo loại khu"></div>
+    <div class="field"><label>Trạng thái</label><select class="inp" id="whZoneStatus"><option value="active" ${z.status!=='inactive'?'selected':''}>Hoạt động</option><option value="inactive" ${z.status==='inactive'?'selected':''}>Ngừng hoạt động</option></select></div>
+    <div class="field"><label>Ghi chú</label><input class="inp" id="whZoneNote" value="${esc(z.note||'')}"></div>
+  </div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="inv-warehouse-zone-save" data-site="${esc(siteId)}" data-id="${esc(zoneId)}"><i class="fa-solid fa-floppy-disk"></i>Lưu khu</button>`});
+}
+function saveWarehouseZone(siteId,zoneId=''){
+  const site=(DB.warehouseSites||[]).find(x=>x.id===siteId);if(!site)return;
+  const type=document.querySelector('#whZoneType')?.value||''; if(!type)return;
+  const custom=String(document.querySelector('#whZoneName')?.value||'').trim();
+  let z=(DB.warehouses||[]).find(x=>x.id===zoneId);
+  if(!z){
+    const nums=(DB.warehouses||[]).map(x=>Number(String(x.id||'').match(/(\d+)$/)?.[1]||0));const next=Math.max(0,...nums)+1;
+    const prefix=({RAW_MATERIAL:'RAW',SEMI_FINISHED:'SEMI',FINISHED_GOODS:'FIN',PRODUCTION:'PROD',STORE:'STORE',DEFECTIVE:'DEF',RETURNED:'RET'}[type]||'ZONE');
+    z={id:`WH-${String(next).padStart(3,'0')}`,code:`${prefix}_${site.code}`,siteId:site.id};DB.warehouses.push(z);
+  }
+  Object.assign(z,{siteId:site.id,type,zoneName:custom,name:custom||`${warehouseZoneTypeLabel(type)} - ${site.name.replace(/^Kho\s+/i,'')}`,address:site.address,province:site.province||'',district:site.district||'',ward:site.ward||'',addressDetail:site.addressDetail||'',managerId:site.managerId||'',status:document.querySelector('#whZoneStatus')?.value||'active',note:String(document.querySelector('#whZoneNote')?.value||'').trim()});
+  if(typeof InventoryAPI!=='undefined')InventoryAPI.scheduleCollections(['warehouses'],40);
+  Modal.close();State.filters['inv-warehouses']=Object.assign(F('inv-warehouses'),{siteId:site.id,zoneId:z.id});render();Toast.ok('Đã lưu khu',warehouseZoneTypeLabel(type));
+}
+
+function warehouseRackUsage(locationId){
+  const rows=(DB.inventory||[]).filter(r=>r.locationId===locationId);
+  return rows.reduce((sum,r)=>sum+Number(r.qtyOnHand||0),0);
+}
+function warehouseRacksOfZone(zoneId){
+  return (DB.warehouseLocations||[]).filter(l=>l.warehouseId===zoneId).sort((a,b)=>String(a.code||a.name||'').localeCompare(String(b.code||b.name||''),'vi'));
+}
+function openWarehouseRackForm(siteId,zoneId,rackId=''){
+  const site=(DB.warehouseSites||[]).find(x=>x.id===siteId), zone=(DB.warehouses||[]).find(x=>x.id===zoneId);
+  if(!site||!zone)return;
+  const r=(DB.warehouseLocations||[]).find(x=>x.id===rackId)||{};
+  Modal.open({title:rackId?'Cập nhật kệ':'Thêm kệ',sub:`${site.name} · ${zone.zoneName||warehouseZoneTypeLabel(zone.type)}`,body:`<div class="form-grid cols-2">
+    <div class="field"><label>Mã kệ *</label><input class="inp" id="whRackCode" value="${esc(r.code||'')}" ${rackId?'disabled':''} placeholder="VD: A1, TP-B2"></div>
+    <div class="field"><label>Tên kệ *</label><input class="inp" id="whRackName" value="${esc(r.name||'')}" placeholder="VD: Kệ A1"></div>
+    <div class="field"><label>Sức chứa tối đa</label><input class="inp" id="whRackCapacity" type="number" min="0" step="0.001" value="${Number(r.capacity||0)||''}" placeholder="VD: 1000"></div>
+    <div class="field"><label>Đơn vị sức chứa</label><input class="inp" id="whRackCapacityUnit" value="${esc(r.capacityUnit||((zone.type==='RAW_MATERIAL')?'kg':'đơn vị'))}" placeholder="kg, hộp, thùng..."></div>
+    <div class="field"><label>Trạng thái</label><select class="inp" id="whRackStatus"><option value="active" ${r.status!=='inactive'?'selected':''}>Đang sử dụng</option><option value="inactive" ${r.status==='inactive'?'selected':''}>Ngừng sử dụng</option></select></div>
+    <div class="field"><label>Ghi chú</label><input class="inp" id="whRackNote" value="${esc(r.note||'')}"></div>
+    <div class="field" style="grid-column:1/-1"><div class="hint"><i class="fa-solid fa-circle-info"></i> Loại hàng của kệ được kế thừa từ <strong>${esc(zone.zoneName||warehouseZoneTypeLabel(zone.type))}</strong>, không cần khai báo lại để tránh xếp sai loại hàng.</div></div>
+  </div>`,foot:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="inv-warehouse-rack-save" data-site="${esc(siteId)}" data-zone="${esc(zoneId)}" data-id="${esc(rackId)}"><i class="fa-solid fa-floppy-disk"></i>Lưu kệ</button>`});
+}
+function saveWarehouseRack(siteId,zoneId,rackId=''){
+  const site=(DB.warehouseSites||[]).find(x=>x.id===siteId), zone=(DB.warehouses||[]).find(x=>x.id===zoneId);if(!site||!zone)return;
+  DB.warehouseLocations=DB.warehouseLocations||[];
+  const code=String(document.querySelector('#whRackCode')?.value||'').trim().toUpperCase();
+  const name=String(document.querySelector('#whRackName')?.value||'').trim();
+  if(!code||!name){Toast.err('Thiếu thông tin','Mã kệ và tên kệ là bắt buộc.');return;}
+  if(!rackId&&DB.warehouseLocations.some(x=>x.warehouseId===zoneId&&String(x.code||'').toUpperCase()===code)){Toast.err('Mã kệ đã tồn tại',`${code} đã có trong khu này.`);return;}
+  let r=DB.warehouseLocations.find(x=>x.id===rackId);
+  if(!r){const nums=DB.warehouseLocations.map(x=>Number(String(x.id||'').match(/(\d+)$/)?.[1]||0));const next=Math.max(0,...nums)+1;r={id:`LOC-${String(next).padStart(3,'0')}`,warehouseId:zoneId,parentLocation:'',locationType:'SHELF'};DB.warehouseLocations.push(r);}
+  Object.assign(r,{warehouseId:zoneId,code,name,capacity:Math.max(0,Number(document.querySelector('#whRackCapacity')?.value||0)),capacityUnit:String(document.querySelector('#whRackCapacityUnit')?.value||'').trim(),status:document.querySelector('#whRackStatus')?.value||'active',note:String(document.querySelector('#whRackNote')?.value||'').trim(),locationType:'SHELF'});
+  if(typeof InventoryAPI!=='undefined')InventoryAPI.scheduleCollections(['warehouseLocations'],40);
+  Modal.close();const f=F('inv-warehouses');Object.assign(f,{siteId,zoneId,rackId:r.id,tab:'zones'});render();Toast.ok('Đã lưu kệ',`${r.code} · ${r.name}`);
+}
+async function deleteWarehouseRack(rackId=''){
+  const r=(DB.warehouseLocations||[]).find(x=>x.id===rackId);if(!r)return;
+  const hasStock=(DB.inventory||[]).some(x=>x.locationId===rackId&&(Number(x.qtyOnHand||0)!==0||Number(x.qtyReserved||0)!==0||Number(x.qtyPending||0)!==0));
+  if(hasStock){Toast.err('Không thể xóa kệ','Kệ vẫn đang có tồn kho/giữ chỗ/chờ QC. Hãy chuyển hết hàng trước.');return;}
+  if(!confirm(`Xóa ${r.code||''} · ${r.name||''}?`))return;
+  DB.warehouseLocations=(DB.warehouseLocations||[]).filter(x=>x.id!==rackId);
+  if(typeof InventoryAPI!=='undefined')await InventoryAPI.syncCollections(['warehouseLocations']);
+  const f=F('inv-warehouses');if(f.rackId===rackId)f.rackId='';render();Toast.ok('Đã xóa kệ',r.name||r.code||rackId);
+}
+
+
+function warehouseInventoryItemType(productId) {
+  if ((DB.materials || []).some(x => x.id === productId)) return 'RAW_MATERIAL';
+  if ((DB.semiFinishedProducts || []).some(x => x.id === productId)) return 'SEMI_FINISHED';
+  if ((DB.products || []).some(x => x.id === productId)) return 'FINISHED_GOODS';
+  return 'OTHER';
+}
+function warehouseInventoryTypeLabel(type) {
+  return ({
+    RAW_MATERIAL: 'Nguyên liệu',
+    SEMI_FINISHED: 'Bán thành phẩm',
+    FINISHED_GOODS: 'Thành phẩm',
+    OTHER: 'Khác',
+  })[type] || type || 'Khác';
+}
+function warehouseInventoryItem(productId) {
+  return Q.material(productId)
+    || (DB.semiFinishedProducts || []).find(x => x.id === productId)
+    || Q.product(productId)
+    || null;
+}
+
+Views['inv-warehouse-browser'] = function () {
+  const f = F('inv-warehouse-browser', { warehouseId: '', itemType: '', q: '' });
+  const warehouses = (DB.warehouses || []).filter(w => w.status !== 'inactive');
+  const warehouseOptions = warehouses.map(w => [w.id, `${w.code || w.id} · ${w.name}`]);
+  const selectedWarehouse = (DB.warehouses || []).find(w => w.id === f.warehouseId) || null;
+  const q = String(f.q || '').toLowerCase().trim();
+
+  let rowsSource = (DB.inventory || []).filter(r => Number(r.qtyOnHand || 0) !== 0 || Number(r.qtyReserved || 0) !== 0 || Number(r.qtyPending || 0) !== 0);
+  if (f.warehouseId) rowsSource = rowsSource.filter(r => r.warehouseId === f.warehouseId);
+  if (f.itemType) rowsSource = rowsSource.filter(r => warehouseInventoryItemType(r.productId) === f.itemType);
+
+  const grouped = new Map();
+  rowsSource.forEach(r => {
+    const item = warehouseInventoryItem(r.productId);
+    const wh = Q.warehouse(r.warehouseId);
+    const lot = Q.lot(r.lotId);
+    const loc = Q.warehouseLocation(r.locationId);
+    const type = warehouseInventoryItemType(r.productId);
+    const searchable = [r.productId, item?.name, item?.unit, warehouseInventoryTypeLabel(type), wh?.name, wh?.code, lot?.lotNumber, loc?.name].join(' ').toLowerCase();
+    if (q && !searchable.includes(q)) return;
+    const key = `${r.warehouseId}::${r.productId}`;
+    if (!grouped.has(key)) grouped.set(key, {
+      warehouseId: r.warehouseId,
+      productId: r.productId,
+      type,
+      qtyOnHand: 0,
+      qtyReserved: 0,
+      qtyAvailable: 0,
+      qtyPending: 0,
+      lotIds: new Set(),
+      locationIds: new Set(),
+    });
+    const g = grouped.get(key);
+    g.qtyOnHand += Number(r.qtyOnHand || 0);
+    g.qtyReserved += Number(r.qtyReserved || 0);
+    g.qtyAvailable += Number(r.qtyAvailable != null ? r.qtyAvailable : (Number(r.qtyOnHand || 0) - Number(r.qtyReserved || 0)));
+    g.qtyPending += Number(r.qtyPending || 0);
+    if (r.lotId) g.lotIds.add(r.lotId);
+    if (r.locationId) g.locationIds.add(r.locationId);
   });
-  const totalLocations = (DB.warehouseLocations || []).length;
-  const totalStock = (DB.inventory || []).reduce((sum,row)=>sum+Number(row.qtyOnHand||0),0);
-  return `${pageHead('Kho & vị trí lưu trữ', 'Quản lý kho nguyên liệu, sản xuất, bán thành phẩm, thành phẩm, cửa hàng, hàng lỗi và hàng trả về')}
-    <div class="grid g-auto-sm" style="margin-bottom:14px">
-      ${mkpi('Tổng kho', DB.warehouses.length, 'fa-warehouse', 'blue')}
-      ${mkpi('Đang hoạt động', DB.warehouses.filter(w=>w.status==='active').length, 'fa-circle-check', 'green')}
-      ${mkpi('Tổng vị trí', totalLocations, 'fa-location-dot', 'indigo')}
-      ${mkpi('Tổng lượng đang lưu', fmtN(totalStock), 'fa-boxes-stacked', 'teal')}
+
+  const groups = [...grouped.values()].sort((a,b) => {
+    const aw = Q.warehouseName(a.warehouseId), bw = Q.warehouseName(b.warehouseId);
+    if (aw !== bw) return String(aw).localeCompare(String(bw),'vi');
+    const ai = warehouseInventoryItem(a.productId), bi = warehouseInventoryItem(b.productId);
+    return String(ai?.name || a.productId).localeCompare(String(bi?.name || b.productId),'vi');
+  });
+
+  const totalOnHand = groups.reduce((s,g)=>s+g.qtyOnHand,0);
+  const totalAvailable = groups.reduce((s,g)=>s+g.qtyAvailable,0);
+  const totalReserved = groups.reduce((s,g)=>s+g.qtyReserved,0);
+  const skuCount = new Set(groups.map(g=>g.productId)).size;
+
+  const whInfo = selectedWarehouse ? (() => {
+    const locs = Q.locationsOf(selectedWarehouse.id);
+    const whRows = (DB.inventory || []).filter(r => r.warehouseId === selectedWarehouse.id);
+    const whOnHand = whRows.reduce((s,r)=>s+Number(r.qtyOnHand||0),0);
+    const whAvailable = whRows.reduce((s,r)=>s+Number(r.qtyAvailable != null ? r.qtyAvailable : Number(r.qtyOnHand||0)-Number(r.qtyReserved||0)),0);
+    const manager = (DB.employees || []).find(e => e.id === selectedWarehouse.managerId);
+    return `<div class="card" style="margin-bottom:14px">
+      <div class="card-head"><div><div class="card-title"><i class="fa-solid fa-warehouse"></i>${esc(selectedWarehouse.code || selectedWarehouse.id)} · ${esc(selectedWarehouse.name)}</div><div class="card-sub">Thông tin kho đang chọn</div></div></div>
+      <div class="info-grid">
+        ${infoItem('Loại kho', esc(warehouseTypeLabel(selectedWarehouse.type)))}
+        ${infoItem('Trạng thái', selectedWarehouse.status === 'active' ? '<span class="badge green">Đang hoạt động</span>' : '<span class="badge slate">Ngừng hoạt động</span>')}
+        ${infoItem('Địa chỉ', esc(selectedWarehouse.address || 'Chưa khai báo'))}
+        ${infoItem('Người phụ trách', esc(manager?.name || selectedWarehouse.managerId || 'Chưa khai báo'))}
+        ${infoItem('Số vị trí lưu trữ', String(locs.length))}
+        ${infoItem('Tổng tồn thực tế', fmtDec(whOnHand, 3))}
+        ${infoItem('Tồn khả dụng', fmtDec(whAvailable, 3))}
+      </div>
+      ${selectedWarehouse.note ? `<div class="cell-sub" style="margin-top:10px"><i class="fa-solid fa-note-sticky"></i> ${esc(selectedWarehouse.note)}</div>` : ''}
+    </div>`;
+  })() : `<div class="alert-item" style="margin-bottom:14px"><span class="alert-ico t-blue"><i class="fa-solid fa-circle-info"></i></span><span><span class="alert-title">Chọn một kho để xem đầy đủ thông tin kho</span><div class="alert-sub">Bạn vẫn có thể để “Tất cả kho” để so sánh tồn giữa nhiều địa điểm.</div></span></div>`;
+
+  const rows = groups.map(g => {
+    const item = warehouseInventoryItem(g.productId);
+    const wh = Q.warehouse(g.warehouseId);
+    const locations = [...g.locationIds].map(id => Q.locationName(id)).filter(Boolean);
+    const unit = item?.unit || '';
+    return `<tr>
+      <td>${cell2(`<span class="code">${esc(g.productId)}</span>`, esc(item?.name || g.productId))}</td>
+      <td><span class="badge ${g.type === 'RAW_MATERIAL' ? 'blue' : g.type === 'SEMI_FINISHED' ? 'indigo' : 'green'}">${esc(warehouseInventoryTypeLabel(g.type))}</span></td>
+      <td>${cell2(esc(wh?.name || g.warehouseId), esc(wh?.address || ''))}</td>
+      <td>${esc(locations.join(', ') || '—')}</td>
+      <td class="center num">${g.lotIds.size}</td>
+      <td class="right strong num">${fmtDec(g.qtyOnHand,3)} ${esc(unit)}</td>
+      <td class="right num">${fmtDec(g.qtyReserved,3)} ${esc(unit)}</td>
+      <td class="right strong num">${fmtDec(g.qtyAvailable,3)} ${esc(unit)}</td>
+      <td class="right num">${fmtDec(g.qtyPending,3)} ${esc(unit)}</td>
+    </tr>`;
+  });
+
+  return `${pageHead('Kho', 'Xem tồn kho theo từng địa điểm vật lý và lọc theo loại hàng hóa. Dữ liệu lấy từ tồn kho hiện tại trên server.')}
+    <div class="card" style="margin-bottom:14px">
+      <div class="toolbar">
+        ${selectFilter('inv-warehouse-browser','warehouseId',warehouseOptions,'Tất cả kho')}
+        ${selectFilter('inv-warehouse-browser','itemType',[
+          ['RAW_MATERIAL','Nguyên liệu'],
+          ['SEMI_FINISHED','Bán thành phẩm'],
+          ['FINISHED_GOODS','Thành phẩm']
+        ],'Tất cả loại tồn')}
+        ${searchBox('inv-warehouse-browser','Tìm mã, tên hàng, lô, vị trí…')}
+        ${(f.warehouseId || f.itemType || f.q) ? '<button class="btn btn-sm" data-act="clear-filter" data-key="inv-warehouse-browser"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>' : ''}
+        <span class="spacer"></span><span class="chip"><i class="fa-solid fa-list"></i> ${fmtN(groups.length)} dòng</span>
+      </div>
     </div>
-    <div class="card">${tableShell([{ t: 'Mã kho' }, { t: 'Tên kho' }, { t: 'Loại kho' }, { t: 'Số vị trí' }, { t: 'Tồn hiện tại', cls: 'right' }, { t: 'Trạng thái' }, { t: 'Ghi chú' }], rows, { emptyTitle: 'Chưa có kho' })}</div>`;
+    ${whInfo}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">
+      ${mkpi('Mã hàng', skuCount, 'fa-barcode', 'blue')}
+      ${mkpi('Tổng tồn', fmtDec(totalOnHand,3), 'fa-boxes-stacked', 'teal')}
+      ${mkpi('Đang giữ chỗ', fmtDec(totalReserved,3), 'fa-cart-flatbed', 'orange')}
+      ${mkpi('Khả dụng', fmtDec(totalAvailable,3), 'fa-circle-check', 'green')}
+    </div>
+    <div class="card">${tableShell([
+      {t:'Mã / Tên hàng'}, {t:'Loại tồn'}, {t:'Kho'}, {t:'Vị trí'}, {t:'Số lô',cls:'center'},
+      {t:'Tồn thực tế',cls:'right'}, {t:'Giữ chỗ',cls:'right'}, {t:'Khả dụng',cls:'right'}, {t:'Chờ QC',cls:'right'}
+    ], rows, {emptyTitle:'Không có tồn kho phù hợp', emptyDesc:'Thử chọn kho hoặc loại tồn khác.'})}</div>`;
+};
+
+Views['inv-warehouses'] = function () {
+  const f = F('inv-warehouses', { siteId:'', zoneId:'', rackId:'', itemType:'', q:'', tab:'overview' });
+  const q=String(f.q||'').trim().toLowerCase();
+  const sites=warehouseSitesList();
+  const selectedSite=sites.find(x=>x.id===f.siteId)||null;
+  const allZones=(DB.warehouses||[]);
+
+  const siteRows=sites.map(site=>{
+    const zones=warehouseZonesOfSite(site.id), zoneIds=new Set(zones.map(z=>z.id));
+    const stockRows=(DB.inventory||[]).filter(r=>zoneIds.has(r.warehouseId));
+    const onHand=stockRows.reduce((s,r)=>s+Number(r.qtyOnHand||0),0);
+    const available=stockRows.reduce((s,r)=>s+Number(r.qtyAvailable!=null?r.qtyAvailable:(Number(r.qtyOnHand||0)-Number(r.qtyReserved||0))),0);
+    const shelves=(DB.warehouseLocations||[]).filter(l=>zoneIds.has(l.warehouseId)&&l.status!=='inactive').length;
+    const skuCount=new Set(stockRows.filter(r=>Number(r.qtyOnHand||0)!==0).map(r=>r.productId)).size;
+    const lotCount=new Set(stockRows.filter(r=>r.lotId).map(r=>r.lotId)).size;
+    return `<tr class="clickable" data-act="inv-warehouse-site-open" data-id="${esc(site.id)}">
+      <td><span class="code">${esc(site.code||site.id)}</span></td>
+      <td class="strong">${esc(site.name)}<div class="cell-sub">${esc(site.address||'Chưa khai báo địa chỉ')}</div></td>
+      <td class="center num">${zones.length}</td><td class="center num">${shelves}</td><td class="center num">${skuCount}</td><td class="center num">${lotCount}</td>
+      <td class="right num">${fmtDec(onHand,3)}</td><td>${site.status==='active'?'<span class="badge green">Đang hoạt động</span>':'<span class="badge slate">Ngừng hoạt động</span>'}</td>
+      <td class="right" onclick="event.stopPropagation()">${rowActions([
+        {act:'inv-warehouse-site-open',data:`data-id="${esc(site.id)}"`,icon:'fa-eye',title:'Mở kho'},
+        {act:'inv-warehouse-edit',data:`data-id="${esc(site.id)}"`,icon:'fa-pen',title:'Sửa kho'},
+        ...(zones.length===0?[{act:'inv-warehouse-delete',data:`data-id="${esc(site.id)}"`,icon:'fa-trash',title:'Xóa kho'}]:[])
+      ])}</td></tr>`;
+  });
+
+  if(!selectedSite){
+    const totalShelves=(DB.warehouseLocations||[]).filter(x=>x.status!=='inactive').length;
+    return `${pageHead('Quản lý kho','Danh sách kho vật lý. Bấm vào một kho để quản lý khu, kệ, tồn kho, lô và lịch sử.','<button class="btn btn-primary" data-act="inv-warehouse-new"><i class="fa-solid fa-plus"></i>Thêm kho</button>')}
+      <div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Tổng kho',sites.length,'fa-warehouse','blue')}${mkpi('Đang hoạt động',sites.filter(x=>x.status==='active').length,'fa-circle-check','green')}${mkpi('Tổng khu',allZones.length,'fa-border-all','indigo')}${mkpi('Tổng kệ',totalShelves,'fa-layer-group','teal')}</div>
+      <div class="card"><div class="card-head"><div><div class="card-title"><i class="fa-solid fa-warehouse"></i>Danh sách kho</div><div class="card-sub">Kho là địa điểm vật lý như Kho Thủ Đức, Kho Bình Dương, Kho Đồng Nai.</div></div></div>
+      ${tableShell([{t:'Mã kho'},{t:'Tên kho / Địa chỉ'},{t:'Khu',cls:'center'},{t:'Kệ',cls:'center'},{t:'Mặt hàng',cls:'center'},{t:'Lô',cls:'center'},{t:'Tổng tồn',cls:'right'},{t:'Trạng thái'},{t:'Thao tác',cls:'right',w:'115px'}],siteRows,{emptyTitle:'Chưa có kho',emptyDesc:'Bấm Thêm kho để khai báo địa điểm kho đầu tiên.'})}</div>`;
+  }
+
+  const siteZones=warehouseZonesOfSite(selectedSite.id), siteZoneIds=new Set(siteZones.map(z=>z.id));
+  const siteInv=(DB.inventory||[]).filter(r=>siteZoneIds.has(r.warehouseId));
+  const siteStock=siteInv.reduce((s,r)=>s+Number(r.qtyOnHand||0),0);
+  const siteAvailable=siteInv.reduce((s,r)=>s+Number(r.qtyAvailable!=null?r.qtyAvailable:(Number(r.qtyOnHand||0)-Number(r.qtyReserved||0))),0);
+  const activeShelves=(DB.warehouseLocations||[]).filter(l=>siteZoneIds.has(l.warehouseId)&&l.status!=='inactive');
+  const skuCount=new Set(siteInv.filter(r=>Number(r.qtyOnHand||0)!==0).map(r=>r.productId)).size;
+  const lotCount=new Set(siteInv.filter(r=>r.lotId).map(r=>r.lotId)).size;
+  const selectedZone=siteZones.find(z=>z.id===f.zoneId)||null;
+  const selectedRack=(DB.warehouseLocations||[]).find(r=>r.id===f.rackId&&siteZoneIds.has(r.warehouseId))||null;
+  const tab=f.tab||'overview';
+  const tabs=[['overview','Tổng quan','fa-chart-pie'],['zones','Khu & Kệ','fa-layer-group'],['stock','Tồn kho','fa-boxes-stacked'],['lots','Lô & HSD','fa-calendar-days'],['history','Lịch sử nhập xuất','fa-clock-rotate-left']];
+  const topBack=`<div style="display:flex;align-items:center;margin:0 0 10px"><button class="btn" data-act="inv-warehouse-site-back"><i class="fa-solid fa-arrow-left"></i>Trở về danh sách kho</button></div>`;
+  const tabBar=`<div class="card" style="padding:8px;margin-bottom:14px"><div style="display:flex;gap:6px;flex-wrap:wrap">${tabs.map(([id,label,icon])=>`<button class="btn ${tab===id?'btn-primary':''}" data-act="inv-warehouse-tab" data-tab="${id}"><i class="fa-solid ${icon}"></i>${label}</button>`).join('')}</div></div>`;
+  const header=`${topBack}${pageHead('Quản lý kho',`${selectedSite.name} · ${selectedSite.address||'Chưa khai báo địa chỉ'}`,`<button class="btn" data-act="inv-warehouse-edit" data-id="${esc(selectedSite.id)}"><i class="fa-solid fa-pen"></i>Sửa thông tin kho</button>`)}`;
+
+  let content='';
+  if(tab==='overview'){
+    const zoneSummary=siteZones.map(z=>{const st=warehouseZoneStock(z.id), racks=warehouseRacksOfZone(z.id).filter(r=>r.status!=='inactive');return `<tr class="clickable" data-act="inv-warehouse-zone-open" data-site="${esc(selectedSite.id)}" data-id="${esc(z.id)}"><td class="strong">${esc(z.zoneName||warehouseZoneTypeLabel(z.type))}<div class="cell-sub">${esc(warehouseInventoryTypeLabel(z.type))}</div></td><td class="center num">${racks.length}</td><td class="right num">${fmtDec(st.onHand,3)}</td><td class="right num">${fmtDec(st.available,3)}</td><td>${z.status==='inactive'?'<span class="badge slate">Ngừng hoạt động</span>':'<span class="badge green">Hoạt động</span>'}</td></tr>`;});
+    content=`<div class="grid g-auto-sm" style="margin-bottom:14px">${mkpi('Số khu',siteZones.length,'fa-border-all','indigo')}${mkpi('Số kệ',activeShelves.length,'fa-layer-group','teal')}${mkpi('Mặt hàng đang lưu',skuCount,'fa-box','blue')}${mkpi('Số lô',lotCount,'fa-tags','orange')}${mkpi('Tổng tồn',fmtDec(siteStock,3),'fa-cubes','blue')}${mkpi('Khả dụng',fmtDec(siteAvailable,3),'fa-circle-check','green')}</div>
+      <div class="card"><div class="card-head"><div><div class="card-title"><i class="fa-solid fa-border-all"></i>Tổng quan các khu</div><div class="card-sub">Bấm vào khu để chuyển sang quản lý Khu & Kệ.</div></div><button class="btn btn-primary" data-act="inv-warehouse-zone-new" data-site="${esc(selectedSite.id)}"><i class="fa-solid fa-plus"></i>Thêm khu</button></div>${tableShell([{t:'Khu'},{t:'Số kệ',cls:'center'},{t:'Tồn',cls:'right'},{t:'Khả dụng',cls:'right'},{t:'Trạng thái'}],zoneSummary,{emptyTitle:'Chưa có khu',emptyDesc:'Bấm Thêm khu để tạo khu đầu tiên.'})}</div>`;
+  }
+
+  if(tab==='zones'){
+    let zoneList=siteZones;
+    if(f.itemType)zoneList=zoneList.filter(z=>z.type===f.itemType);
+    const zoneButtons=zoneList.map(z=>{const st=warehouseZoneStock(z.id),racks=warehouseRacksOfZone(z.id),active=selectedZone?.id===z.id;return `<button type="button" class="card clickable" data-act="inv-warehouse-zone-open" data-site="${esc(selectedSite.id)}" data-id="${esc(z.id)}" style="width:100%;text-align:left;padding:12px;margin-bottom:8px;border:${active?'2px solid var(--blue)':'1px solid var(--border)'}"><div class="strong">${esc(z.zoneName||warehouseZoneTypeLabel(z.type))}</div><div class="cell-sub">${racks.length} kệ · Tồn ${fmtDec(st.onHand,3)}</div></button>`;}).join('');
+    let rackPanel=`<div class="empty"><i class="fa-solid fa-arrow-left"></i><div class="empty-title">Chọn một khu</div><div class="empty-desc">Chọn khu bên trái để xem và quản lý các kệ.</div></div>`;
+    if(selectedZone){
+      const racks=warehouseRacksOfZone(selectedZone.id);
+      const rackCards=racks.map(r=>{const used=warehouseRackUsage(r.id),cap=Number(r.capacity||0),pct=cap>0?Math.min(100,(used/cap)*100):0,active=selectedRack?.id===r.id;const free=cap>0?Math.max(0,cap-used):null;const state=cap>0?(pct>=100?'Đầy':pct>=80?'Gần đầy':'Còn chỗ'):'Chưa đặt sức chứa';return `<div class="card" style="padding:12px;border:${active?'2px solid var(--blue)':'1px solid var(--border)'}"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><button class="clickable" style="border:0;background:none;text-align:left;padding:0;min-width:0;flex:1" data-act="inv-warehouse-rack-open" data-id="${esc(r.id)}"><div class="strong"><i class="fa-solid fa-layer-group"></i> ${esc(r.code||'')} · ${esc(r.name||'')}</div><div class="cell-sub">${esc(state)}${cap>0?` · ${fmtDec(used,3)} / ${fmtDec(cap,3)} ${esc(r.capacityUnit||'')}`:''}</div></button><div>${rowActions([{act:'inv-warehouse-rack-edit',data:`data-site="${esc(selectedSite.id)}" data-zone="${esc(selectedZone.id)}" data-id="${esc(r.id)}"`,icon:'fa-pen',title:'Sửa kệ'},{act:'inv-warehouse-rack-delete',data:`data-id="${esc(r.id)}"`,icon:'fa-trash',title:'Xóa kệ'}])}</div></div>${cap>0?`<div style="height:7px;background:var(--surface-2);border-radius:99px;overflow:hidden;margin-top:10px"><div style="height:100%;width:${pct}%;background:${pct>=100?'var(--red)':pct>=80?'var(--orange)':'var(--green)'}"></div></div><div class="cell-sub" style="margin-top:5px">Đã dùng ${pct.toFixed(1).replace('.',',')}%${free!=null?` · Còn ${fmtDec(free,3)} ${esc(r.capacityUnit||'')}`:''}</div>`:''}</div>`;}).join('');
+      rackPanel=`<div class="card-head"><div><div class="card-title">${esc(selectedZone.zoneName||warehouseZoneTypeLabel(selectedZone.type))}</div><div class="card-sub">Kệ kế thừa loại hàng của khu: ${esc(warehouseInventoryTypeLabel(selectedZone.type))}</div></div><div style="display:flex;gap:8px"><button class="btn btn-sm" data-act="inv-warehouse-zone-edit" data-site="${esc(selectedSite.id)}" data-id="${esc(selectedZone.id)}"><i class="fa-solid fa-pen"></i>Sửa khu</button><button class="btn btn-primary btn-sm" data-act="inv-warehouse-rack-new" data-site="${esc(selectedSite.id)}" data-zone="${esc(selectedZone.id)}"><i class="fa-solid fa-plus"></i>Thêm kệ</button></div></div><div class="grid g-auto-sm" style="gap:10px">${rackCards||'<div class="empty" style="grid-column:1/-1"><i class="fa-solid fa-layer-group"></i><div class="empty-title">Khu chưa có kệ</div><div class="empty-desc">Bấm Thêm kệ để khai báo vị trí chứa hàng.</div></div>'}</div>`;
+      if(selectedRack){
+        const rows=siteInv.filter(x=>x.locationId===selectedRack.id&&(Number(x.qtyOnHand||0)!==0||Number(x.qtyReserved||0)!==0||Number(x.qtyPending||0)!==0));
+        const body=rows.map(r=>{const item=warehouseInventoryItem(r.productId),lot=Q.lot(r.lotId),unit=item?.unit||r.unit||'';return `<tr><td>${cell2(`<span class="code">${esc(r.productId)}</span>`,esc(item?.name||r.productId))}</td><td><span class="code">${esc(lot?.lotNumber||'—')}</span>${lot?.expiryDate?`<div class="cell-sub">HSD ${fmtDate(lot.expiryDate)}</div>`:''}</td><td class="right strong num">${fmtDec(r.qtyOnHand,3)} ${esc(unit)}</td><td class="right num">${fmtDec(r.qtyAvailable!=null?r.qtyAvailable:(Number(r.qtyOnHand||0)-Number(r.qtyReserved||0)),3)} ${esc(unit)}</td></tr>`;});
+        rackPanel+=`<div class="card" style="margin-top:14px"><div class="card-head"><div><div class="card-title"><i class="fa-solid fa-box-open"></i>Hàng trong ${esc(selectedRack.code||selectedRack.name)}</div><div class="card-sub">${esc(selectedRack.name||'')} · ${rows.length} dòng tồn</div></div><button class="btn btn-sm" data-act="inv-warehouse-rack-close"><i class="fa-solid fa-arrow-left"></i>Trở về danh sách kệ</button></div>${tableShell([{t:'Mặt hàng'},{t:'Lô / HSD'},{t:'Tồn',cls:'right'},{t:'Khả dụng',cls:'right'}],body,{emptyTitle:'Kệ đang trống'})}</div>`;
+      }
+    }
+    content=`<div class="card"><div class="card-head"><div><div class="card-title"><i class="fa-solid fa-layer-group"></i>Khu & Kệ</div><div class="card-sub">Chọn khu bên trái, quản lý kệ bên phải, sau đó bấm kệ để xem hàng đang chứa.</div></div><button class="btn btn-primary" data-act="inv-warehouse-zone-new" data-site="${esc(selectedSite.id)}"><i class="fa-solid fa-plus"></i>Thêm khu</button></div><div class="toolbar">${selectFilter('inv-warehouses','itemType',[['RAW_MATERIAL','Nguyên liệu'],['SEMI_FINISHED','Bán thành phẩm'],['FINISHED_GOODS','Thành phẩm'],['STORE','Kho cửa hàng']],'Tất cả loại khu')}</div><div style="display:grid;grid-template-columns:minmax(230px,30%) 1fr;gap:14px"><div style="min-width:0">${zoneButtons||'<div class="empty"><div class="empty-title">Chưa có khu</div></div>'}</div><div style="min-width:0">${rackPanel}</div></div></div>`;
+  }
+
+  if(tab==='stock'){
+    let rows=siteInv.filter(r=>Number(r.qtyOnHand||0)!==0||Number(r.qtyReserved||0)!==0||Number(r.qtyPending||0)!==0);
+    if(f.zoneId)rows=rows.filter(r=>r.warehouseId===f.zoneId);
+    if(f.rackId)rows=rows.filter(r=>r.locationId===f.rackId);
+    if(f.itemType)rows=rows.filter(r=>warehouseInventoryItemType(r.productId)===f.itemType);
+    if(q)rows=rows.filter(r=>{const item=warehouseInventoryItem(r.productId),loc=Q.warehouseLocation(r.locationId),lot=Q.lot(r.lotId);return [r.productId,item?.name,loc?.code,loc?.name,lot?.lotNumber].join(' ').toLowerCase().includes(q);});
+    const body=rows.map(r=>{const item=warehouseInventoryItem(r.productId),loc=Q.warehouseLocation(r.locationId),lot=Q.lot(r.lotId),zone=(DB.warehouses||[]).find(z=>z.id===r.warehouseId),type=warehouseInventoryItemType(r.productId),unit=item?.unit||r.unit||'';return `<tr><td>${cell2(`<span class="code">${esc(r.productId)}</span>`,esc(item?.name||r.productId))}</td><td>${esc(zone?.zoneName||warehouseZoneTypeLabel(zone?.type))}</td><td>${cell2(esc(loc?.code||'—'),esc(loc?.name||'Chưa gán kệ'))}</td><td><span class="code">${esc(lot?.lotNumber||'—')}</span>${lot?.expiryDate?`<div class="cell-sub">HSD ${fmtDate(lot.expiryDate)}</div>`:''}</td><td class="right strong num">${fmtDec(r.qtyOnHand,3)} ${esc(unit)}</td><td class="right num">${fmtDec(r.qtyReserved||0,3)}</td><td class="right strong num">${fmtDec(r.qtyAvailable!=null?r.qtyAvailable:(Number(r.qtyOnHand||0)-Number(r.qtyReserved||0)),3)}</td></tr>`;});
+    const zoneOpts=siteZones.map(z=>[z.id,z.zoneName||warehouseZoneTypeLabel(z.type)]), rackOpts=(f.zoneId?warehouseRacksOfZone(f.zoneId):activeShelves).map(r=>[r.id,`${r.code} · ${r.name}`]);
+    content=`<div class="card"><div class="card-head"><div><div class="card-title"><i class="fa-solid fa-boxes-stacked"></i>Tồn kho</div><div class="card-sub">Lọc từ Kho → Khu → Kệ để xem đúng vị trí hàng hóa.</div></div></div><div class="toolbar">${selectFilter('inv-warehouses','zoneId',zoneOpts,'Tất cả khu')}${selectFilter('inv-warehouses','rackId',rackOpts,'Tất cả kệ')}${selectFilter('inv-warehouses','itemType',[['RAW_MATERIAL','Nguyên liệu'],['SEMI_FINISHED','Bán thành phẩm'],['FINISHED_GOODS','Thành phẩm']],'Tất cả loại')}${searchBox('inv-warehouses','Tìm mã hàng, tên hàng, lô, kệ…')}</div>${tableShell([{t:'Mặt hàng'},{t:'Khu'},{t:'Kệ'},{t:'Lô / HSD'},{t:'Tồn',cls:'right'},{t:'Giữ chỗ',cls:'right'},{t:'Khả dụng',cls:'right'}],body,{emptyTitle:'Không có tồn kho phù hợp'})}</div>`;
+  }
+
+  if(tab==='lots'){
+    const lotIds=new Set(siteInv.filter(r=>r.lotId).map(r=>r.lotId));
+    let lots=(DB.inventoryLots||[]).filter(l=>lotIds.has(l.id));
+    if(q)lots=lots.filter(l=>{const item=warehouseInventoryItem(l.productId);return [l.lotNumber,l.productId,item?.name].join(' ').toLowerCase().includes(q);});
+    const body=lots.map(l=>{const item=warehouseInventoryItem(l.productId);const invRows=siteInv.filter(r=>r.lotId===l.id);const qty=invRows.reduce((s,r)=>s+Number(r.qtyOnHand||0),0);const locNames=[...new Set(invRows.map(r=>Q.warehouseLocation(r.locationId)?.code).filter(Boolean))].join(', ');return `<tr><td><span class="code">${esc(l.lotNumber||l.id)}</span></td><td>${cell2(`<span class="code">${esc(l.productId||'')}</span>`,esc(item?.name||''))}</td><td>${fmtDate(l.productionDate||l.manufactureDate||l.createdDate||'')}</td><td>${l.expiryDate?fmtDate(l.expiryDate):'—'}</td><td>${esc(locNames||'—')}</td><td class="right strong num">${fmtDec(qty,3)} ${esc(item?.unit||'')}</td></tr>`;});
+    content=`<div class="card"><div class="card-head"><div><div class="card-title"><i class="fa-solid fa-calendar-days"></i>Lô & HSD</div><div class="card-sub">Các lô hiện đang có tồn trong ${esc(selectedSite.name)}.</div></div></div><div class="toolbar">${searchBox('inv-warehouses','Tìm số lô, mã hoặc tên hàng…')}</div>${tableShell([{t:'Số lô'},{t:'Mặt hàng'},{t:'Ngày sản xuất'},{t:'Hạn sử dụng'},{t:'Kệ đang chứa'},{t:'Tồn',cls:'right'}],body,{emptyTitle:'Chưa có lô trong kho'})}</div>`;
+  }
+
+  if(tab==='history'){
+    let tx=(DB.inventoryTransactions||[]).filter(t=>siteZoneIds.has(t.warehouseId));
+    if(q)tx=tx.filter(t=>[t.id,t.transactionNumber,t.productId,t.note].join(' ').toLowerCase().includes(q));
+    tx=tx.slice().sort((a,b)=>String(b.date||'').localeCompare(String(a.date||''))).slice(0,300);
+    const body=tx.map(t=>{const item=warehouseInventoryItem(t.productId),zone=(DB.warehouses||[]).find(z=>z.id===t.warehouseId),lot=Q.lot(t.lotId);return `<tr><td>${fmtDate(t.date)}</td><td>${esc(t.type||'')}</td><td>${cell2(`<span class="code">${esc(t.productId||'')}</span>`,esc(item?.name||''))}</td><td>${esc(zone?.zoneName||warehouseZoneTypeLabel(zone?.type))}</td><td><span class="code">${esc(lot?.lotNumber||'—')}</span></td><td class="right num" style="color:${Number(t.qty||0)<0?'var(--orange)':'var(--green)'}">${Number(t.qty||0)>0?'+':''}${fmtDec(t.qty||0,3)}</td><td>${esc(t.note||'')}</td></tr>`;});
+    content=`<div class="card"><div class="card-head"><div><div class="card-title"><i class="fa-solid fa-clock-rotate-left"></i>Lịch sử nhập xuất</div><div class="card-sub">Tối đa 300 giao dịch gần nhất của các khu thuộc kho này.</div></div></div><div class="toolbar">${searchBox('inv-warehouses','Tìm mã hàng, giao dịch, ghi chú…')}</div>${tableShell([{t:'Ngày'},{t:'Loại'},{t:'Mặt hàng'},{t:'Khu'},{t:'Lô'},{t:'SL',cls:'right'},{t:'Diễn giải'}],body,{emptyTitle:'Chưa có lịch sử giao dịch'})}</div>`;
+  }
+
+  return `${header}${tabBar}${content}`;
 };
 
 Views['inv-transactions'] = function () {
@@ -1665,11 +2075,16 @@ Views['inv-defects'] = function () {
  * KHO -> KẾ HOẠCH SẢN XUẤT / DUYỆT YÊU CẦU NVL
  * ========================================================================== */
 function pfSalesDemandGroups(){
-  const excluded=new Set(['dh_cho_xu_ly','dh_hoan_thanh','dh_da_giao','dh_tu_choi','dh_da_huy']);
+  // Màn lập KHSX chỉ theo dõi các đơn còn ở giai đoạn chuẩn bị/đang sản xuất.
+  // Đơn đã sẵn sàng xuất, đang vận chuyển, đã giao hoặc hoàn tất tuyệt đối không
+  // được quay lại tính nhu cầu theo tồn kho hiện tại.
+  const excluded=new Set([
+    'dh_cho_xu_ly','dh_hoan_thanh','dh_cho_van_chuyen','dh_dang_giao',
+    'dh_da_giao','dh_hoan_tat','dh_tu_choi','dh_da_huy'
+  ]);
   const orders=(DB.orders||[])
     .filter(o=>o.approvedAt&&!excluded.has(o.status))
-    .slice()
-    .sort((a,b)=>String(a.dueDate||a.date||a.id).localeCompare(String(b.dueDate||b.date||b.id)));
+    .slice();
   const remaining=new Map();
   const getAvailable=(pid)=>{
     if(!remaining.has(pid)){
@@ -1679,18 +2094,50 @@ function pfSalesDemandGroups(){
     return Number(remaining.get(pid)||0);
   };
   const activePlans=(DB.productionPlans||[]).filter(p=>p.source==='SALES_ORDER'&&p.status!=='CANCELLED');
-  return orders.map(o=>{
+  const groups=orders.map(o=>{
+    const orderPlans=activePlans.filter(p=>String(p.sourceOrderId||'')===String(o.id||''));
     const lines=(o.items||[]).map(it=>{
       const need=Number(it.qty||0);
       const avail=getAvailable(it.productId);
       const allocated=Math.min(need,avail);
       remaining.set(it.productId,Math.max(0,avail-allocated));
       const shortage=Math.max(0,need-allocated);
-      const planned=activePlans.filter(p=>p.sourceOrderId===o.id).reduce((sum,p)=>sum+(p.items||[]).filter(x=>x.productId===it.productId).reduce((s,x)=>s+Number(x.qty||0),0),0);
+      const planned=orderPlans.reduce((sum,p)=>sum+(p.items||[]).filter(x=>String(x.productId||'')===String(it.productId||'')).reduce((s,x)=>s+Number(x.qty||0),0),0);
       return {productId:it.productId,name:it.name||Q.product(it.productId)?.name||it.productId,unit:it.unit||Q.product(it.productId)?.unit||'',need,allocated,shortage,planned,unplanned:Math.max(0,shortage-planned)};
     });
-    return {order:o,lines,shortage:lines.reduce((s,x)=>s+x.shortage,0),planned:lines.reduce((s,x)=>s+x.planned,0),unplanned:lines.reduce((s,x)=>s+x.unplanned,0)};
+    const shortage=lines.reduce((s,x)=>s+x.shortage,0);
+    const planned=lines.reduce((s,x)=>s+x.planned,0);
+    const unplanned=lines.reduce((s,x)=>s+x.unplanned,0);
+    const hasPlan=orderPlans.length>0;
+    const inProduction=o.status==='dh_dang_san_xuat';
+    const state=unplanned>0?'NEED_PLAN':inProduction?'IN_PRODUCTION':hasPlan?'PLANNED':shortage<=0?'AVAILABLE':'PLANNED';
+    return {order:o,lines,shortage,planned,unplanned,hasPlan,inProduction,state,planIds:orderPlans.map(p=>p.id)};
   });
+  // Ưu tiên nghiệp vụ: cần lập KH -> đang SX -> đã có KH -> đủ tồn.
+  // Trong cùng nhóm, đơn có ngày giao gần hơn đứng trước; nếu trùng thì đơn mới hơn đứng trước.
+  const rank={NEED_PLAN:0,IN_PRODUCTION:1,PLANNED:2,AVAILABLE:3};
+  return groups.sort((a,b)=>{
+    const r=(rank[a.state]??9)-(rank[b.state]??9); if(r) return r;
+    const da=String(a.order.dueDate||'9999-12-31'), db=String(b.order.dueDate||'9999-12-31');
+    if(da!==db) return da.localeCompare(db);
+    return String(b.order.date||b.order.createdAt||b.order.id||'').localeCompare(String(a.order.date||a.order.createdAt||a.order.id||''));
+  });
+}
+function pfDemandStatusHtml(g){
+  if(g.state==='NEED_PLAN') return '<span class="badge orange">Thiếu · Chưa lập đủ KH</span>';
+  if(g.state==='IN_PRODUCTION') return '<span class="badge blue">Đang sản xuất</span>';
+  if(g.state==='PLANNED') return '<span class="badge indigo">Đã lập kế hoạch</span>';
+  return '<span class="badge green">Đủ tồn · Không cần SX</span>';
+}
+function pfPlanDerivedStatus(p){
+  if(!p) return '';
+  if(p.status==='RELEASED'){
+    const ids=new Set((p.productionOrderIds||[]).map(String));
+    const pos=(DB.productionOrders||[]).filter(po=>ids.has(String(po.id))||String(po.planId||'')===String(p.id||''));
+    if(pos.length&&pos.every(po=>['lsx_hoan_thanh','lsx_da_nhap_kho'].includes(po.status))) return '<span class="badge green">Sản xuất hoàn thành</span>';
+    if(pos.some(po=>['lsx_dang_san_xuat','lsx_dang_qc'].includes(po.status))) return '<span class="badge blue">Đang sản xuất</span>';
+  }
+  return pfPlanStatus(p.status);
 }
 Views['warehouse-production-plan'] = function () {
   const plans=(DB.productionPlans||[]).filter(p=>p.status!=='CANCELLED');
@@ -1738,10 +2185,48 @@ Views['warehouse-production-requests'] = function () {
     </div><div class="card">${tableShell([{t:'Phiếu'},{t:'Ngày'},{t:'Nguyên liệu / SL'},{t:'Trạng thái'},{t:'Người yêu cầu'},{t:'Thao tác',cls:'right'}],rows,{emptyTitle:'Chưa có yêu cầu NVL sản xuất'})}</div>`;
 };
 
+Views['warehouse-store-replenishment'] = function () {
+  const f=F('warehouse-store-replenishment',{q:'',status:'REQUESTED',storeId:''});
+  const q=String(f.q||'').trim().toLowerCase();
+  const stores=(DB.stores||[]).filter(x=>x.status!=='inactive');
+  let list=[...(DB.storeReplenishmentRequests||[])].filter(r=>{
+    if(f.status&&r.status!==f.status)return false;
+    if(f.storeId&&r.storeId!==f.storeId)return false;
+    const st=(typeof restaurantStore==='function'?restaurantStore(r.storeId):stores.find(x=>x.id===r.storeId));
+    const items=typeof restaurantRequestItems==='function'?restaurantRequestItems(r):(r.items||[]);
+    const hay=[r.id,st?.name,r.transferId,...items.map(x=>Q.product(x.productId)?.name||x.productId)].join(' ').toLowerCase();
+    return !q||hay.includes(q);
+  }).sort((a,b)=>String(b.createdAt||b.date||'').localeCompare(String(a.createdAt||a.date||''))||String(b.id||'').localeCompare(String(a.id||'')));
+  const rows=list.map(r=>{
+    const store=typeof restaurantStore==='function'?restaurantStore(r.storeId):stores.find(x=>x.id===r.storeId);
+    const items=typeof restaurantRequestItems==='function'?restaurantRequestItems(r):(r.items||[]);
+    const itemText=items.slice(0,2).map(it=>esc(Q.product(it.productId)?.name||it.productId)).join('<br>')+(items.length>2?`<div class="cell-sub">+${items.length-2} mặt hàng</div>`:'');
+    const qtyText=items.slice(0,2).map(it=>`${fmtDec(Number(it.quantity||0),3)} ${esc(Q.product(it.productId)?.unit||'')}`).join('<br>');
+    const acts=[{act:'restaurant-replenishment-view',data:`data-id="${esc(r.id)}"`,icon:'fa-eye',title:'Xem yêu cầu'}];
+    if(r.status==='REQUESTED')acts.push({act:'restaurant-replenishment-fulfill',data:`data-id="${esc(r.id)}"`,icon:'fa-check',title:'Kho duyệt và xuất hàng'});
+    return `<tr><td><span class="code">${esc(r.id)}</span><div class="cell-sub">${fmtDate(r.date)}</div></td><td>${esc(store?.name||r.storeId)}</td><td>${itemText||'—'}</td><td class="right num">${qtyText||'—'}</td><td>${typeof restaurantReplenishmentStatus==='function'?restaurantReplenishmentStatus(r.status):esc(r.status)}</td><td>${r.transferId?`<span class="code">${esc(r.transferId)}</span>`:'—'}</td><td class="right">${rowActions(acts)}</td></tr>`;
+  }).join('');
+  const all=DB.storeReplenishmentRequests||[];
+  return `${pageHead('Duyệt bổ sung hàng cửa hàng','Kho là bộ phận duyệt yêu cầu bổ sung và thực hiện xuất thành phẩm cho cửa hàng','')}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">
+      ${mkpi('Chờ kho duyệt',all.filter(r=>r.status==='REQUESTED').length,'fa-hourglass-half','orange')}
+      ${mkpi('Kho đã xuất',all.filter(r=>r.status==='ISSUED').length,'fa-truck-ramp-box','blue')}
+      ${mkpi('Cửa hàng đã nhận',all.filter(r=>r.status==='RECEIVED').length,'fa-circle-check','green')}
+    </div>
+    <div class="card"><div class="toolbar">
+      ${searchBox('warehouse-store-replenishment','Tìm mã yêu cầu, cửa hàng, thành phẩm…')}
+      ${selectFilter('warehouse-store-replenishment','storeId',stores.map(x=>[x.id,x.name]),'Tất cả cửa hàng')}
+      ${selectFilter('warehouse-store-replenishment','status',[['REQUESTED','Chờ kho duyệt'],['ISSUED','Kho đã xuất'],['RECEIVED','Cửa hàng đã nhận']],'Tất cả trạng thái')}
+      ${(f.q||f.storeId||f.status)?'<button class="btn btn-sm" data-act="clear-filter" data-key="warehouse-store-replenishment"><i class="fa-solid fa-filter-circle-xmark"></i>Xóa lọc</button>':''}
+      <span class="spacer"></span><span class="chip">${fmtN(list.length)} yêu cầu</span>
+    </div>${tableShell([{t:'Yêu cầu'},{t:'Cửa hàng'},{t:'Thành phẩm'},{t:'SL yêu cầu',cls:'right'},{t:'Trạng thái'},{t:'Phiếu xuất'},{t:'Thao tác',cls:'right'}],rows,{emptyTitle:'Không có yêu cầu bổ sung phù hợp'})}</div>`;
+};
+
 const _warehouseViewBeforeProductionFlow = Views.warehouse;
 Views.warehouse = function () {
   const tab=State.tab||'dashboard';
   if(tab==='production_plan') return Views['warehouse-production-plan']();
+  if(tab==='store_replenishment') return Views['warehouse-store-replenishment']();
   if(tab==='production_requests'){ F('inv-issues').issueTab='raw'; return Views['inv-issues'](); }
   return _warehouseViewBeforeProductionFlow ? _warehouseViewBeforeProductionFlow(State.params) : '';
 };
@@ -1781,23 +2266,46 @@ Views['warehouse-production-plan'] = function () {
       </div>`;
   }
 
-  const plans=(DB.productionPlans||[]).filter(p=>p.status!=='CANCELLED');
+  const fDemand=F('warehouse-production-plan',{planTab:'production',demand:'ACTION',planStatus:''});
+  const allPlans=(DB.productionPlans||[]).filter(p=>p.status!=='CANCELLED');
+  let plans=allPlans.slice().sort((a,b)=>String(b.createdAt||b.date||b.id||'').localeCompare(String(a.createdAt||a.date||a.id||'')));
+  if(fDemand.planStatus) plans=plans.filter(p=>p.status===fDemand.planStatus);
   const zero=(DB.products||[]).filter(p=>pfFinishedStock(p.id)<=0);
-  const demands=pfSalesDemandGroups();
+  const allDemands=pfSalesDemandGroups();
+  let demands=allDemands;
+  if(fDemand.demand==='ACTION') demands=allDemands.filter(g=>g.state!=='AVAILABLE');
+  else if(fDemand.demand) demands=allDemands.filter(g=>g.state===fDemand.demand);
+  const needCount=allDemands.filter(g=>g.state==='NEED_PLAN').length;
+  const runningCount=allDemands.filter(g=>g.state==='IN_PRODUCTION').length;
+  const plannedCount=allDemands.filter(g=>g.state==='PLANNED').length;
+  const availableCount=allDemands.filter(g=>g.state==='AVAILABLE').length;
   const demandRows=demands.map(g=>{
     const o=g.order;
-    const planIds=(DB.productionPlans||[]).filter(p=>p.source==='SALES_ORDER'&&p.sourceOrderId===o.id&&p.status!=='CANCELLED').map(p=>p.id);
-    const status=g.shortage<=0?'<span class="badge green">Đủ tồn khả dụng</span>':g.unplanned>0?'<span class="badge orange">Thiếu · Chưa lập đủ KH</span>':'<span class="badge blue">Đã lập kế hoạch</span>';
-    return `<tr><td><span class="code">${esc(o.id)}</span><div class="cell-sub">${esc(Q.customerName(o.customerId)||'')}</div></td><td>${(g.lines||[]).map(x=>`${esc(x.name)}<div class="cell-sub">Đặt ${fmtN(x.need)} · khả dụng ${fmtN(x.allocated)} · thiếu ${fmtN(x.shortage)} ${esc(x.unit)}</div>`).join('<br>')}</td><td>${fmtDate(o.dueDate)}</td><td>${status}${planIds.length?`<div class="cell-sub">${planIds.map(id=>esc(id)).join(', ')}</div>`:''}</td><td class="right">${rowActions([{act:'open-order',data:`data-id="${esc(o.id)}"`,icon:'fa-eye',title:'Xem chi tiết đơn hàng'},...(g.unplanned>0?[{act:'pf-plan-from-sales-order',data:`data-id="${esc(o.id)}"`,icon:'fa-industry',title:'Lập kế hoạch sản xuất phần thiếu'}]:[])])}</td></tr>`;
+    const status=pfDemandStatusHtml(g);
+    return `<tr><td><span class="code">${esc(o.id)}</span><div class="cell-sub">${esc(Q.customerName(o.customerId)||'')}</div></td><td>${(g.lines||[]).map(x=>`${esc(x.name)}<div class="cell-sub">Đặt ${fmtN(x.need)} · khả dụng ${fmtN(x.allocated)} · thiếu ${fmtN(x.shortage)} ${esc(x.unit)}</div>`).join('<br>')}</td><td>${fmtDate(o.dueDate)}</td><td>${status}${g.planIds.length?`<div class="cell-sub">${g.planIds.map(id=>esc(id)).join(', ')}</div>`:''}</td><td class="right">${rowActions([{act:'open-order',data:`data-id="${esc(o.id)}"`,icon:'fa-eye',title:'Xem chi tiết đơn hàng'},...(g.unplanned>0?[{act:'pf-plan-from-sales-order',data:`data-id="${esc(o.id)}"`,icon:'fa-industry',title:'Lập kế hoạch sản xuất phần thiếu'}]:[])])}</td></tr>`;
   }).join('');
-  const rows=plans.map(p=>`<tr><td><span class="code">${esc(p.id)}</span>${p.source==='SALES_ORDER'?`<div class="cell-sub">Đơn ${esc(p.sourceOrderId||'')}</div>`:''}</td><td>${fmtDate(p.date)}</td><td>${(p.items||[]).map(i=>`${esc(Q.product(i.productId)?.name||i.productId)} · <b>${fmtN(i.qty)}</b>`).join('<br>')}</td><td>${pfPlanStatus(p.status)}</td><td>${esc(Q.employeeName(p.createdBy)||p.createdBy||'—')}</td><td class="right">${rowActions([{act:'pf-plan-view',data:`data-id="${esc(p.id)}"`,icon:'fa-eye',title:'Xem chi tiết kế hoạch'},...(p.status==='WAITING_APPROVAL'?[...(p.source!=='SALES_ORDER'?[{act:'pf-plan-edit',data:`data-id="${esc(p.id)}"`,icon:'fa-pen',title:'Sửa kế hoạch'}]:[]),{act:'pf-plan-approve',data:`data-id="${esc(p.id)}"`,icon:'fa-check',title:'Duyệt kế hoạch'},{act:'pf-plan-delete',data:`data-id="${esc(p.id)}"`,icon:'fa-trash',title:'Xóa kế hoạch'}]:[])])}</td></tr>`).join('');
-  return `${pageHead('Kế hoạch sản xuất & gia công','Kho theo dõi nhu cầu thành phẩm, lập kế hoạch sản xuất và nhận thông tin kế hoạch gia công đã duyệt.',`<button class="btn btn-primary" data-act="pf-plan-new"><i class="fa-solid fa-plus"></i>Lập kế hoạch sản xuất</button>`)}
+  const rows=plans.map(p=>`<tr><td><span class="code">${esc(p.id)}</span>${p.source==='SALES_ORDER'?`<div class="cell-sub">Đơn ${esc(p.sourceOrderId||'')}</div>`:''}</td><td>${fmtDate(p.date)}</td><td>${(p.items||[]).map(i=>`${esc(Q.product(i.productId)?.name||i.productId)} · <b>${fmtN(i.qty)}</b>`).join('<br>')}</td><td>${pfPlanDerivedStatus(p)}</td><td>${esc(Q.employeeName(p.createdBy)||p.createdBy||'—')}</td><td class="right">${rowActions([{act:'pf-plan-view',data:`data-id="${esc(p.id)}"`,icon:'fa-eye',title:'Xem chi tiết kế hoạch'},...(p.status==='WAITING_APPROVAL'?[...(p.source!=='SALES_ORDER'?[{act:'pf-plan-edit',data:`data-id="${esc(p.id)}"`,icon:'fa-pen',title:'Sửa kế hoạch'}]:[]),{act:'pf-plan-approve',data:`data-id="${esc(p.id)}"`,icon:'fa-check',title:'Duyệt kế hoạch'},{act:'pf-plan-delete',data:`data-id="${esc(p.id)}"`,icon:'fa-trash',title:'Xóa kế hoạch'}]:[])])}</td></tr>`).join('');
+  return `${pageHead('Kế hoạch sản xuất & gia công','Kho theo dõi nhu cầu thành phẩm thực sự còn phải xử lý; đơn đã hoàn tất/giao hàng không quay lại danh sách lập kế hoạch.',`<button class="btn btn-primary" data-act="pf-plan-new"><i class="fa-solid fa-plus"></i>Lập kế hoạch sản xuất</button>`)}
     ${tabs}
+    <div class="grid g-auto-sm" style="margin-bottom:14px">
+      ${mkpi('Cần lập KH',needCount,'fa-triangle-exclamation','orange')}
+      ${mkpi('Đang sản xuất',runningCount,'fa-gears','blue')}
+      ${mkpi('Đã có kế hoạch',plannedCount,'fa-clipboard-check','indigo')}
+      ${mkpi('Đủ tồn',availableCount,'fa-boxes-stacked','green')}
+    </div>
     ${zero.length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--orange)"><div class="card-head"><span class="mkpi-ico t-orange"><i class="fa-solid fa-triangle-exclamation"></i></span><div><h3>${zero.length} thành phẩm đang hết tồn</h3><p>${zero.map(p=>esc(p.name)).join(' · ')}</p></div></div></div>`:''}
-    <div class="card" style="margin-bottom:14px"><div class="card-head"><div><h3>Nhu cầu từ đơn bán</h3><p>Kho lập kế hoạch khi đơn đã duyệt và tồn khả dụng không đủ đáp ứng.</p></div></div>${tableShell([{t:'Đơn hàng'},{t:'Thành phẩm / Nhu cầu'},{t:'Ngày giao'},{t:'Tình trạng'},{t:'Thao tác',cls:'right'}],demandRows,{emptyTitle:'Không có đơn bán đang chờ thành phẩm'})}</div>
-    <div class="card"><div class="card-head"><div><h3>Kế hoạch sản xuất</h3><p>Kế hoạch từ đơn bán hoặc kế hoạch nội bộ của Kho.</p></div></div>${tableShell([{t:'Kế hoạch'},{t:'Ngày lập'},{t:'Thành phẩm / SL'},{t:'Trạng thái'},{t:'Người lập'},{t:'Thao tác',cls:'right'}],rows,{emptyTitle:'Chưa có kế hoạch sản xuất'})}</div>`;
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-head"><div><h3>Nhu cầu từ đơn bán</h3><p>Mặc định chỉ hiện đơn cần xử lý. Đơn đủ tồn nhưng không cần sản xuất được ẩn để tránh nhiễu; đơn đã hoàn thành/giao hàng bị loại khỏi nguồn dữ liệu.</p></div></div>
+      <div class="toolbar"><span class="muted">Ưu tiên: cần lập KH → đang SX → đã có KH; trong cùng nhóm xếp theo ngày giao gần nhất.</span><span class="spacer"></span>
+        ${selectFilter('warehouse-production-plan','demand',[['ACTION','Cần xử lý'],['NEED_PLAN','Chưa lập đủ KH'],['IN_PRODUCTION','Đang sản xuất'],['PLANNED','Đã lập kế hoạch'],['AVAILABLE','Đủ tồn']], 'Tất cả nhu cầu')}
+      </div>
+      ${tableShell([{t:'Đơn hàng'},{t:'Thành phẩm / Nhu cầu'},{t:'Ngày giao'},{t:'Tình trạng'},{t:'Thao tác',cls:'right'}],demandRows,{emptyTitle:fDemand.demand==='ACTION'?'Không có đơn nào cần lập/theo dõi sản xuất':'Không có dữ liệu phù hợp bộ lọc'})}
+    </div>
+    <div class="card"><div class="card-head"><div><h3>Kế hoạch sản xuất</h3><p>Kế hoạch mới nhất hiển thị trước; trạng thái hoàn thành được suy ra từ các LSX liên kết.</p></div></div>
+      <div class="toolbar"><span class="spacer"></span>${selectFilter('warehouse-production-plan','planStatus',[['WAITING_APPROVAL','Chờ duyệt'],['APPROVED','Đã duyệt'],['MATERIAL_REQUESTED','Đã yêu cầu NVL'],['MATERIAL_ISSUED','Đã xuất NVL'],['RELEASED','Đã tạo LSX']], 'Tất cả trạng thái')}</div>
+      ${tableShell([{t:'Kế hoạch'},{t:'Ngày lập'},{t:'Thành phẩm / SL'},{t:'Trạng thái'},{t:'Người lập'},{t:'Thao tác',cls:'right'}],rows,{emptyTitle:'Chưa có kế hoạch sản xuất'})}
+    </div>`;
 };
-
 
 /* ========================================================================== 
  * UI34 — Hàng lỗi & hàng trả về: subtab ngang chuẩn, click dòng xem chi tiết.

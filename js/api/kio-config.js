@@ -15,11 +15,13 @@ const KIO_CONFIG = Object.freeze({
     purchaseOrders: 'lenam_purchase_orders',
     goodsReceipts: 'lenam_goods_receipts',
     supplierPayments: 'lenam_supplier_payments',
+    supplierRefunds: 'lenam_supplier_refunds',
     purchasePriceHistory: 'lenam_purchase_price_history',
     supplierEvaluations: 'lenam_supplier_evaluations',
   }),
 
   inventoryTables: Object.freeze({
+    warehouseSites: 'lenam_warehouse_sites',
     warehouses: 'lenam_warehouses',
     warehouseLocations: 'lenam_warehouse_locations',
     inventoryLots: 'lenam_inventory_lots',
@@ -49,16 +51,36 @@ const KIO_CONFIG = Object.freeze({
     customerCareLogs: 'lenam_customer_care_logs',
     crmTickets: 'lenam_crm_complaints',
     crmActivities: 'lenam_crm_activities',
+    customerPayments: 'lenam_customer_payments',
   }),
 
   // LOGISTICS & FLEET — persistence thật trên KIO; localStorage chỉ là cache.
   logisticsTables: Object.freeze({
+    vehicleTypes: 'lenam_logistics_vehicle_types',
     vehicles: 'lenam_logistics_vehicles',
     drivers: 'lenam_logistics_drivers',
     deliveries: 'lenam_logistics_deliveries',
     maintenance: 'lenam_logistics_maintenance',
   }),
 
+
+
+  // NHÀ HÀNG & CỬA HÀNG — dữ liệu nghiệp vụ thật trên KIO server.
+  restaurantTables: Object.freeze({
+    stores: 'lenam_restaurant_stores',
+    recipes: 'lenam_restaurant_recipes',
+    orders: 'lenam_restaurant_pos_orders',
+    replenishments: 'lenam_restaurant_replenishment_requests',
+    storeStocks: 'lenam_restaurant_store_stock',
+    storeStockTransactions: 'lenam_restaurant_store_stock_transactions',
+  }),
+
+  // QC/QA — hồ sơ kiểm nghiệm, CAPA, thu hồi sản phẩm.
+  qualityTables: Object.freeze({
+    coa: 'lenam_quality_inspection_records',
+    capa: 'lenam_quality_capa',
+    recalls: 'lenam_quality_product_recalls',
+  }),
 
   // AUTH / PHÂN QUYỀN / AUDIT — chỉ những actor thực sự thao tác ERP mới có tài khoản.
   systemTables: Object.freeze({

@@ -293,9 +293,25 @@ const KioStore = (() => {
   }
 
   async function insertEncoded(table, encoded) {
-    await runLimited(encoded.payloads, WRITE_CONCURRENCY, (payloadText) =>
-      writePayload('insert', table, null, payloadText)
-    );
+    // [KIO RACE FIX] Các chunk thuộc CÙNG một record phải ghi tuần tự.
+    // Nếu gửi đồng thời vào một bảng vừa được tạo, backend KIO có thể để nhiều
+    // request cùng rơi vào nhánh CREATE TABLE và phát sinh MySQL 1050
+    // "Table already exists". Ghi tuần tự vẫn giữ nguyên dữ liệu nghiệp vụ
+    // và loại bỏ race condition này.
+    for (const payloadText of encoded.payloads) {
+      try {
+        await writePayload('insert', table, null, payloadText);
+      } catch (err) {
+        // Trường hợp một client/request khác vừa tạo bảng ở đúng thời điểm này,
+        // đợi ngắn rồi thử lại đúng 1 lần. Không retry các lỗi khác.
+        if (/SQLSTATE\[42S01\]|1050|already exists/i.test(String(err?.message || err))) {
+          await new Promise(resolve => setTimeout(resolve, 180));
+          await writePayload('insert', table, null, payloadText);
+        } else {
+          throw err;
+        }
+      }
+    }
   }
 
   // [PERFORMANCE] Append-only cho dữ liệu có khóa luôn mới (đặc biệt Audit).

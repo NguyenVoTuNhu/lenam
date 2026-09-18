@@ -37,3 +37,11 @@ CREATE TABLE IF NOT EXISTS lenam_crm_activities (
   payload TEXT NOT NULL,
   PRIMARY KEY (id)
 );
+
+
+-- Lịch sử thu tiền công nợ khách hàng. Một đơn hàng có thể có nhiều lần thu.
+CREATE TABLE IF NOT EXISTS lenam_customer_payments (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  payload TEXT NOT NULL,
+  PRIMARY KEY (id)
+);
