@@ -46,6 +46,14 @@ Views.hr = function () {
   }
 
   if (
+    tab === 'reports' || tab === 'labour_cost'
+  ) {
+    return Views.hrReport
+      ? Views.hrReport(State.params)
+      : '';
+  }
+
+  if (
     tab &&
     ![
       'dashboard',
@@ -1010,8 +1018,9 @@ function hrTabHead(
 
     ['evaluations', 'Đánh giá hiệu quả'],
 
-    ['payroll', 'Tính lương']
+    ['payroll', 'Tính lương'],
 
+	['reports', 'Báo cáo quản trị']
   ];
 
   return `
@@ -2049,3 +2058,366 @@ Views.payroll = function () {
   `;
 };
 
+/* ============================================================
+ * BÁO CÁO QUẢN TRỊ
+ * ========================================================== */
+
+Views.hrReport = function () {
+
+  const emps =
+    hrEmployees();
+
+  /* --------------------------------
+   * CHI PHÍ THEO PHÒNG BAN
+   * -------------------------------- */
+
+  const byDept =
+    (DB.departments || [])
+
+      .map(dept => {
+
+        const es =
+          emps.filter(
+            e => e.dept === dept
+          );
+
+        const payroll =
+          es.reduce(
+            (n, e) =>
+              n +
+              hrPayrollRow(
+                e,
+                'time'
+              ).total,
+            0
+          );
+
+        const prod =
+          es.reduce(
+            (n, e) =>
+              n +
+              hrEmpProduction(e).done,
+            0
+          );
+
+        return {
+
+          dept,
+
+          count:
+            es.length,
+
+          payroll,
+
+          prod
+
+        };
+
+      })
+
+      .filter(
+        x => x.count
+      );
+
+
+  const totalPayroll =
+    byDept.reduce(
+      (n, x) =>
+        n + x.payroll,
+      0
+    );
+
+
+  const totalProd =
+    byDept.reduce(
+      (n, x) =>
+        n + x.prod,
+      0
+    );
+
+
+  const rows =
+    byDept.map(
+      x => `
+
+        <tr>
+
+          <td>
+            <span class="chip">
+              ${esc(x.dept)}
+            </span>
+          </td>
+
+          <td class="right num">
+            ${fmtN(x.count)}
+          </td>
+
+          <td class="right num">
+            ${fmtVND(x.payroll)}
+          </td>
+
+          <td class="right num">
+            ${fmtN(x.prod)}
+          </td>
+
+          <td class="right num">
+            ${
+              x.count
+                ? fmtVND(
+                    x.payroll /
+                    x.count
+                  )
+                : '—'
+            }
+          </td>
+
+        </tr>
+
+      `
+    );
+
+
+  /* --------------------------------
+   * CHI PHÍ THEO SẢN PHẨM
+   * -------------------------------- */
+
+  const productMap =
+    {};
+
+  hrProduction()
+    .forEach(po => {
+
+      const name =
+        po.productName ||
+        po.product ||
+        'Không xác định';
+
+      const labor =
+        (po.stages || [])
+          .reduce(
+            (n, st) => {
+
+              const e =
+                emps.find(
+                  x =>
+                    x.id ===
+                    st.leadId
+                );
+
+              if (!e) {
+                return n;
+              }
+
+              const ratio =
+                hrNum(
+                  st.qtyDone
+                ) /
+                Math.max(
+                  1,
+                  hrNum(
+                    st.qtyPlan
+                  )
+                );
+
+              return n +
+                hrPayrollRow(
+                  e,
+                  'time'
+                ).total *
+                ratio;
+
+            },
+            0
+          );
+
+      productMap[name] =
+        (
+          productMap[name] ||
+          0
+        ) +
+        labor;
+
+    });
+
+
+  const productRows =
+    Object.entries(
+      productMap
+    )
+    .map(
+      ([name, cost]) => `
+
+        <tr>
+
+          <td>
+            ${esc(name)}
+          </td>
+
+          <td class="right num">
+            ${fmtVND(cost)}
+          </td>
+
+          <td class="right num">
+            ${
+              totalPayroll
+                ? (
+                    cost /
+                    Math.max(
+                      1,
+                      totalPayroll
+                    ) *
+                    100
+                  ).toFixed(1) +
+                  '%'
+                : '—'
+            }
+          </td>
+
+        </tr>
+
+      `
+    );
+
+
+  return `
+
+    ${hrTabHead(
+      'Báo cáo quản trị nhân sự',
+      'Theo dõi năng suất lao động và chi phí nhân công theo phòng ban, sản phẩm',
+      'reports'
+    )}
+
+
+    <div
+      class="grid g-auto-sm"
+      style="margin-bottom:14px"
+    >
+
+      ${mkpi(
+        'Tổng chi phí nhân công',
+        fmtVND(totalPayroll),
+        'fa-money-bill-trend-up',
+        'indigo'
+      )}
+
+      ${mkpi(
+        'Sản lượng thực hiện',
+        fmtN(totalProd),
+        'fa-industry',
+        'green'
+      )}
+
+      ${mkpi(
+        'Phòng ban',
+        byDept.length,
+        'fa-building',
+        'blue'
+      )}
+
+      ${mkpi(
+        'Chi phí/NV bình quân',
+        fmtVND(
+          emps.length
+            ? totalPayroll /
+              emps.length
+            : 0
+        ),
+        'fa-user-tag',
+        'orange'
+      )}
+
+    </div>
+
+
+    <div class="grid g-2">
+
+
+      <!-- CHI PHÍ PHÒNG BAN -->
+
+      <div class="card">
+
+        <div class="card-head">
+
+          <div>
+
+            <h3>
+              Chi phí nhân công theo phòng ban
+            </h3>
+
+            <p>
+              So sánh quy mô nhân sự,
+              chi phí và chi phí bình quân
+            </p>
+
+          </div>
+
+        </div>
+
+        ${tableShell(
+
+          [
+            { t: 'Phòng ban' },
+            { t: 'Nhân sự', cls: 'right' },
+            { t: 'Chi phí nhân công', cls: 'right' },
+            { t: 'Sản lượng', cls: 'right' },
+            { t: 'CP/NV', cls: 'right' }
+          ],
+
+          rows,
+
+          {
+            emptyTitle:
+              'Chưa có dữ liệu'
+          }
+
+        )}
+
+      </div>
+
+
+      <!-- CHI PHÍ SẢN PHẨM -->
+
+      <div class="card">
+
+        <div class="card-head">
+
+          <div>
+
+            <h3>
+              Chi phí nhân công theo sản phẩm
+            </h3>
+
+            <p>
+              Phân bổ chi phí nhân công
+              từ các công đoạn sản xuất
+            </p>
+
+          </div>
+
+        </div>
+
+        ${tableShell(
+
+          [
+            { t: 'Sản phẩm' },
+            { t: 'Chi phí nhân công', cls: 'right' },
+            { t: 'Tỷ trọng', cls: 'right' }
+          ],
+
+          productRows,
+
+          {
+            emptyTitle:
+              'Chưa có dữ liệu sản xuất'
+          }
+
+        )}
+
+      </div>
+
+
+    </div>
+
+  `;
+
+};
