@@ -938,3 +938,15 @@ input.inp:disabled, select.inp:disabled { background: var(--surface-3); color: v
 .restaurant-pos-cart-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:12px 0;border-bottom:1px dashed var(--border)}.restaurant-pos-cart-row:last-child{border-bottom:0}.restaurant-pos-cart-row>div:first-child{display:flex;flex-direction:column;gap:3px}.restaurant-pos-cart-row span{color:var(--muted);font-size:12px}.restaurant-pos-stepper{display:flex;align-items:center;gap:8px}.restaurant-pos-stepper button{width:28px;height:28px;border:1px solid var(--border);background:var(--surface);border-radius:8px;cursor:pointer}.restaurant-pos-empty{min-height:210px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--muted);gap:8px}.restaurant-pos-empty i{font-size:40px;opacity:.35}.restaurant-pos-summary{padding:14px 16px}.restaurant-pos-summary>div{display:flex;justify-content:space-between;padding:5px 0}.restaurant-pos-summary .total{font-size:17px;border-top:1px solid var(--border);margin-top:6px;padding-top:12px}.restaurant-pos-pay{width:calc(100% - 32px);margin:0 16px 16px;justify-content:center;padding:12px}
 @media(max-width:1100px){.restaurant-pos-layout{grid-template-columns:1fr}.restaurant-pos-order{position:static}.restaurant-pos-products{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.restaurant-pos-products{grid-template-columns:1fr}.restaurant-pos-order-meta{grid-template-columns:1fr}}
+
+/* === Nhà hàng: Order / Bán hàng dùng subtab ngang === */
+.restaurant-order-tabs{display:flex;align-items:center;gap:8px;overflow-x:auto;padding:8px;background:var(--surface-2);border:1px solid var(--border);border-radius:12px;scrollbar-width:thin}
+.restaurant-order-tabs .restaurant-order-tab{display:inline-flex;align-items:center;justify-content:center;gap:7px;white-space:nowrap;min-height:38px;padding:8px 14px;border-radius:9px}
+.restaurant-order-tabs .restaurant-order-tab i{font-size:13px}
+.restaurant-order-tabs .restaurant-order-tab.active{background:var(--surface);box-shadow:0 2px 8px rgba(15,23,42,.08)}
+@media(max-width:700px){.restaurant-order-tabs{justify-content:flex-start}.restaurant-order-tabs .restaurant-order-tab{padding:8px 11px}}
+.restaurant-pos-product.is-sold-out{opacity:.58;cursor:not-allowed;background:var(--surface-2);border-style:dashed;box-shadow:none;filter:grayscale(.15)}
+.restaurant-pos-product.is-sold-out:hover{transform:none;border-color:var(--border);box-shadow:none}
+.restaurant-pos-product.is-sold-out .restaurant-pos-product-icon{color:var(--muted)}
+.restaurant-pos-stock{margin-top:4px;font-weight:600}
+.restaurant-pos-stock.out{color:var(--danger,#dc2626)!important}

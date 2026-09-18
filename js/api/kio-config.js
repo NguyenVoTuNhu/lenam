@@ -73,6 +73,7 @@ const KIO_CONFIG = Object.freeze({
     replenishments: 'lenam_restaurant_replenishment_requests',
     storeStocks: 'lenam_restaurant_store_stock',
     storeStockTransactions: 'lenam_restaurant_store_stock_transactions',
+    bankAccounts: 'lenam_restaurant_bank_accounts',
   }),
 
   // QC/QA — hồ sơ kiểm nghiệm, CAPA, thu hồi sản phẩm.
@@ -102,6 +103,9 @@ const KIO_CONFIG = Object.freeze({
     crmDemoSeed: 'lenam:kio:crm-demo-seeded:20260911-crm-tables-v1',
     logisticsCache: 'lenam_logistics_v2',
     systemCache: 'lenam:kio:system-cache:v1',
+    restaurantCache: 'lenam:kio:restaurant-cache:v1',
+    qualityCache: 'lenam:kio:quality-cache:v1',
+    globalWarmupStamp: 'lenam:kio:global-warmup:v1',
     authSession: 'lenam:auth:session:v1',
   }),
 });

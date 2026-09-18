@@ -526,7 +526,11 @@ const NAV = [
         { id: 'price_history', label: 'Lịch sử giá mua' },
         { id: 'suppliers', label: 'Nhà cung cấp' }
       ],
-      count: () => (typeof DB !== 'undefined' && DB.purchases) ? DB.purchases.filter((p) => ['mh_cho_duyet', 'PENDING_APPROVAL'].includes(p.status)).length : 0,
+      // Badge chỉ hiển thị sau khi collection purchases đã được đối chiếu server.
+      // Tránh hiện số từ cache cũ rồi biến mất vài mili giây sau.
+      count: () => (window.SidebarBadges?.isReady?.('purchases')
+        ? window.SidebarBadges.purchasePendingCount()
+        : 0),
       alert: true
     },
     {
@@ -558,12 +562,14 @@ const NAV = [
         { id: 'dashboard', label: 'Tổng quan sản xuất' },
         { id: 'orders', label: 'Lệnh sản xuất' },
         { id: 'bom', label: 'BOM / Định mức' },
-        { id: 'routing', label: 'Routing công đoạn' },
         { id: 'plan', label: 'Kế hoạch sản xuất' },
         { id: 'progress', label: 'Tiến độ sản xuất' },
         // Tạm ẩn: Nhập kho thành phẩm, Theo dõi bán thành phẩm
       ],
-      count: () => (typeof DB !== 'undefined' && DB.productionOrders) ? DB.productionOrders.filter((p) => p.status === 'lsx_dang_san_xuat').length : 0
+      // Tương tự Purchase: không dùng số từ cache sản xuất chưa xác minh.
+      count: () => (window.SidebarBadges?.isReady?.('production')
+        ? window.SidebarBadges.productionActiveCount()
+        : 0)
     },
     {
       id: 'subcontracting',
@@ -583,12 +589,9 @@ const NAV = [
       icon: 'fa-utensils',
       children: [
         { id: 'dashboard', label: 'Tổng quan' },
-        { id: 'pos', label: 'POS bán hàng' },
-        { id: 'tablet', label: 'Tablet Ordering' },
-        { id: 'qr', label: 'QR Ordering' },
-        { id: 'menu', label: 'Menu/Combo' },
-        { id: 'recipe', label: 'Recipe / BOM món' },
-        { id: 'orders', label: 'Đơn hàng' },
+        { id: 'pos', label: 'Order / Bán hàng' },
+        { id: 'kitchen', label: 'Bếp / Chế biến' },
+        { id: 'recipe', label: 'Menu / Công thức món' },
         { id: 'branches', label: 'Chi nhánh' },
         { id: 'store_stock', label: 'Tồn kho cửa hàng' },
         { id: 'replenishment', label: 'Yêu cầu bổ sung' },
@@ -678,7 +681,6 @@ const NAV = [
         { id: 'maintenance', label: 'Bảo trì xe' },
         { id: 'fleet', label: 'Danh sách xe' },
         { id: 'vehicle-types', label: 'Danh mục xe' },
-        { id: 'gps', label: 'GPS / Theo dõi xe' },
         { id: 'drivers', label: 'Danh sách tài xế' },
         { id: 'schedule', label: 'Lịch giao hàng' }
       ]
@@ -894,6 +896,13 @@ function getPageMeta() {
       navParent = item;
       if (Array.isArray(item.children)) {
         navChild = item.children.find(c => (c.tab || c.id) === tab);
+        if (!navChild) {
+          for (const childGroup of item.children) {
+            if (!Array.isArray(childGroup.children)) continue;
+            const nested = childGroup.children.find(c => (c.tab || c.id) === tab);
+            if (nested) { navChild = nested; break; }
+          }
+        }
       }
       break;
     }
@@ -977,7 +986,23 @@ function renderNav() {
   const navEl = $('#nav');
   const previousScrollTop = navEl ? navEl.scrollTop : 0;
 
-  const roleNav = NAV.map(g => ({...g, items:g.items.filter(it => Auth.canAccess(it.id, null)).map(it => ({...it, children:Array.isArray(it.children) ? it.children.filter(c => Auth.canAccess(it.id, c.tab || c.id)) : it.children}))})).filter(g => g.items.length);
+  const roleNav = NAV.map(g => ({
+    ...g,
+    items: g.items
+      .filter(it => Auth.canAccess(it.id, null))
+      .map(it => ({
+        ...it,
+        children: Array.isArray(it.children)
+          ? it.children.map(c => {
+              if (Array.isArray(c.children)) {
+                const nested = c.children.filter(nc => Auth.canAccess(it.id, nc.tab || nc.id));
+                return nested.length ? {...c, children:nested} : null;
+              }
+              return Auth.canAccess(it.id, c.tab || c.id) ? c : null;
+            }).filter(Boolean)
+          : it.children
+      }))
+  })).filter(g => g.items.length);
 
   navEl.innerHTML = roleNav.map(g => `
     <div class="nav-group">${esc(g.group)}</div>
@@ -1005,6 +1030,31 @@ function renderNav() {
 
             <div class="nav-submenu" data-submenu-content="${it.id}">
               ${it.children.map((child, idx) => {
+                if (Array.isArray(child.children) && child.children.length) {
+                  const nestedActive = isParentActive && child.children.some(nc => (nc.tab || nc.id) === curTab);
+                  return `
+                    <div class="nav-subgroup ${nestedActive ? 'active' : ''}">
+                      <div class="nav-subgroup-title"><i class="fa-solid fa-cart-shopping"></i><span>${esc(child.label)}</span></div>
+                      <div class="nav-subgroup-items">
+                        ${child.children.map(nc => {
+                          const nestedTab = nc.tab || nc.id;
+                          const isNestedActive = isParentActive && curTab === nestedTab;
+                          return `
+                            <button
+                              class="nav-subitem nav-subitem-nested ${isNestedActive ? 'active' : ''}"
+                              data-act="nav"
+                              data-id="${it.id}"
+                              data-tab="${nestedTab}"
+                              type="button">
+                              <span>${esc(nc.label)}</span>
+                            </button>
+                          `;
+                        }).join('')}
+                      </div>
+                    </div>
+                  `;
+                }
+
                 const tab = child.tab || child.id;
                 const isChildActive = isParentActive && (curTab ? curTab === tab : idx === 0);
 

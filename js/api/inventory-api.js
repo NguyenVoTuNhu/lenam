@@ -664,11 +664,9 @@ const InventoryAPI = (() => {
   async function bootstrap() {
     if (booted) return true;
     booted = true;
-    try {
-      await ensureFinishedDeliveryTestData();
-    } catch (err) {
-      console.warn('[InventoryAPI] Không thể chuẩn bị tồn thành phẩm test trên KIO:', err);
-    }
+    // Không tự tạo/đối soát dữ liệu test Logistics khi mở web.
+    // Đây là tác vụ ghi server khá nặng và không thuộc luồng tải dữ liệu thực tế.
+    // Dữ liệu test chỉ được tạo khi người dùng gọi chức năng test tương ứng.
     const cached = readCache();
 
     // [PERFORMANCE] Chỉ nạp cache/data.js ở lúc boot. Không đọc toàn bộ bảng

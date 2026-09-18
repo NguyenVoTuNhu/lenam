@@ -25,8 +25,8 @@
 DB.customerPayments = DB.customerPayments || [];
 DB.cashTransactions = DB.cashTransactions || [];   // sổ thu-chi thủ công (không phải công nợ NCC/KH)
 DB.bankAccounts = DB.bankAccounts || [
-  { id: 'BANK-01', name: 'Vietcombank – TK thanh toán chính', bankName: 'Vietcombank', accountNumber: '0071000123456', openingBalance: 850000000 },
-  { id: 'BANK-02', name: 'ACB – TK thu hộ đại lý', bankName: 'ACB', accountNumber: '9988776655', openingBalance: 120000000 },
+  { id: 'BANK-01', name: 'Vietcombank – TK thanh toán chính', bankName: 'Vietcombank', accountNumber: '0071000123456', accountName: 'CÔNG TY LÊ NAM', openingBalance: 850000000, scopeType: 'COMPANY', storeId: '', active: true, isDefault: true },
+  { id: 'BANK-02', name: 'ACB – TK thu hộ đại lý', bankName: 'ACB', accountNumber: '9988776655', accountName: 'CÔNG TY LÊ NAM', openingBalance: 120000000, scopeType: 'COMPANY', storeId: '', active: true, isDefault: false },
 ];
 DB.bankTransactions = DB.bankTransactions || [];
 DB.fixedAssets = DB.fixedAssets || [
@@ -403,11 +403,17 @@ function openCashTxForm(type) {
 
 /* ---- 2.3 Ngân hàng ---- */
 function accBankingView() {
-  const accRows = (DB.bankAccounts || []).map((b) => `<tr>
-      <td>${cell2(esc(b.name), esc(b.bankName) + ' · ' + esc(b.accountNumber))}</td>
+  const accRows = (DB.bankAccounts || []).map((b) => {
+    const store = (DB.stores || []).find(s => String(s.id) === String(b.storeId));
+    const scope = b.scopeType === 'STORE' ? (store?.name || b.storeId || 'Chi nhánh / Cửa hàng') : 'Công ty';
+    return `<tr>
+      <td>${cell2(esc(b.name), esc(b.bankName || '') + ' · ' + esc(b.accountNumber || ''))}</td>
+      <td>${esc(scope)}${b.isDefault ? '<div class="cell-sub">Tài khoản mặc định</div>' : ''}</td>
+      <td>${b.active === false ? '<span class="badge gray">Ngừng dùng</span>' : '<span class="badge green">Đang dùng</span>'}</td>
       <td class="right num strong">${fmtVND(AccFin.bankBalance(b.id))}</td>
       <td class="right"><button class="btn btn-sm" data-act="acc-bank-tx-add" data-id="${esc(b.id)}"><i class="fa-solid fa-plus"></i>Giao dịch</button></td>
-    </tr>`);
+    </tr>`;
+  });
   const txRows = (DB.bankTransactions || []).slice().sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 30)
     .map((t) => `<tr><td class="num">${fmtDate(t.date)}</td><td>${esc((DB.bankAccounts.find((b) => b.id === t.bankId) || {}).name || '—')}</td><td>${esc(t.note)}</td><td class="right num strong" style="color:${t.type === 'IN' ? 'var(--green)' : 'var(--red)'}">${t.type === 'IN' ? '+' : '−'}${fmtVND(t.amount)}</td></tr>`);
 
@@ -415,7 +421,7 @@ function accBankingView() {
     <div class="alert-item" style="margin-bottom:14px;cursor:default"><span class="alert-ico t-orange"><i class="fa-solid fa-circle-info"></i></span><div><b class="alert-title">Chưa kết nối API ngân hàng</b><div class="alert-sub">Số dư dưới đây được cập nhật thủ công theo sao kê định kỳ. Khi có API Open Banking, phần này sẽ tự đồng bộ mà không đổi cấu trúc dữ liệu.</div></div></div>
     <div class="card" style="margin-bottom:14px">
       <div class="card-head"><h3>Tài khoản ngân hàng</h3></div>
-      ${tableShell([{ t: 'Tài khoản' }, { t: 'Số dư hiện tại', cls: 'right' }, { t: '', cls: 'right' }], accRows, { emptyTitle: 'Chưa có tài khoản ngân hàng' })}
+      ${tableShell([{ t: 'Tài khoản' }, { t: 'Phạm vi sử dụng' }, { t: 'Trạng thái' }, { t: 'Số dư hiện tại', cls: 'right' }, { t: '', cls: 'right' }], accRows, { emptyTitle: 'Chưa có tài khoản ngân hàng' })}
     </div>
     <div class="card">
       <div class="card-head"><h3>Sổ phụ / Giao dịch gần đây</h3></div>
@@ -424,16 +430,25 @@ function accBankingView() {
 }
 
 function openBankAccountForm() {
+  const stores = (DB.stores || []).filter(s => s.status !== 'inactive');
   Modal.open({
     title: 'Thêm tài khoản ngân hàng',
-    body: `<div class="form-grid">
+    body: `<div class="form-grid cols-2">
         <div class="field" style="grid-column:1/-1"><label>Tên gợi nhớ <span class="req">*</span></label><input class="inp" id="bkName" placeholder="VD: Vietcombank – TK thanh toán"></div>
-        <div class="field"><label>Ngân hàng</label><input class="inp" id="bkBankName" placeholder="Vietcombank, ACB…"></div>
-        <div class="field"><label>Số tài khoản</label><input class="inp" id="bkNumber"></div>
-        <div class="field" style="grid-column:1/-1"><label>Số dư ban đầu</label><input class="inp right num" id="bkOpening" data-money="1" type="text" inputmode="numeric" min="0" step="1000" value="0"></div>
+        <div class="field"><label>Ngân hàng <span class="req">*</span></label><input class="inp" id="bkBankName" placeholder="Vietcombank, ACB…"></div>
+        <div class="field"><label>Số tài khoản <span class="req">*</span></label><input class="inp" id="bkNumber"></div>
+        <div class="field" style="grid-column:1/-1"><label>Chủ tài khoản</label><input class="inp" id="bkAccountName" placeholder="CÔNG TY TNHH ..."></div>
+        <div class="field"><label>Phạm vi sử dụng *</label><select class="inp" id="bkScope" onchange="accountingBankScopeChanged()"><option value="COMPANY">Công ty</option><option value="STORE">Chi nhánh / Cửa hàng</option></select></div>
+        <div class="field" id="bkStoreWrap" style="display:none"><label>Chi nhánh / Cửa hàng *</label><select class="inp" id="bkStore"><option value="">-- Chọn chi nhánh / cửa hàng --</option>${stores.map(st=>`<option value="${esc(st.id)}">${esc(st.name)}</option>`).join('')}</select></div>
+        <div class="field"><label>Trạng thái</label><select class="inp" id="bkActive"><option value="1">Đang sử dụng</option><option value="0">Ngừng sử dụng</option></select></div>
+        <div class="field"><label>Số dư ban đầu</label><input class="inp right num" id="bkOpening" data-money="1" type="text" inputmode="numeric" min="0" step="1000" value="0"></div>
+        <div class="field" style="grid-column:1/-1"><label class="check"><input type="checkbox" id="bkDefault"> Tài khoản mặc định trong phạm vi này</label></div>
       </div>`,
     foot: `<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="acc-bank-save"><i class="fa-solid fa-floppy-disk"></i>Lưu tài khoản</button>`,
   });
+}
+function accountingBankScopeChanged(){
+  const wrap=$('#bkStoreWrap'); if(wrap) wrap.style.display=$('#bkScope')?.value==='STORE'?'':'none';
 }
 
 function openBankTxForm(bankId) {
@@ -1339,12 +1354,35 @@ Object.assign(Actions, {
     render(); Toast.ok('Đã xóa giao dịch');
   },
 
-  'acc-bank-add': () => openBankAccountForm(),
-  'acc-bank-save': () => {
-    const name = $('#bkName')?.value.trim();
-    if (!name) { Toast.err('Thiếu tên tài khoản', 'Vui lòng nhập tên gợi nhớ cho tài khoản.'); return; }
-    DB.bankAccounts.push({ id: nextCode('BANK-', DB.bankAccounts, 2), name, bankName: $('#bkBankName')?.value.trim() || '', accountNumber: $('#bkNumber')?.value.trim() || '', openingBalance: parseMoney($('#bkOpening')?.value) || 0 });
-    Modal.close(); render(); Toast.ok('Đã thêm tài khoản ngân hàng', name);
+  'acc-bank-add': async () => {
+    try { if (typeof RestaurantQualityAPI !== 'undefined') await RestaurantQualityAPI.ensureFresh(['stores','bankAccounts'], {force:false}); } catch(err) {}
+    openBankAccountForm();
+  },
+  'acc-bank-save': async () => {
+    const name = $('#bkName')?.value.trim() || '';
+    const bankName = $('#bkBankName')?.value.trim() || '';
+    const accountNumber = $('#bkNumber')?.value.trim() || '';
+    const accountName = $('#bkAccountName')?.value.trim() || '';
+    const scopeType = $('#bkScope')?.value || 'COMPANY';
+    const storeId = scopeType === 'STORE' ? ($('#bkStore')?.value || '') : '';
+    if (!name || !bankName || !accountNumber) { Toast.err('Thiếu thông tin tài khoản', 'Tên gợi nhớ, ngân hàng và số tài khoản là bắt buộc.'); return; }
+    if (scopeType === 'STORE' && !storeId) { Toast.err('Chưa chọn chi nhánh / cửa hàng', 'Tài khoản theo chi nhánh phải được gắn với một cửa hàng cụ thể.'); return; }
+    const before = JSON.parse(JSON.stringify(DB.bankAccounts || []));
+    const isDefault = !!$('#bkDefault')?.checked;
+    if (isDefault) {
+      for (const x of DB.bankAccounts || []) {
+        if (x.scopeType === scopeType && (scopeType === 'COMPANY' || String(x.storeId) === String(storeId))) x.isDefault = false;
+      }
+    }
+    const row = { id: nextCode('BANK-', DB.bankAccounts, 2), name, bankName, accountNumber, accountName, openingBalance: parseMoney($('#bkOpening')?.value) || 0, scopeType, storeId, active: $('#bkActive')?.value !== '0', isDefault, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    DB.bankAccounts.push(row);
+    try {
+      if (typeof RestaurantQualityAPI !== 'undefined') await RestaurantQualityAPI.syncRestaurant(['bankAccounts']);
+      Modal.close(); render(); Toast.ok('Đã thêm tài khoản ngân hàng', `${name} · ${scopeType === 'STORE' ? ((DB.stores||[]).find(s=>String(s.id)===String(storeId))?.name||storeId) : 'Công ty'}`);
+    } catch (err) {
+      DB.bankAccounts = before;
+      Toast.err('Không lưu được lên server', err?.message || 'Vui lòng thử lại.');
+    }
   },
   'acc-bank-tx-add': (d) => openBankTxForm(d.id),
   'acc-bank-tx-save': (d) => {
