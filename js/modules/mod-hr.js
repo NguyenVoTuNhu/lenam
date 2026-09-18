@@ -102,10 +102,10 @@ Views.hr = function () {
   const rptDeptRows = rptByDept.map((x) => `
     <tr>
       <td><span class="chip">${esc(x.dept)}</span></td>
-      <td class="num">${fmtN(x.count)}</td>
-      <td class="num">${fmtVND(x.payroll)}</td>
-      <td class="num">${fmtN(x.prod)}</td>
-      <td class="num">${x.count ? fmtVND(x.payroll / x.count) : '—'}</td>
+      <td class="right num">${fmtN(x.count)}</td>
+      <td class="right num">${fmtVND(x.payroll)}</td>
+      <td class="right num">${fmtN(x.prod)}</td>
+      <td class="right num">${x.count ? fmtVND(x.payroll / x.count) : '—'}</td>
     </tr>`);
 
   const rptProductMap = {};
@@ -122,8 +122,8 @@ Views.hr = function () {
   const rptProductRows = Object.entries(rptProductMap).map(([name, cost]) => `
     <tr>
       <td>${esc(name)}</td>
-      <td class="num">${fmtVND(cost)}</td>
-      <td class="num">${rptTotalPayroll ? (cost / Math.max(1, rptTotalPayroll) * 100).toFixed(1) + '%' : '—'}</td>
+      <td class="right num">${fmtVND(cost)}</td>
+      <td class="right num">${rptTotalPayroll ? (cost / Math.max(1, rptTotalPayroll) * 100).toFixed(1) + '%' : '—'}</td>
     </tr>`);
 
   return `
@@ -1891,7 +1891,7 @@ Views.payroll = function () {
           ${esc(x.e.dept || '—')}
         </td>
 
-        <td class="num">
+        <td class="right num">
           ${fmtVND(x.base)}
         </td>
 
@@ -1899,7 +1899,7 @@ Views.payroll = function () {
           ${esc(x.basis)}
         </td>
 
-        <td class="num strong">
+        <td class="right num strong">
           ${fmtVND(x.total)}
         </td>
 
@@ -2030,9 +2030,9 @@ Views.payroll = function () {
           { t: 'Mã NV' },
           { t: 'Nhân sự' },
           { t: 'Phòng ban' },
-          { t: 'Lương cơ bản' },
+          { t: 'Lương cơ bản',cls: 'right'},
           { t: 'Căn cứ tính' },
-          { t: 'Thực lĩnh dự kiến' }
+          { t: 'Thực lĩnh dự kiến',cls: 'right'}
         ],
 
         rows,

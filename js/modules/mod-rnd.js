@@ -238,7 +238,7 @@ function rndDashboardView() {
     <div class="grid g-auto" style="margin-bottom:16px">${kpis}</div>
     <div class="card">
       <div class="card-head"><div><h3>Danh sách dự án</h3><p>Tổng quan giai đoạn, chi phí và thời gian phát triển</p></div></div>
-      ${tableShell([{ t: 'Mã dự án' }, { t: 'Tên dự án' }, { t: 'Phụ trách' }, { t: 'Giai đoạn' }, { t: 'Trạng thái' }, { t: 'Chi phí' }, { t: 'Thời gian' }], rows, { emptyTitle: 'Chưa có dự án R&D' })}
+      ${tableShell([{ t: 'Mã dự án' }, { t: 'Tên dự án' }, { t: 'Phụ trách' }, { t: 'Giai đoạn' }, { t: 'Trạng thái' }, { t: 'Chi phí',cls: 'right'}, { t: 'Thời gian',cls: 'right'}], rows, { emptyTitle: 'Chưa có dự án R&D' })}
     </div>`;
 }
 
@@ -308,7 +308,7 @@ function rndFormulaViewTab() {
     ${pageHead('Công thức thử nghiệm', 'Mỗi công thức có thể có nhiều phiên bản trong quá trình nghiên cứu', '<button class="btn btn-primary btn-sm" data-act="rnd-formula-new"><i class="fa-solid fa-plus"></i>Công thức mới</button>')}
     <div class="card">
       <div class="toolbar">${searchBox('rndFormula', 'Tìm theo mã hoặc tên công thức…')}</div>
-      ${tableShell([{ t: 'Mã CT' }, { t: 'Tên công thức' }, { t: 'Phiên bản hiện tại' }, { t: 'Trạng thái' }, { t: 'Giá thành/đv' }, { t: 'Điểm cảm quan' }, { t: '', w: '110px' }], rows, { emptyTitle: 'Chưa có công thức nào' })}
+      ${tableShell([{ t: 'Mã CT' }, { t: 'Tên công thức' }, { t: 'Phiên bản hiện tại' }, { t: 'Trạng thái' }, { t: 'Giá thành/đv',cls: 'right'}, { t: 'Điểm cảm quan',cls: 'right'}, { t: '', w: '110px' }], rows, { emptyTitle: 'Chưa có công thức nào' })}
     </div>`;
 }
 
@@ -342,7 +342,7 @@ function rndVersionsViewTab() {
         ${selectFilter('rndVersions', 'formulaId', DB.rndFormulas.map((x) => [x.id, x.id + ' — ' + x.name]), 'Tất cả công thức')}
         ${selectFilter('rndVersions', 'status', Object.entries(RND_VERSION_STATUS).map(([k, v]) => [k, v.label]), 'Tất cả trạng thái')}
       </div>
-      ${tableShell([{ t: 'Mã PB' }, { t: 'Công thức' }, { t: 'Ngày' }, { t: 'Người thực hiện' }, { t: 'Sản lượng mẻ' }, { t: 'Giá thành/đv' }, { t: 'Cảm quan' }, { t: 'Trạng thái' }, { t: '', w: '60px' }], rows, { emptyTitle: 'Chưa có phiên bản công thức' })}
+      ${tableShell([{ t: 'Mã PB' }, { t: 'Công thức' }, { t: 'Ngày' }, { t: 'Người thực hiện' }, { t: 'Sản lượng mẻ',cls: 'right'}, { t: 'Giá thành/đv',cls: 'right'}, { t: 'Cảm quan',cls: 'right'}, { t: 'Trạng thái' }, { t: '', w: '60px' }], rows, { emptyTitle: 'Chưa có phiên bản công thức' })}
     </div>`;
 }
 
@@ -375,7 +375,7 @@ function rndTrialsViewTab() {
         ${selectFilter('rndTrials', 'projectId', DB.rndProjects.map((p) => [p.id, p.id + ' — ' + p.name]), 'Tất cả dự án')}
         ${selectFilter('rndTrials', 'result', Object.entries(RND_TRIAL_RESULT).map(([k, v]) => [k, v.label]), 'Tất cả kết quả')}
       </div>
-      ${tableShell([{ t: 'Mã TN' }, { t: 'Dự án / Phiên bản' }, { t: 'Ngày' }, { t: 'Số lượng mẻ' }, { t: 'Kết quả' }, { t: 'Cảm quan' }, { t: 'Chi phí thực tế' }, { t: 'Người thử' }], rows, { emptyTitle: 'Chưa có thử nghiệm nào' })}
+      ${tableShell([{ t: 'Mã TN' }, { t: 'Dự án / Phiên bản' }, { t: 'Ngày' }, { t: 'Số lượng mẻ',cls: 'right'}, { t: 'Kết quả' }, { t: 'Cảm quan',cls: 'right'}, { t: 'Chi phí thực tế',cls: 'right'}, { t: 'Người thử' }], rows, { emptyTitle: 'Chưa có thử nghiệm nào' })}
     </div>`;
 }
 
@@ -411,7 +411,7 @@ function rndCostsViewTab() {
         ${selectFilter('rndCosts', 'projectId', DB.rndProjects.map((p) => [p.id, p.id + ' — ' + p.name]), 'Tất cả dự án')}
         ${selectFilter('rndCosts', 'category', RND_COST_CATEGORIES.map((c) => [c, c]), 'Tất cả loại chi phí')}
       </div>
-      ${tableShell([{ t: 'Mã CP' }, { t: 'Dự án' }, { t: 'Ngày' }, { t: 'Loại chi phí' }, { t: 'Số tiền' }, { t: 'Ghi chú' }, { t: 'Người ghi nhận' }], rows, { emptyTitle: 'Chưa có chi phí nào được ghi nhận' })}
+      ${tableShell([{ t: 'Mã CP' }, { t: 'Dự án' }, { t: 'Ngày' }, { t: 'Loại chi phí' }, { t: 'Số tiền',cls: 'right'}, { t: 'Ghi chú' }, { t: 'Người ghi nhận' }], rows, { emptyTitle: 'Chưa có chi phí nào được ghi nhận' })}
     </div>`;
 }
 
@@ -519,7 +519,7 @@ function rndReportsViewTab() {
 
     <div class="card" style="margin-bottom:16px">
       <div class="card-head"><div><h3>Giá thành & thời gian phát triển theo dự án</h3><p>So sánh ngân sách với chi phí thực tế đã ghi nhận</p></div></div>
-      ${tableShell([{ t: 'Mã dự án' }, { t: 'Tên dự án' }, { t: 'Trạng thái' }, { t: 'Thời gian' }, { t: 'Ngân sách' }, { t: 'Chi phí thực tế' }, { t: '% Ngân sách' }], projectRows)}
+      ${tableShell([{ t: 'Mã dự án' }, { t: 'Tên dự án' }, { t: 'Trạng thái' }, { t: 'Thời gian',cls: 'right'}, { t: 'Ngân sách',cls: 'right'}, { t: 'Chi phí thực tế',cls: 'right'}, { t: '% Ngân sách',cls: 'right'}], projectRows)}
     </div>
 
     <div class="card">
@@ -527,6 +527,6 @@ function rndReportsViewTab() {
         <div><h3>So sánh phiên bản công thức</h3><p>Chọn công thức để so sánh giá thành, sản lượng và điểm cảm quan giữa các phiên bản</p></div>
         <div class="right">${selectFilter('rndCompareFormula', 'id', DB.rndFormulas.map((x) => [x.id, x.id + ' — ' + x.name]), '-- Chọn công thức --')}</div>
       </div>
-      ${tableShell([{ t: 'Phiên bản' }, { t: 'Ngày' }, { t: 'Sản lượng mẻ' }, { t: 'Giá thành/đv' }, { t: 'Điểm cảm quan' }, { t: 'Trạng thái' }], compareRows, { emptyTitle: 'Công thức này chưa có phiên bản nào' })}
+      ${tableShell([{ t: 'Phiên bản' }, { t: 'Ngày' }, { t: 'Sản lượng mẻ' }, { t: 'Giá thành/đv',cls: 'right'}, { t: 'Điểm cảm quan',cls: 'right'}, { t: 'Trạng thái' }], compareRows, { emptyTitle: 'Công thức này chưa có phiên bản nào' })}
     </div>`;
 }
