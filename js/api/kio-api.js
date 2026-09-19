@@ -35,7 +35,7 @@ const KioStore = (() => {
   // [PERFORMANCE] Cache kết quả đọc vật lý theo bảng trong một khoảng ngắn.
   // Nhiều màn hình có thể cần cùng một bảng (ví dụ inventory/products/customers);
   // không gọi lại list.php nếu vừa đọc xong. Cache bị vô hiệu ngay khi có ghi/xóa.
-  const ROW_CACHE_TTL = 60 * 1000;
+  const ROW_CACHE_TTL = 5 * 60 * 1000;
   const rowCache = new Map();
   const rowInflight = new Map();
 
@@ -229,8 +229,8 @@ const KioStore = (() => {
     return groups;
   }
 
-  async function listCollection(table) {
-    const rows = await listRows(table);
+  async function listCollection(table, opts = {}) {
+    const rows = await listRows(table, opts);
     const groups = groupRemoteRows(rows);
     return [...groups.values()].map(g => g.data).filter(Boolean);
   }
